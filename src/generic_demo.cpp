@@ -5,6 +5,7 @@
 #include "generic_publisher_subscriber.hpp"
 #include "data_types.hpp"
 
+#include <sys/wait.h>
 #include <iostream>
 #include <random>
 #include <csignal>
@@ -12,13 +13,103 @@
 #include <spdlog/spdlog.h>
 #include <cpptrace/cpptrace.hpp>
 
-// 自定义信号处理函数
-void signal_handler(int signal_number) {
-    // 使用 cpptrace 获取并打印堆栈跟踪
-    cpptrace::generate_trace().print();
+// 在信号处理器中被调用的函数，用于启动追踪程序
+void do_signal_safe_trace(cpptrace::frame_ptr* buffer, std::size_t count) {
+    // 1. 创建管道和子进程
+    int pipe_fd[2];;
+    if (pipe(pipe_fd) == -1) {
+        return;
+    }
+
+    const pid_t pid = fork();
+    if (pid == -1) {
+        const char* fork_failure_message = "fork() failed\n";
+        write(STDERR_FILENO, fork_failure_message, strlen(fork_failure_message));
+        return;
+    }
+
+    if (pid == 0) { // 子进程
+        // 2. 将管道的读端重定向到标准输入，然后执行追踪程序
+        dup2(pipe_fd[0], STDIN_FILENO);
+        close(pipe_fd[0]);
+        close(pipe_fd[1]);
+        // "tracer" 是我们编译的追踪程序的可执行文件名
+        execl("./signal_tracer", "signal_tracer", nullptr);
+        // 如果 execl 失败
+        const char* exec_failure_message = "exec(tracer) failed: 确保 tracer 可执行文件在当前目录\n";
+        write(STDERR_FILENO, exec_failure_message, strlen(exec_failure_message));
+        _exit(1);
+    }
+
+    // 父进程
+    // 3. 将堆栈信息写入管道
+    close(pipe_fd[0]);
+    for (std::size_t i = 0; i < count; i++) {
+        cpptrace::safe_object_frame frame;
+        cpptrace::get_safe_object_frame(buffer[i], &frame);
+        write(pipe_fd[1], &frame, sizeof(frame));
+    }
+    close(pipe_fd[1]);
+
+    // 4. 等待子进程结束
+    waitpid(pid, nullptr, 0);
+}
+
+// 信号处理器
+void signal_handler(int signo, siginfo_t* info, void* context) {
+    const char* message;
+    switch (signo) {
+        case SIGSEGV:
+            message = "FATAL: Segmentation fault (SIGSEGV)\n";
+            break;
+        case SIGABRT:
+            message = "FATAL: Abort (SIGABRT)\n";
+            break;
+        case SIGFPE:
+            message = "FATAL: Floating point exception (SIGFPE)\n";
+            break;
+        default:
+            message = "FATAL: Unexpected signal\n";
+            break;
+    }
+    write(STDERR_FILENO, message, strlen(message));
+
+    // 获取原始堆栈信息
+    constexpr std::size_t max_frames = 100;
+    cpptrace::frame_ptr buffer[max_frames];
+    std::size_t frame_count = cpptrace::safe_generate_raw_trace(buffer, max_frames);
+
+    // 调用追踪函数
+    do_signal_safe_trace(buffer, frame_count);
     
-    // 退出程序
-    std::_Exit(EXIT_FAILURE);
+    // 恢复默认处理并重新引发信号，以便生成 coredump (如果系统配置允许)
+    signal(signo, SIG_DFL);
+    raise(signo);
+}
+
+// 预热 cpptrace 函数，确保在信号处理器中不会发生动态加载
+void warmup_cpptrace() {
+    if (!cpptrace::can_signal_safe_unwind() || !cpptrace::can_get_safe_object_frame()) {
+        std::cerr << "Signal-safe tracing not supported on this system" << std::endl;
+        return;
+    }
+    cpptrace::frame_ptr buffer[1];
+    cpptrace::safe_generate_raw_trace(buffer, 1);
+    cpptrace::safe_object_frame frame;
+    cpptrace::get_safe_object_frame(buffer[0], &frame);
+}
+
+// 安装信号处理器
+void InstallFailureSignalHandler() {
+    struct sigaction action = {};
+    action.sa_sigaction = &signal_handler;
+    action.sa_flags = SA_RESETHAND | SA_SIGINFO;
+
+    // 注册我们关心的信号
+    sigaction(SIGSEGV, &action, nullptr);
+    sigaction(SIGABRT, &action, nullptr);
+    sigaction(SIGFPE, &action, nullptr);
+    sigaction(SIGILL, &action, nullptr);
 }
 
 // Generator function for PointCloud messages
@@ -89,14 +180,8 @@ Image generate_image(uint32_t seq) {
 int main() {
     using namespace iox2;
 
-    // 注册信号处理函数，捕获常见的会导致程序崩溃的信号
-    std::signal(SIGSEGV, signal_handler); // 非法内存访问
-    std::signal(SIGABRT, signal_handler); // 中止信号（例如 assert 失败或调用 abort()）
-    std::signal(SIGFPE, signal_handler);  // 浮点异常
-    std::signal(SIGILL, signal_handler);  // 非法指令
-
-    cpptrace::register_terminate_handler();
-    // cpptrace::register_signal_handler();
+    warmup_cpptrace();
+    InstallFailureSignalHandler();
 
     // Initialize node
     auto node = std::make_shared<iox2::Node<iox2::ServiceType::Ipc>>(
@@ -175,15 +260,16 @@ int main() {
               << ", Received=" << img_subscriber.get_received_count() << std::endl;
 
     // 下面是一个故意制造崩溃的例子
-    int* ptr = nullptr;
-    *ptr = 42; // 这将会触发 SIGSEGV
+    // int* ptr = nullptr;
+    // *ptr = 42; // 这将会触发 SIGSEGV
 
     // Demonstrate single-shot publishing/receiving
     std::cout << "\nDemonstrating single-shot operations..." << std::endl;
 
-    // Create single message and publish
     auto single_cloud = generate_point_cloud(10);
     std::cout << "single_cloud: " << single_cloud.num_points << std::endl;
+    std::cout << "Publisher state before publish: " 
+              << (pc_publisher.is_running() ? "running" : "stopped") << std::endl;
     bool success = pc_publisher.publish(single_cloud);
     std::cout << "Single publish result: " << (success ? "success" : "failed") << std::endl;
 

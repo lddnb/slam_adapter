@@ -5,6 +5,7 @@ project(slam_adapter LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_BUILD_TYPE RelWithDebInfo)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(iceoryx2-cmake-modules REQUIRED)
 
@@ -35,6 +36,9 @@ find_package(cpptrace REQUIRED)
 add_executable(generic_demo src/generic_demo.cpp)
 target_include_directories(generic_demo PRIVATE include)
 target_link_libraries(generic_demo iceoryx2-cxx::static-lib-cxx spdlog::spdlog cpptrace::cpptrace)
+
+add_executable(signal_tracer src/signal_tracer.cpp)
+target_link_libraries(signal_tracer cpptrace::cpptrace)
 
 # Installation
 # install(TARGETS
