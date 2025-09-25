@@ -50,3 +50,16 @@ target_link_libraries(signal_tracer cpptrace::cpptrace)
 #     generic_responder
 #     generic_requester
 #     DESTINATION bin)
+
+# ===================================================================
+# Unit Testing with Catch2
+# ===================================================================
+option(BUILD_TESTS "Build the unit tests for slam_adapter" ON)
+
+if(BUILD_TESTS)
+  add_definitions(-DBUILD_TESTS)
+  find_package(Catch2 REQUIRED)
+
+  enable_testing()
+  add_subdirectory(tests)
+endif()

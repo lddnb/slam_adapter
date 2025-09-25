@@ -96,24 +96,23 @@ public:
 
     // Publish a single message immediately (non-threaded mode)
     bool publish(const MessageType& message) {
-        try {
-            auto sample = publisher_->loan_uninit().expect("acquire sample");
-            auto initialized_sample = sample.write_payload(MessageType(message));
-            iox2::send(std::move(initialized_sample)).expect("send successful");
-
-            uint32_t seq = ++seq_counter_;
-
-            // Notify callback if set
-            std::lock_guard<std::mutex> lock(callback_mutex_);
-            if (publish_callback_) {
-                publish_callback_(seq, message);
-            }
-
-            return true;
-        } catch (const std::exception& e) {
-            std::cerr << "Publish error: " << e.what() << std::endl;
-            return false;
+        if (!publisher_.has_value()) {
+            throw std::runtime_error("Publisher service not initialized!");
         }
+
+        auto sample = publisher_->loan_uninit().expect("acquire sample");
+        auto initialized_sample = sample.write_payload(MessageType(message));
+        iox2::send(std::move(initialized_sample)).expect("send successful");
+
+        uint32_t seq = ++seq_counter_;
+
+        // Notify callback if set
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        if (publish_callback_) {
+            publish_callback_(seq, message);
+        }
+
+        return true;
     }
 
 protected:
@@ -151,15 +150,16 @@ private:
         uint32_t seq = ++seq_counter_;
         auto message = message_generator_(seq);
 
+        {
+            std::lock_guard<std::mutex> callback_lock(callback_mutex_);
+            if (publish_callback_) {
+                publish_callback_(seq, message);
+            }
+        }
+
         auto sample = publisher_->loan_uninit().expect("acquire sample");
         auto initialized_sample = sample.write_payload(std::move(message));
         iox2::send(std::move(initialized_sample)).expect("send successful");
-
-        // Notify callback if set
-        std::lock_guard<std::mutex> callback_lock(callback_mutex_);
-        if (publish_callback_) {
-            publish_callback_(seq, message);
-        }
     }
 
     std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node_;

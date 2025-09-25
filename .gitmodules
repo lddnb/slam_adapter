@@ -1,0 +1,3 @@
+[submodule "thirdparty/iceoryx2"]
+	path = thirdparty/iceoryx2
+	url = https://github.com/eclipse-iceoryx/iceoryx2.git
