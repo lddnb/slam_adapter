@@ -89,7 +89,10 @@ RUN apt-get update && \
     libeigen3-dev \
     libceres-dev \
     libfmt-dev \
+    zstd \
     libzstd-dev \
+    lz4 \
+    liblz4-dev \
     libdwarf-dev \
     python3-pip \
     libspdlog-dev
@@ -109,6 +112,20 @@ RUN cd /tmp && git clone https://github.com/jeremy-rifkin/cpptrace.git && \
     mkdir build && \
     cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release -DCPPTRACE_UNWIND_WITH_LIBUNWIND=ON && \
+    make -j && \
+    make install
+
+# RUN cd /tmp && git clone https://github.com/olympus-robotics/mcap_builder.git && \
+#     cd mcap_builder && \
+#     mkdir build && \
+#     cd build && \
+#     cmake .. -DCMAKE_BUILD_TYPE=Release && \
+#     make -j && \
+#     make install
+
+RUN cd /tmp && git clone https://github.com/google/flatbuffers.git && \
+    cd flatbuffers && \
+    cmake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release && \
     make -j && \
     make install
 

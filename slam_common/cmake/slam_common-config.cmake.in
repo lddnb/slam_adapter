@@ -1,0 +1,26 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Find dependencies with proper error handling
+find_dependency(iceoryx2-cmake-modules)
+include(Iceoryx2PlatformSettings)
+find_dependency(iceoryx2-cxx)
+find_dependency(spdlog)
+find_dependency(cpptrace)
+find_dependency(flatbuffers)
+
+# Include the targets
+include("${CMAKE_CURRENT_LIST_DIR}/slam_common-targets.cmake")
+
+# Set convenience variables
+set(slam_common_LIBRARIES slam_common::slam_common)
+set(slam_common_INCLUDE_DIRS "${PACKAGE_PREFIX_DIR}/include/slam_common")
+
+# Add FlatBuffers generated headers to include dirs if they exist
+set(slam_common_FBS_INCLUDE_DIR "${PACKAGE_PREFIX_DIR}/include/fbs")
+if(EXISTS "${slam_common_FBS_INCLUDE_DIR}")
+    list(APPEND slam_common_INCLUDE_DIRS "${slam_common_FBS_INCLUDE_DIR}")
+endif()
+
+check_required_components(slam_common)

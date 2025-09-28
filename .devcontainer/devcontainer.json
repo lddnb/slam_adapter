@@ -43,7 +43,8 @@
           "--compile-commands-dir=/home/ubuntu/${localWorkspaceFolderBasename}/build"
         ],
         "clangd.checkUpdates": true,
-        // "clang-format.language.apex.style": "/home/ubuntu/ros_ws/src/optimization_learning/.clang-format",
+        "clangd.fallbackFlags": ["-std=c++20"],
+        "clang-format.language.apex.style": "/home/ubuntu/${localWorkspaceFolderBasename}/.clang-format",
         "doxdocgen.generic.authorName": "lddnb",
         "doxdocgen.generic.authorEmail": "lz750126471@gmail.com"
       }

@@ -1,19 +1,24 @@
-include(CTest)
-# Create the test executable
-add_executable(slam_adapter_tests
-    sample_test.cpp
-)
-target_link_libraries(slam_adapter_tests PRIVATE Catch2::Catch2WithMain)
-add_test(NAME slam_adapter_tests COMMAND slam_adapter_tests)
+cmake_minimum_required(VERSION 3.22)
+project(slam_test LANGUAGES CXX)
 
+# Set C++ standard
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_BUILD_TYPE RelWithDebInfo)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_executable(signal_handler_test
-    signal_handler_test.cpp
-)
-target_include_directories(signal_handler_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
-target_link_libraries(signal_handler_test PRIVATE cpptrace::cpptrace)
-add_test(NAME signal_handler_test COMMAND signal_handler_test)
-set_tests_properties(signal_handler_test PROPERTIES
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-    WILL_FAIL true
-)
+list(APPEND CMAKE_PREFIX_PATH "../slam_common/install")
+
+find_package(slam_common REQUIRED)
+
+# ===================================================================
+# Unit Testing with Catch2
+# ===================================================================
+option(BUILD_TESTS "Build the unit tests for slam_adapter" ON)
+
+if(BUILD_TESTS)
+  find_package(Catch2 REQUIRED)
+
+  enable_testing()
+  add_subdirectory(src)
+endif()

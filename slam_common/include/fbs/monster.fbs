@@ -1,0 +1,10 @@
+// monster.fbs
+namespace MyGame.Sample;
+
+table Monster {
+  id:int;
+  name:string;
+  inventory:[ubyte];
+}
+
+root_type Monster;
