@@ -1,0 +1,84 @@
+// slam_data.fbs - SLAM 数据类型 FlatBuffers Schema
+namespace SlamData;
+
+// ============ 像素格式枚举 ============
+enum PixelFormat : byte {
+    Unknown = 0,
+    RGB8 = 1,
+    BGR8 = 2,
+    GRAY8 = 3,
+    BGRA8 = 4
+}
+
+// ============ 图像格式 ============
+table ImageFormat {
+    width: uint32;
+    height: uint32;
+    stride: uint32;
+    pixel_format: PixelFormat;
+}
+
+// ============ 图像消息 ============
+table ImageMsg {
+    timestamp: uint64;
+    seq: uint32;
+    format: ImageFormat;
+    data: [ubyte];  // 动态大小的像素数据
+}
+
+// ============ 点云消息（SoA 布局 - PointIT 类型）============
+table PointCloudITMsg {
+    timestamp: uint64;
+    seq: uint32;
+    num_points: uint32;
+
+    // SoA 布局：每个属性一个数组
+    x: [float];
+    y: [float];
+    z: [float];
+    intensity: [float];
+    timestamps: [uint64];  // 每个点的时间戳
+}
+
+// ============ 带颜色的点云（PointRGB）============
+table PointCloudRGBMsg {
+    timestamp: uint64;
+    seq: uint32;
+    num_points: uint32;
+
+    // 位置
+    x: [float];
+    y: [float];
+    z: [float];
+
+    // 颜色
+    r: [ubyte];
+    g: [ubyte];
+    b: [ubyte];
+}
+
+// ============ 带颜色和强度的点云（PointRGBIT）============
+table PointCloudRGBITMsg {
+    timestamp: uint64;
+    seq: uint32;
+    num_points: uint32;
+
+    // 位置
+    x: [float];
+    y: [float];
+    z: [float];
+
+    // 颜色
+    r: [ubyte];
+    g: [ubyte];
+    b: [ubyte];
+
+    // 强度和时间戳
+    intensity: [float];
+    timestamps: [uint64];
+}
+
+root_type ImageMsg;
+root_type PointCloudITMsg;
+root_type PointCloudRGBMsg;
+root_type PointCloudRGBITMsg;

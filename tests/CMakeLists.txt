@@ -10,6 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 list(APPEND CMAKE_PREFIX_PATH "../slam_common/install")
 
 find_package(slam_common REQUIRED)
+find_package(OpenCV REQUIRED)
 
 # ===================================================================
 # Unit Testing with Catch2

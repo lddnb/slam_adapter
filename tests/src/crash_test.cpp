@@ -88,13 +88,6 @@ int main(int argc, char* argv[])
 
     spdlog::set_default_logger(logger);
 
-    // 首先检查系统支持
-    if (!ms_slam::slam_common::SlamCrashLogger::check_system_support()) {
-        spdlog::error("❌ System doesn't support signal-safe unwinding!");
-        return 1;
-    }
-    spdlog::info("✅ System supports signal-safe unwinding");
-
     spdlog::info("Starting SLAM test");
 
     if (!SLAM_CRASH_LOGGER_INIT(logger)) {

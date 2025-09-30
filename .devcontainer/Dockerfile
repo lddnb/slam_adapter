@@ -95,7 +95,8 @@ RUN apt-get update && \
     liblz4-dev \
     libdwarf-dev \
     python3-pip \
-    libspdlog-dev
+    libspdlog-dev \
+    libopencv-dev
 
 # 清除apt缓存
 RUN apt autoremove -y \
