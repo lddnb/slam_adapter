@@ -17,6 +17,10 @@ add_executable(generic_pubsub_test generic_pubsub_test.cpp)
 target_link_libraries(generic_pubsub_test PRIVATE slam_common::slam_common ${OpenCV_LIBS})
 target_include_directories(generic_pubsub_test PRIVATE ${OpenCV_INCLUDE_DIRS})
 
+add_executable(raw_pub_sub_test raw_pub_sub_test.cpp)
+target_link_libraries(raw_pub_sub_test PRIVATE slam_common::slam_common ${OpenCV_LIBS})
+target_include_directories(raw_pub_sub_test PRIVATE ${OpenCV_INCLUDE_DIRS})
+
 include(CTest)
 # Create the test executable
 add_executable(slam_adapter_tests

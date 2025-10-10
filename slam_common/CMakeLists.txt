@@ -42,16 +42,24 @@ foreach(ABS_FIL ${ALL_FBS})
   get_filename_component(DIR ${REL_FIL} DIRECTORY)
   get_filename_component(FIL_WE ${REL_FIL} NAME_WE)
 
-  list(APPEND ALL_FBS_HDRS "${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_generated.h")
-
-  add_custom_command(
-    OUTPUT ${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_generated.h
-    COMMAND  flatc --cpp -o ${PROJECT_BINARY_DIR}/${DIR} ${ABS_FIL}
-    DEPENDS ${ABS_FIL}
-    COMMENT "Running C++ flatbuffers compiler on ${ABS_FIL}"
+  # 生成两个头文件: *_generated.h 和 *_bfbs_generated.h
+  list(APPEND ALL_FBS_HDRS
+    "${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_generated.h"
+    "${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_bfbs_generated.h"
   )
-  message("fbs source = ${ABS_FIL}" )
-  message("fbs output = ${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_generated.h" )
+
+  # 使用 --bfbs-gen-embed 生成嵌入式binary schema
+  add_custom_command(
+    OUTPUT
+      ${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_generated.h
+      ${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_bfbs_generated.h
+    COMMAND flatc --cpp --bfbs-gen-embed -o ${PROJECT_BINARY_DIR}/${DIR} ${ABS_FIL}
+    DEPENDS ${ABS_FIL}
+    COMMENT "Running C++ flatbuffers compiler with --bfbs-gen-embed on ${ABS_FIL}"
+  )
+  message("fbs source = ${ABS_FIL}")
+  message("fbs output = ${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_generated.h")
+  message("fbs bfbs   = ${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_bfbs_generated.h")
 endforeach()
 
 # Create a custom target for flatbuffers generation
@@ -125,12 +133,10 @@ install(DIRECTORY include/slam_common
 )
 
 # Install generated FlatBuffers headers
-if(EXISTS ${PROJECT_BINARY_DIR}/include/fbs)
-    install(DIRECTORY ${PROJECT_BINARY_DIR}/include/fbs
-        DESTINATION include
-        FILES_MATCHING PATTERN "*.h"
-    )
-endif()
+install(DIRECTORY ${PROJECT_BINARY_DIR}/include/fbs
+    DESTINATION include
+    FILES_MATCHING PATTERN "*.h"
+)
 
 # Export configuration
 install(EXPORT slam_common-targets

@@ -120,6 +120,45 @@ class GenericFlatBufferPublisher
         }
     }
 
+    /// 直接发布已序列化的字节流 (零拷贝，用于Foxglove FlatBuffers消息)
+    /// @param data 指向已序列化FlatBuffers数据的指针
+    /// @param size 数据大小（字节）
+    /// @return 发布成功返回true，否则返回false
+    bool publish_raw(const uint8_t* data, size_t size)
+    {
+        if (!publisher_.has_value()) {
+            throw std::runtime_error("GenericFlatBuffer Publisher service not initialized!");
+        }
+
+        try {
+            // 分配动态大小的共享内存
+            auto sample = publisher_->loan_slice_uninit(size).expect("acquire sample");
+
+            // 使用 write_from_fn 初始化数据
+            auto initialized_sample = sample.write_from_fn([data](uint64_t idx) {
+                return data[idx];
+            });
+
+            // 发送
+            iox2::send(std::move(initialized_sample)).expect("send successful");
+
+            ++seq_counter_;
+
+            return true;
+        } catch (const std::exception& e) {
+            std::cerr << "GenericFlatBuffer publish_raw error: " << e.what() << std::endl;
+            return false;
+        }
+    }
+
+    /// 从 FlatBufferBuilder 直接发布（零拷贝）
+    /// @param fbb FlatBufferBuilder对象
+    /// @return 发布成功返回true，否则返回false
+    bool publish_from_builder(flatbuffers::FlatBufferBuilder& fbb)
+    {
+        return publish_raw(fbb.GetBufferPointer(), fbb.GetSize());
+    }
+
     uint32_t get_published_count() const { return seq_counter_.load(); }
     bool is_ready() const { return publisher_.has_value(); }
 

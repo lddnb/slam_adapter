@@ -1,0 +1,20 @@
+include "Vector3.fbs";
+include "Time.fbs";
+
+namespace foxglove;
+
+table Imu {
+  // Timestamp of IMU data
+  timestamp:Time (id: 0);
+
+  // Frame of reference
+  frame_id:string (id: 1);
+
+  // Angular velocity in rad/s
+  angular_velocity:foxglove.Vector3 (id: 2);
+
+  // Linear acceleration in m/s^2
+  linear_acceleration:foxglove.Vector3 (id: 3);
+}
+
+root_type Imu;

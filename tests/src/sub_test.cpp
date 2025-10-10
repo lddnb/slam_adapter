@@ -1,5 +1,5 @@
 #include "slam_common/generic_flatbuffer_pubsub.hpp"
-#include "slam_common/flatbuffer_serializer.hpp"
+#include "slam_common/foxglove_messages.hpp"
 #include <slam_common/slam_crash_logger.hpp>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/basic_file_sink.h>
@@ -9,26 +9,10 @@
 
 using namespace ms_slam::slam_common;
 
-cv::Mat image_to_opencv_mat(const Image& img)
+cv::Mat image_to_opencv_mat(const foxglove::CompressedImage& img)
 {
-    int cv_type;
-    switch (img.format.pixel_format) {
-        case PIXEL_FORMAT_GRAY8:
-            cv_type = CV_8UC1;
-            break;
-        case PIXEL_FORMAT_RGB8:
-        case PIXEL_FORMAT_BGR8:
-            cv_type = CV_8UC3;
-            break;
-        case PIXEL_FORMAT_BGRA8:
-            cv_type = CV_8UC4;
-            break;
-        default:
-            throw std::runtime_error("Unsupported pixel format");
-    }
-
-    cv::Mat mat(img.format.height, img.format.width, cv_type);
-    std::memcpy(mat.data, img.data.data(), img.data.size());
+    cv::Mat mat(1837, 1377, CV_8UC3);
+    std::memcpy(mat.data, img.data(), img.data()->size());
 
     return mat;
 }
@@ -63,13 +47,18 @@ int main()
     std::cout << "Creating generic publishers and subscribers..." << std::endl;
 
     std::atomic<int> received_count{0};
-    auto callback = [&received_count](const Image& image) {
+    auto callback = [&received_count](const FoxgloveCompressedImage& img_wrapper) {
         received_count++;
-        spdlog::info("✓ [Non-threaded] Received Image #{}: seq={}, size={}x{}, {} bytes",
-                    received_count.load(), image.seq,
-                    image.format.width, image.format.height, image.data.size());
-        cv::Mat mat = image_to_opencv_mat(image);
-        std::string filename = "received_image.png";
+
+        const foxglove::CompressedImage* img = img_wrapper.get();
+        spdlog::info("✓ [Non-threaded] Received Image #{}: format={}, {} bytes",
+                    received_count.load(), img->format()->c_str(), img->data()->size());
+        // cv::Mat mat = image_to_opencv_mat(*img);
+        std::vector<uint8_t> buffer(img->data()->begin(), img->data()->end());
+        cv::Mat mat = cv::imdecode(buffer, cv::IMREAD_COLOR);
+        spdlog::info(" mat size: {}x{}", mat.size().width, mat.size().height);
+
+        std::string filename = "received_image.jpg";
         cv::imwrite(filename, mat);
         spdlog::info("  Saved to {}", filename);
     };
@@ -82,7 +71,7 @@ int main()
     // std::this_thread::sleep_for(std::chrono::seconds(5));
 
     // ThreadedSubscriber
-    ThreadedFlatBufferSubscriber<Image> threaded_subscriber(
+    ThreadedFlatBufferSubscriber<FoxgloveCompressedImage> threaded_subscriber(
         node, "/test/image", callback, std::chrono::milliseconds(10));
 
     threaded_subscriber.start();

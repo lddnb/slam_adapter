@@ -124,6 +124,14 @@ RUN cd /tmp && git clone https://github.com/jeremy-rifkin/cpptrace.git && \
 #     make -j && \
 #     make install
 
+# RUN cd /tmp && git clone https://github.com/foxglove/foxglove-sdk && \
+#     cd foxglove-sdk/cpp && \
+#     make build && \
+#     cd build && \
+#     cmake .. -DCMAKE_BUILD_TYPE=Release && \
+#     make -j && \
+#     make install
+
 RUN cd /tmp && git clone https://github.com/google/flatbuffers.git && \
     cd flatbuffers && \
     cmake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release && \
