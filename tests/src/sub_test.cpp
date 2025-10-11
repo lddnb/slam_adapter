@@ -1,4 +1,4 @@
-#include "slam_common/generic_flatbuffer_pubsub.hpp"
+#include "slam_common/flatbuffers_pub_sub.hpp"
 #include "slam_common/foxglove_messages.hpp"
 #include <slam_common/slam_crash_logger.hpp>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -63,7 +63,7 @@ int main()
         spdlog::info("  Saved to {}", filename);
     };
 
-    // GenericFlatBufferSubscriber<Image> img_subscriber(node, "/test/image", callback);
+    // FBSSubscriber<Image> img_subscriber(node, "/test/image", callback);
 
     // std::this_thread::sleep_for(std::chrono::seconds(3));
     // img_subscriber.receive_once();
@@ -71,7 +71,7 @@ int main()
     // std::this_thread::sleep_for(std::chrono::seconds(5));
 
     // ThreadedSubscriber
-    ThreadedFlatBufferSubscriber<FoxgloveCompressedImage> threaded_subscriber(
+    ThreadedFBSSubscriber<FoxgloveCompressedImage> threaded_subscriber(
         node, "/test/image", callback, std::chrono::milliseconds(10));
 
     threaded_subscriber.start();

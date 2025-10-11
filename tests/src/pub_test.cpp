@@ -1,4 +1,4 @@
-#include "slam_common/generic_flatbuffer_pubsub.hpp"
+#include "slam_common/flatbuffers_pub_sub.hpp"
 #include "slam_common/foxglove_messages.hpp"
 
 #include <slam_common/slam_crash_logger.hpp>
@@ -68,7 +68,7 @@ int main()
     std::cout << "Creating generic publishers and subscribers..." << std::endl;
 
     // Create Image publisher using Handle-based CuImage (now iceoryx2 compatible)
-    GenericFlatBufferPublisher<FoxgloveCompressedImage> img_publisher(node, "/test/image");
+    FBSPublisher<FoxgloveCompressedImage> img_publisher(node, "/test/image");
 
     // 读取OpenCV图像
     cv::Mat img = cv::imread("/home/ubuntu/data/image.jpg", cv::IMREAD_COLOR);

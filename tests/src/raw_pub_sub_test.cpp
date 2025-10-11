@@ -1,4 +1,4 @@
-#include "slam_common/generic_flatbuffer_pubsub.hpp"
+#include "slam_common/flatbuffers_pub_sub.hpp"
 #include "slam_common/foxglove_messages.hpp"
 
 #include <spdlog/spdlog.h>
@@ -182,7 +182,7 @@ int main()
     spdlog::info("----------------------------------------");
 
     // Create Publisher (using FoxglovePointCloud type)
-    GenericFlatBufferPublisher<FoxglovePointCloud> pc_publisher(node, "/foxglove/pointcloud");
+    FBSPublisher<FoxglovePointCloud> pc_publisher(node, "/foxglove/pointcloud");
 
     // Create Subscriber
     std::atomic<int> pc_received_count{0};
@@ -204,7 +204,7 @@ int main()
         spdlog::info("  Fields count: {}", pc->fields()->size());
     };
 
-    GenericFlatBufferSubscriber<FoxglovePointCloud> pc_subscriber(node, "/foxglove/pointcloud", pc_callback);
+    FBSSubscriber<FoxglovePointCloud> pc_subscriber(node, "/foxglove/pointcloud", pc_callback);
 
     // Publish 3 point clouds with different sizes
     for (int i = 0; i < 3; ++i) {
@@ -229,7 +229,7 @@ int main()
     spdlog::info("----------------------------------------");
 
     // Create Publisher
-    GenericFlatBufferPublisher<FoxgloveCompressedImage> img_publisher(node, "/foxglove/image");
+    FBSPublisher<FoxgloveCompressedImage> img_publisher(node, "/foxglove/image");
 
     // Create Subscriber
     std::atomic<int> img_received_count{0};
@@ -245,7 +245,7 @@ int main()
                      img->data()->size());
     };
 
-    GenericFlatBufferSubscriber<FoxgloveCompressedImage> img_subscriber(node, "/foxglove/image", img_callback);
+    FBSSubscriber<FoxgloveCompressedImage> img_subscriber(node, "/foxglove/image", img_callback);
 
     // Publish 3 images with different resolutions
     std::vector<std::pair<size_t, size_t>> resolutions = {{640, 480}, {1280, 720}, {1920, 1080}};
@@ -271,7 +271,7 @@ int main()
     spdlog::info("----------------------------------------");
 
     // Create Publisher
-    GenericFlatBufferPublisher<FoxgloveImu> imu_publisher(node, "/foxglove/imu");
+    FBSPublisher<FoxgloveImu> imu_publisher(node, "/foxglove/imu");
 
     // Create threaded Subscriber
     std::atomic<int> imu_received_count{0};
@@ -287,7 +287,7 @@ int main()
                      imu->linear_acceleration()->x(), imu->linear_acceleration()->y(), imu->linear_acceleration()->z());
     };
 
-    ThreadedFlatBufferSubscriber<FoxgloveImu> imu_subscriber(
+    ThreadedFBSSubscriber<FoxgloveImu> imu_subscriber(
         node, "/foxglove/imu", imu_callback, std::chrono::milliseconds(10));
 
     imu_subscriber.start();

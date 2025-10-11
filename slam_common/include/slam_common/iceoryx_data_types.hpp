@@ -5,13 +5,6 @@
 #include <memory_resource>
 #include <vector>
 
-#include <iox2/iceoryx2.hpp>
-
-// 前向声明 flatbuffers
-namespace flatbuffers {
-class DetachedBuffer;
-}
-
 namespace ms_slam::slam_common
 {
 // ============ 点类型定义（保持不变）============
@@ -165,12 +158,6 @@ struct PointCloudSoA {
 
         num_points++;
     }
-
-    // 序列化/反序列化方法声明（在 flatbuffer_serializer.hpp 中实现）
-    flatbuffers::DetachedBuffer serialize() const;
-    static PointCloudSoA deserialize(
-        const uint8_t* buffer, size_t size,
-        std::pmr::memory_resource* mr = std::pmr::get_default_resource());
 };
 
 // 常用点云类型别名
@@ -219,11 +206,6 @@ struct Image {
     size_t byte_size() const { return data.size(); }
     uint8_t* data_ptr() { return data.data(); }
     const uint8_t* data_ptr() const { return data.data(); }
-
-    // 序列化/反序列化方法（在 flatbuffer_serializer.hpp 中实现）
-    flatbuffers::DetachedBuffer serialize() const;
-    static Image deserialize(const uint8_t* buffer, size_t size,
-                            std::pmr::memory_resource* mr = std::pmr::get_default_resource());
 };
 
 }  // namespace ms_slam::slam_common

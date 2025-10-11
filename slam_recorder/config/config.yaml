@@ -1,0 +1,28 @@
+# Foxglove WebSocket Bridge 配置
+websocket:
+  enable: true                    # 是否启用 WebSocket 服务器
+  host: 127.0.0.1                 # 监听地址 (0.0.0.0 = 所有网卡)
+  port: 8766                      # WebSocket 端口
+  poll_interval_ms: 3             # 轮询间隔（毫秒）
+  server_name: slam_recorder      # 服务器名称
+
+# MCAP 录制配置
+recorder:
+  enable: true                    # 是否启用数据录制
+  output_dir: /home/ubuntu/slam_adapter/slam_recorder/output  # 输出目录
+  filename_prefix: recording      # 文件名前缀
+  auto_start: true                # 启动时自动开始录制
+  compression: zstd               # 压缩格式: none, lz4, zstd
+  chunk_size: 1048576             # MCAP chunk 大小 (1MB)
+
+# 处理的 topics
+topics:
+  - name: /lidar_points
+    schema: foxglove.PointCloud
+    enabled: true
+  - name: /camera/image_raw
+    schema: foxglove.CompressedImage
+    enabled: true
+  - name: /lidar_imu
+    schema: foxglove.Imu
+    enabled: true

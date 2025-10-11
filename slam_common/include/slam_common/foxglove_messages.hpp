@@ -13,8 +13,7 @@ namespace ms_slam::slam_common
 // ============================================================================
 //
 // 这些包装器类型为 Foxglove FlatBuffers 消息提供零拷贝的序列化接口，
-// 满足 Serializable 概念的要求，可以直接用于 GenericFlatBufferPublisher
-// 和 GenericFlatBufferSubscriber。
+// 可以直接用于 FBSPublisher 和 GenericFlatBufferSubscriber。
 //
 // 使用方式:
 //   1. 订阅端: 使用 deserialize() 从字节流恢复原生 Foxglove 类型
@@ -43,16 +42,14 @@ class FoxgloveMsg
         return flatbuffers::GetRoot<Msg>(data_.data());
     }
 
-    /// 实现 Serializable 概念要求的 serialize() 方法
     flatbuffers::DetachedBuffer serialize() const
     {
         // 创建一个新的 FlatBufferBuilder 并复制数据
         flatbuffers::FlatBufferBuilder builder(data_.size());
-        builder.PushBytes(data_.data(), data_.size());
+        builder.PushFlatBuffer(data_.data(), data_.size());
         return builder.Release();
     }
 
-    /// 实现 Serializable 概念要求的 deserialize() 静态方法
     static FoxgloveMsg deserialize(const uint8_t* buffer, size_t size)
     {
         return FoxgloveMsg(buffer, size);

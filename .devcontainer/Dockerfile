@@ -96,7 +96,8 @@ RUN apt-get update && \
     libdwarf-dev \
     python3-pip \
     libspdlog-dev \
-    libopencv-dev
+    libopencv-dev \
+    libyaml-cpp-dev
 
 # 清除apt缓存
 RUN apt autoremove -y \
