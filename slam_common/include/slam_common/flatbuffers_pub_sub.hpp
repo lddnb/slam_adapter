@@ -11,6 +11,7 @@
 
 #include <iox2/iceoryx2.hpp>
 #include <flatbuffers/flatbuffers.h>
+#include <spdlog/spdlog.h>
 
 namespace ms_slam::slam_common
 {
@@ -18,6 +19,14 @@ namespace ms_slam::slam_common
 // ============================================================================
 // 通用 FlatBuffers Publisher（非线程化，事件驱动）
 // ============================================================================
+struct PubSubConfig {
+    uint32_t max_publishers{1};
+    uint32_t max_subscribers{3};
+    uint64_t initial_max_slice_len{16 * 1024 * 1024};  // 16MB default
+    iox2::AllocationStrategy allocation_strategy{iox2::AllocationStrategy::Static};
+    uint32_t subscriber_max_buffer_size{10};
+    std::chrono::milliseconds poll_interval{3};
+};
 
 template <typename MessageType>
 class FBSPublisher
@@ -25,23 +34,38 @@ class FBSPublisher
   public:
     using PublishCallback = std::function<void(uint32_t seq, const MessageType&)>;
 
-    struct PublisherConfig {
-        uint32_t max_publishers{1};
-        uint32_t max_subscribers{10};
-        uint64_t initial_max_slice_len{16 * 1024 * 1024};  // 16MB default
-        iox2::AllocationStrategy allocation_strategy{iox2::AllocationStrategy::Static};
-    };
-
     FBSPublisher(
         std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node,
         const std::string& service_name,
-        PublisherConfig config = {1, 10, 16 * 1024 * 1024, iox2::AllocationStrategy::Static})
+        PubSubConfig config = PubSubConfig())
     : node_(std::move(node)),
       service_name_(service_name),
       config_(config),
       seq_counter_(0)
     {
-        setup_service();
+        auto iox_service_name = iox2::ServiceName::create(service_name_.c_str()).expect("valid service name");
+
+        service_ = node_->service_builder(iox_service_name)
+                        .publish_subscribe<iox::Slice<uint8_t>>()
+                        .max_publishers(config_.max_publishers)
+                        .max_subscribers(config_.max_subscribers)
+                        .subscriber_max_buffer_size(config_.subscriber_max_buffer_size)
+                        .enable_safe_overflow(true)
+                        .open_or_create()
+                        .expect("successful service open/create");
+
+        publisher_ = service_->publisher_builder()
+                         .initial_max_slice_len(config_.initial_max_slice_len)
+                         .allocation_strategy(config_.allocation_strategy)
+                         .create()
+                         .expect("successful publisher creation");
+
+        spdlog::info(
+            "FlatBuffers Publisher service '{}' initialized with {} max subscribers, {} max buffer size, {}MB initial max slice len",
+            service_name_,
+            config_.max_subscribers,
+            config_.subscriber_max_buffer_size,
+            config_.initial_max_slice_len / 1024 / 1024);
     }
 
     void set_publish_callback(PublishCallback callback)
@@ -53,7 +77,7 @@ class FBSPublisher
     bool publish(const MessageType& message)
     {
         if (!publisher_.has_value()) {
-            throw std::runtime_error("GenericFlatBuffer Publisher service not initialized!");
+            throw std::runtime_error("FlatBuffers Publisher service not initialized!");
         }
 
         try {
@@ -81,7 +105,7 @@ class FBSPublisher
 
             return true;
         } catch (const std::exception& e) {
-            std::cerr << "GenericFlatBuffer publish error: " << e.what() << std::endl;
+            std::cerr << "FlatBuffers publish error: " << e.what() << std::endl;
             return false;
         }
     }
@@ -93,7 +117,7 @@ class FBSPublisher
     bool publish_raw(const uint8_t* data, size_t size)
     {
         if (!publisher_.has_value()) {
-            throw std::runtime_error("GenericFlatBuffer Publisher service not initialized!");
+            throw std::runtime_error("FlatBuffers Publisher service not initialized!");
         }
 
         try {
@@ -112,7 +136,7 @@ class FBSPublisher
 
             return true;
         } catch (const std::exception& e) {
-            std::cerr << "GenericFlatBuffer publish_raw error: " << e.what() << std::endl;
+            std::cerr << "FlatBuffers publish_raw error: " << e.what() << std::endl;
             return false;
         }
     }
@@ -129,43 +153,9 @@ class FBSPublisher
     bool is_ready() const { return publisher_.has_value(); }
 
   private:
-    void setup_service()
-    {
-        auto service_name = iox2::ServiceName::create(service_name_.c_str()).expect("valid service name");
-
-        // 先尝试打开，如果不存在则创建
-        auto open_result = node_->service_builder(service_name)
-                               .publish_subscribe<iox::Slice<uint8_t>>()
-                               .open();
-
-        if (open_result.has_value()) {
-            // 服务已存在，直接使用
-            service_ = std::move(open_result.value());
-        } else {
-            // 服务不存在，尝试创建
-            service_ = node_->service_builder(service_name)
-                            .publish_subscribe<iox::Slice<uint8_t>>()
-                            .max_publishers(config_.max_publishers)
-                            .max_subscribers(config_.max_subscribers)
-                            .enable_safe_overflow(true)
-                            .create()
-                            .expect("successful service creation");
-
-            if (!service_.has_value()) {
-                throw std::runtime_error("Failed to create service '" + service_name_ + "'");
-            }
-        }
-
-        publisher_ = service_->publisher_builder()
-                         .initial_max_slice_len(config_.initial_max_slice_len)
-                         .allocation_strategy(config_.allocation_strategy)
-                         .create()
-                         .expect("successful publisher creation");
-    }
-
     std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node_;
     std::string service_name_;
-    PublisherConfig config_;
+    PubSubConfig config_;
     std::atomic<uint32_t> seq_counter_;
 
     iox::optional<iox2::PortFactoryPublishSubscribe<iox2::ServiceType::Ipc, iox::Slice<uint8_t>, void>> service_;
@@ -188,13 +178,31 @@ class FBSSubscriber
     FBSSubscriber(
         std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node,
         const std::string& service_name,
-        ReceiveCallback receive_callback = nullptr)
+        ReceiveCallback receive_callback = nullptr,
+        PubSubConfig config = PubSubConfig())
     : node_(node),
       service_name_(service_name),
       receive_callback_(receive_callback),
+      config_(config),
       received_count_(0)
     {
-        setup_service();
+        auto iox_service_name = iox2::ServiceName::create(service_name_.c_str()).expect("valid service name");
+
+        service_ = node_->service_builder(iox_service_name)
+                        .publish_subscribe<iox::Slice<uint8_t>>()
+                        .max_publishers(config_.max_publishers)
+                        .max_subscribers(config_.max_subscribers)
+                        .subscriber_max_buffer_size(config_.subscriber_max_buffer_size)
+                        .enable_safe_overflow(true)
+                        .open_or_create()
+                        .expect("successful service open/create");
+
+        subscriber_ = service_->subscriber_builder().create().expect("successful subscriber creation");
+        spdlog::info(
+            "FlatBuffers Subscriber service '{}' initialized with {} max subscribers, {} max buffer size",
+            service_name_,
+            config_.max_subscribers,
+            config_.subscriber_max_buffer_size);
     }
 
     void set_receive_callback(ReceiveCallback callback)
@@ -227,7 +235,7 @@ class FBSSubscriber
                 return message;
             }
         } catch (const std::exception& e) {
-            std::cerr << "GenericFlatBuffer receive error: " << e.what() << std::endl;
+            std::cerr << "FlatBuffers receive error: " << e.what() << std::endl;
         }
         return iox::nullopt;
     }
@@ -257,36 +265,10 @@ class FBSSubscriber
     bool is_ready() const { return subscriber_.has_value(); }
 
   private:
-    void setup_service()
-    {
-        auto service_name = iox2::ServiceName::create(service_name_.c_str()).expect("valid service name");
-        
-        auto open_result = node_->service_builder(service_name)
-                               .publish_subscribe<iox::Slice<uint8_t>>()
-                               .open();
-
-        if (open_result.has_value()) {
-            service_ = std::move(open_result.value());
-        } else {
-            service_ = node_->service_builder(service_name)
-                            .publish_subscribe<iox::Slice<uint8_t>>()
-                            .max_publishers(1)
-                            .max_subscribers(10)
-                            .enable_safe_overflow(true)
-                            .create()
-                            .expect("successful service creation");
-
-            if (!service_.has_value()) {
-                throw std::runtime_error("Failed to create service '" + service_name_ + "'");
-            }
-        }
-
-        subscriber_ = service_->subscriber_builder().create().expect("successful subscriber creation");
-    }
-
     std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node_;
     std::string service_name_;
     ReceiveCallback receive_callback_;
+    PubSubConfig config_;
     std::atomic<uint32_t> received_count_;
 
     iox::optional<iox2::PortFactoryPublishSubscribe<iox2::ServiceType::Ipc, iox::Slice<uint8_t>, void>> service_;
@@ -309,16 +291,33 @@ class ThreadedFBSSubscriber
         std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node,
         const std::string& service_name,
         ReceiveCallback receive_callback,
-        std::chrono::milliseconds poll_interval = std::chrono::milliseconds(10))
+        PubSubConfig config = PubSubConfig())
     : node_(node),
       service_name_(service_name),
       receive_callback_(receive_callback),
-      poll_interval_(poll_interval),
+      config_(config),
       received_count_(0),
       running_(false),
       should_stop_(false)
     {
-        setup_service();
+        auto iox_service_name = iox2::ServiceName::create(service_name_.c_str()).expect("valid service name");
+
+        service_ = node_->service_builder(iox_service_name)
+                        .publish_subscribe<iox::Slice<uint8_t>>()
+                        .max_publishers(config_.max_publishers)
+                        .max_subscribers(config_.max_subscribers)
+                        .subscriber_max_buffer_size(config_.subscriber_max_buffer_size)
+                        .enable_safe_overflow(true)
+                        .open_or_create()
+                        .expect("successful service open/create");
+
+        subscriber_ = service_->subscriber_builder().create().expect("successful subscriber creation");
+
+        spdlog::info(
+            "Threaded FlatBuffers Subscriber service '{}' initialized with {} max subscribers, {} max buffer size",
+            service_name_,
+            config_.max_subscribers,
+            config_.subscriber_max_buffer_size);
     }
 
     ~ThreadedFBSSubscriber()
@@ -358,39 +357,12 @@ class ThreadedFBSSubscriber
     bool is_ready() const { return subscriber_.has_value(); }
 
   private:
-    void setup_service()
-    {
-        auto service_name = iox2::ServiceName::create(service_name_.c_str()).expect("valid service name");
-
-        auto open_result = node_->service_builder(service_name)
-                               .publish_subscribe<iox::Slice<uint8_t>>()
-                               .open();
-
-        if (open_result.has_value()) {
-            service_ = std::move(open_result.value());
-        } else {
-            service_ = node_->service_builder(service_name)
-                            .publish_subscribe<iox::Slice<uint8_t>>()
-                            .max_publishers(1)
-                            .max_subscribers(10)
-                            .enable_safe_overflow(true)
-                            .create()
-                            .expect("successful service creation");
-
-            if (!service_.has_value()) {
-                throw std::runtime_error("Failed to create service '" + service_name_ + "'");
-            }
-        }
-
-        subscriber_ = service_->subscriber_builder().create().expect("successful subscriber creation");
-    }
-
     void run()
     {
         while (!should_stop_.load()) {
             try {
                 receive_messages();
-                std::this_thread::sleep_for(poll_interval_);
+                std::this_thread::sleep_for(config_.poll_interval);
             } catch (const std::exception& e) {
                 std::cerr << "ThreadedFlatBuffer Subscriber error: " << e.what() << std::endl;
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -429,7 +401,7 @@ class ThreadedFBSSubscriber
     std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node_;
     std::string service_name_;
     ReceiveCallback receive_callback_;
-    std::chrono::milliseconds poll_interval_;
+    PubSubConfig config_;
     std::atomic<uint32_t> received_count_;
 
     iox::optional<iox2::PortFactoryPublishSubscribe<iox2::ServiceType::Ipc, iox::Slice<uint8_t>, void>> service_;

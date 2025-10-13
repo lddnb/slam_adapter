@@ -103,7 +103,7 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config)
             schema.name = "foxglove.Imu";
             schema.data = reinterpret_cast<const std::byte*>(foxglove::ImuBinarySchema::data());
             schema.data_len = foxglove::ImuBinarySchema::size();
-            imu_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxgloveImu>>(node_, topic.name);
+            imu_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxgloveImu>>(node_, topic.name, nullptr, slam_common::PubSubConfig{.subscriber_max_buffer_size = 100});
 
         } else {
             spdlog::warn("  - Unsupported schema type '{}' for topic '{}'", topic.schema, topic.name);

@@ -97,7 +97,7 @@ int main()
     };
 
     ThreadedFBSSubscriber<FoxgloveImu> imu_subscriber(
-        node, "/lidar_imu", imu_callback, std::chrono::milliseconds(2));
+        node, "/lidar_imu", imu_callback, PubSubConfig{.subscriber_max_buffer_size = 100});
     imu_subscriber.start();
     spdlog::info("Starting imu threaded_subscriber...");
 

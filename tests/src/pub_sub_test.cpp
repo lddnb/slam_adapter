@@ -271,7 +271,7 @@ int main()
     spdlog::info("----------------------------------------");
 
     // Create Publisher
-    FBSPublisher<FoxgloveImu> imu_publisher(node, "/foxglove/imu");
+    FBSPublisher<FoxgloveImu> imu_publisher(node, "/foxglove/imu", PubSubConfig{.subscriber_max_buffer_size = 100});
 
     // Create threaded Subscriber
     std::atomic<int> imu_received_count{0};
@@ -288,7 +288,7 @@ int main()
     };
 
     ThreadedFBSSubscriber<FoxgloveImu> imu_subscriber(
-        node, "/foxglove/imu", imu_callback, std::chrono::milliseconds(10));
+        node, "/foxglove/imu", imu_callback);
 
     imu_subscriber.start();
     spdlog::info("Threaded Imu Subscriber started");

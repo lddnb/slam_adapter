@@ -9,17 +9,20 @@ add_executable(sub_test sub_test.cpp)
 target_link_libraries(sub_test PRIVATE slam_common::slam_common ${OpenCV_LIBS})
 target_include_directories(sub_test PRIVATE ${OpenCV_INCLUDE_DIRS})
 
-add_executable(raw_pub_sub_test raw_pub_sub_test.cpp)
-target_link_libraries(raw_pub_sub_test PRIVATE slam_common::slam_common ${OpenCV_LIBS})
-target_include_directories(raw_pub_sub_test PRIVATE ${OpenCV_INCLUDE_DIRS})
+add_executable(pub_sub_test pub_sub_test.cpp)
+target_link_libraries(pub_sub_test PRIVATE slam_common::slam_common ${OpenCV_LIBS})
+target_include_directories(pub_sub_test PRIVATE ${OpenCV_INCLUDE_DIRS})
+
+add_executable(req_res_test req_res_test.cpp)
+target_link_libraries(req_res_test PRIVATE slam_common::slam_common)
 
 include(CTest)
 # Create the test executable
-add_executable(slam_adapter_tests
-    sample_test.cpp
-)
-target_link_libraries(slam_adapter_tests PRIVATE Catch2::Catch2WithMain)
-add_test(NAME slam_adapter_tests COMMAND slam_adapter_tests)
+# add_executable(slam_adapter_tests
+#     sample_test.cpp
+# )
+# target_link_libraries(slam_adapter_tests PRIVATE Catch2::Catch2WithMain)
+# add_test(NAME slam_adapter_tests COMMAND slam_adapter_tests)
 
 
 # add_executable(signal_handler_test

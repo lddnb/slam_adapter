@@ -72,7 +72,7 @@ int main()
 
     // ThreadedSubscriber
     ThreadedFBSSubscriber<FoxgloveCompressedImage> threaded_subscriber(
-        node, "/test/image", callback, std::chrono::milliseconds(10));
+        node, "/test/image", callback);
 
     threaded_subscriber.start();
     spdlog::info("Starting threaded_subscriber...");
