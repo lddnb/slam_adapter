@@ -1,6 +1,7 @@
-#include "slam_common/flatbuffers_pub_sub.hpp"
-#include "slam_common/foxglove_messages.hpp"
+#include <slam_common/flatbuffers_pub_sub.hpp>
+#include <slam_common/foxglove_messages.hpp>
 #include <slam_common/slam_crash_logger.hpp>
+#include <slam_common/callback_dispatcher.hpp>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/dup_filter_sink.h>
@@ -56,29 +57,30 @@ int main()
         spdlog::info("  Number of points: {}", num_points);
     };
 
-    ThreadedFBSSubscriber<FoxglovePointCloud> pc_subscriber(node, "/lidar_points", pc_callback);
-    pc_subscriber.start();
+    auto pc_subscriber = std::make_shared<FBSSubscriber<FoxglovePointCloud>>(node, "/lidar_points", pc_callback);
     spdlog::info("Starting pointcloud threaded_subscriber...");
 
     std::atomic<int> received_count{0};
     auto img_callback = [&received_count](const FoxgloveCompressedImage& img_wrapper) {
         received_count++;
 
+        auto start = std::chrono::steady_clock::now();
         const foxglove::CompressedImage* img = img_wrapper.get();
         spdlog::info("✓ Received Image #{}: format={}, {} bytes",
                     received_count.load(), img->format()->c_str(), img->data()->size());
         std::vector<uint8_t> buffer(img->data()->begin(), img->data()->end());
         cv::Mat mat = cv::imdecode(buffer, cv::IMREAD_COLOR);
         spdlog::info(" mat size: {}x{}", mat.size().width, mat.size().height);
+        auto duration = std::chrono::steady_clock::now() - start;
+        spdlog::warn("  Decoding time: {} us", std::chrono::duration_cast<std::chrono::microseconds>(duration).count());
 
         // std::string filename = "received_image.jpg";
         // cv::imwrite(filename, mat);
         // spdlog::info("  Saved to {}", filename);
     };
 
-    ThreadedFBSSubscriber<FoxgloveCompressedImage> img_subscriber(
-        node, "/camera/image_raw", img_callback, std::chrono::milliseconds(10));
-    img_subscriber.start();
+    auto img_subscriber = std::make_shared<FBSSubscriber<FoxgloveCompressedImage>>(
+        node, "/camera/image_raw", img_callback);
     spdlog::info("Starting image threaded_subscriber...");
 
     std::atomic<int> imu_received_count{0};
@@ -96,16 +98,21 @@ int main()
         }
     };
 
-    ThreadedFBSSubscriber<FoxgloveImu> imu_subscriber(
+    auto imu_subscriber = std::make_shared<FBSSubscriber<FoxgloveImu>>(
         node, "/lidar_imu", imu_callback, PubSubConfig{.subscriber_max_buffer_size = 100});
-    imu_subscriber.start();
     spdlog::info("Starting imu threaded_subscriber...");
 
-    std::this_thread::sleep_for(std::chrono::seconds(100));
+    CallbackDispatcher dispatcher;
+    dispatcher.set_poll_interval(std::chrono::milliseconds(1));
+    dispatcher.register_subscriber<FBSSubscriber<FoxglovePointCloud>>(pc_subscriber, "PointCloud_Subscriber", 5);
+    dispatcher.register_subscriber<FBSSubscriber<FoxgloveCompressedImage>>(img_subscriber, "Image_Subscriber", 5);
+    dispatcher.register_subscriber<FBSSubscriber<FoxgloveImu>>(imu_subscriber, "Imu_Subscriber", 10);
+    dispatcher.start();
 
-    pc_subscriber.stop();
-    img_subscriber.stop();
-    imu_subscriber.stop();
+    std::this_thread::sleep_for(std::chrono::seconds(200));
+
+    dispatcher.stop();
+    dispatcher.print_statistics();
 
     return 0;
 }

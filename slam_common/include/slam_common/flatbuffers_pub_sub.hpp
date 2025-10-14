@@ -2,12 +2,9 @@
 
 #include <atomic>
 #include <chrono>
-#include <concepts>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <thread>
-#include <iostream>
 
 #include <iox2/iceoryx2.hpp>
 #include <flatbuffers/flatbuffers.h>
@@ -41,7 +38,7 @@ class FBSPublisher
     : node_(std::move(node)),
       service_name_(service_name),
       config_(config),
-      seq_counter_(0)
+      published_count_(0)
     {
         auto iox_service_name = iox2::ServiceName::create(service_name_.c_str()).expect("valid service name");
 
@@ -70,7 +67,6 @@ class FBSPublisher
 
     void set_publish_callback(PublishCallback callback)
     {
-        std::lock_guard<std::mutex> lock(callback_mutex_);
         publish_callback_ = callback;
     }
 
@@ -95,12 +91,11 @@ class FBSPublisher
             // 发送
             iox2::send(std::move(initialized_sample)).expect("send successful");
 
-            uint32_t seq = ++seq_counter_;
+            published_count_++;
 
             // 触发回调
-            std::lock_guard<std::mutex> lock(callback_mutex_);
             if (publish_callback_) {
-                publish_callback_(seq, message);
+                publish_callback_(published_count_.load(), message);
             }
 
             return true;
@@ -132,7 +127,7 @@ class FBSPublisher
             // 发送
             iox2::send(std::move(initialized_sample)).expect("send successful");
 
-            ++seq_counter_;
+            published_count_++;
 
             return true;
         } catch (const std::exception& e) {
@@ -149,19 +144,18 @@ class FBSPublisher
         return publish_raw(fbb.GetBufferPointer(), fbb.GetSize());
     }
 
-    uint32_t get_published_count() const { return seq_counter_.load(); }
+    uint32_t get_published_count() const { return published_count_.load(); }
     bool is_ready() const { return publisher_.has_value(); }
 
   private:
     std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node_;
     std::string service_name_;
     PubSubConfig config_;
-    std::atomic<uint32_t> seq_counter_;
+    std::atomic<uint32_t> published_count_;
 
     iox::optional<iox2::PortFactoryPublishSubscribe<iox2::ServiceType::Ipc, iox::Slice<uint8_t>, void>> service_;
     iox::optional<iox2::Publisher<iox2::ServiceType::Ipc, iox::Slice<uint8_t>, void>> publisher_;
 
-    std::mutex callback_mutex_;
     PublishCallback publish_callback_;
 };
 
@@ -207,7 +201,6 @@ class FBSSubscriber
 
     void set_receive_callback(ReceiveCallback callback)
     {
-        std::lock_guard<std::mutex> lock(callback_mutex_);
         receive_callback_ = callback;
     }
 
@@ -227,7 +220,6 @@ class FBSSubscriber
                 auto message = MessageType::deserialize(data, size);
 
                 // 触发回调
-                std::lock_guard<std::mutex> lock(callback_mutex_);
                 if (receive_callback_) {
                     receive_callback_(message);
                 }
@@ -249,6 +241,61 @@ class FBSSubscriber
             message = receive_once();
         }
         return messages;
+    }
+
+    /// 接收原始字节（单次，带拷贝）
+    /// @return 返回原始字节的拷贝（避免悬空指针）
+    /// @note 为了内存安全，必须拷贝数据。虽然有拷贝开销，但避免了FlatBuffers编解码
+    iox::optional<std::vector<uint8_t>> receive_raw_once()
+    {
+        try {
+            auto sample = subscriber_->receive().expect("receive succeeds");
+            if (sample.has_value()) {
+                received_count_++;
+
+                // 获取 payload 并拷贝
+                auto payload = sample->payload();
+                const uint8_t* data = payload.begin();
+                size_t size = payload.number_of_bytes();
+
+                return std::vector<uint8_t>(data, data + size);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "FlatBuffers receive_raw error: " << e.what() << std::endl;
+        }
+        return iox::nullopt;
+    }
+
+    /// 接收所有原始字节（批量，带拷贝）
+    /// @return 返回所有可用消息的原始字节拷贝
+    /// @note 由于需要保存多个消息，必须拷贝数据以避免悬空指针
+    std::vector<std::vector<uint8_t>> receive_all_raw()
+    {
+        std::vector<std::vector<uint8_t>> raw_messages;
+
+        while (true) {
+            try {
+                auto sample = subscriber_->receive().expect("receive succeeds");
+                if (!sample.has_value()) {
+                    break;
+                }
+
+                received_count_++;
+
+                // 获取 payload 并拷贝
+                auto payload = sample->payload();
+                const uint8_t* data = payload.begin();
+                size_t size = payload.number_of_bytes();
+
+                raw_messages.emplace_back(data, data + size);
+
+            } catch (const std::exception& e) {
+                std::cerr << "FlatBuffers receive_all_raw error: " << e.what() << std::endl;
+                break;
+            }
+        }
+
+        return raw_messages;
     }
 
     bool has_data() const
@@ -273,8 +320,6 @@ class FBSSubscriber
 
     iox::optional<iox2::PortFactoryPublishSubscribe<iox2::ServiceType::Ipc, iox::Slice<uint8_t>, void>> service_;
     iox::optional<iox2::Subscriber<iox2::ServiceType::Ipc, iox::Slice<uint8_t>, void>> subscriber_;
-
-    std::mutex callback_mutex_;
 };
 
 // ============================================================================
@@ -349,7 +394,6 @@ class ThreadedFBSSubscriber
 
     void set_receive_callback(ReceiveCallback callback)
     {
-        std::lock_guard<std::mutex> lock(callback_mutex_);
         receive_callback_ = callback;
     }
 
@@ -386,7 +430,6 @@ class ThreadedFBSSubscriber
                 auto message = MessageType::deserialize(data, size);
 
                 // 触发回调（在独立线程中）
-                std::lock_guard<std::mutex> lock(callback_mutex_);
                 if (receive_callback_) {
                     receive_callback_(message);
                 }
@@ -407,7 +450,6 @@ class ThreadedFBSSubscriber
     iox::optional<iox2::PortFactoryPublishSubscribe<iox2::ServiceType::Ipc, iox::Slice<uint8_t>, void>> service_;
     iox::optional<iox2::Subscriber<iox2::ServiceType::Ipc, iox::Slice<uint8_t>, void>> subscriber_;
 
-    std::mutex callback_mutex_;
     std::atomic<bool> running_;
     std::atomic<bool> should_stop_;
     std::thread thread_;

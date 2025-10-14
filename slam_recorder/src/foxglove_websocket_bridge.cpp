@@ -308,15 +308,14 @@ void FoxgloveWebSocketBridge::poll_and_forward_topic(const std::string& topic_na
     try {
         // 根据 schema 类型选择正确的订阅者并处理数据
         if (schema == "foxglove.PointCloud" && pc_subs_.count(topic_name)) {
-            auto samples = pc_subs_.at(topic_name)->receive_all();
-            for (auto& sample : samples) {
-                auto buffer = sample.serialize();
+            auto raw_samples = pc_subs_.at(topic_name)->receive_all_raw();
+            for (const auto& raw_data : raw_samples) {
                 uint64_t timestamp_ns = get_current_timestamp_ns();
 
                 if (has_websocket_sinks) {
                     auto result = channels_.at(topic_name)->log(
-                        reinterpret_cast<const std::byte*>(buffer.data()),
-                        buffer.size(),
+                        reinterpret_cast<const std::byte*>(raw_data.data()),
+                        raw_data.size(),
                         timestamp_ns
                     );
                     if (result == foxglove::FoxgloveError::Ok) {
@@ -329,19 +328,18 @@ void FoxgloveWebSocketBridge::poll_and_forward_topic(const std::string& topic_na
                 }
 
                 if (recording_.load()) {
-                    record_to_mcap(topic_name, schema, buffer.data(), buffer.size(), timestamp_ns);
+                    record_to_mcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
                 }
             }
         } else if (schema == "foxglove.CompressedImage" && img_subs_.count(topic_name)) {
-            auto samples = img_subs_.at(topic_name)->receive_all();
-            for (auto& sample : samples) {
-                auto buffer = sample.serialize();
+            auto raw_samples = img_subs_.at(topic_name)->receive_all_raw();
+            for (const auto& raw_data : raw_samples) {
                 uint64_t timestamp_ns = get_current_timestamp_ns();
 
                 if (has_websocket_sinks) {
                     auto result = channels_.at(topic_name)->log(
-                        reinterpret_cast<const std::byte*>(buffer.data()),
-                        buffer.size(),
+                        reinterpret_cast<const std::byte*>(raw_data.data()),
+                        raw_data.size(),
                         timestamp_ns
                     );
                     if (result == foxglove::FoxgloveError::Ok) {
@@ -354,19 +352,18 @@ void FoxgloveWebSocketBridge::poll_and_forward_topic(const std::string& topic_na
                 }
 
                 if (recording_.load()) {
-                    record_to_mcap(topic_name, schema, buffer.data(), buffer.size(), timestamp_ns);
+                    record_to_mcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
                 }
             }
         } else if (schema == "foxglove.Imu" && imu_subs_.count(topic_name)) {
-            auto samples = imu_subs_.at(topic_name)->receive_all();
-            for (auto& sample : samples) {
-                auto buffer = sample.serialize();
+            auto raw_samples = imu_subs_.at(topic_name)->receive_all_raw();
+            for (const auto& raw_data : raw_samples) {
                 uint64_t timestamp_ns = get_current_timestamp_ns();
 
                 if (has_websocket_sinks) {
                     auto result = channels_.at(topic_name)->log(
-                        reinterpret_cast<const std::byte*>(buffer.data()),
-                        buffer.size(),
+                        reinterpret_cast<const std::byte*>(raw_data.data()),
+                        raw_data.size(),
                         timestamp_ns
                     );
                     if (result == foxglove::FoxgloveError::Ok) {
@@ -379,7 +376,7 @@ void FoxgloveWebSocketBridge::poll_and_forward_topic(const std::string& topic_na
                 }
 
                 if (recording_.load()) {
-                    record_to_mcap(topic_name, schema, buffer.data(), buffer.size(), timestamp_ns);
+                    record_to_mcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
                 }
             }
         }

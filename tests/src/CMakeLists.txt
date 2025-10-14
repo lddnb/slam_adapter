@@ -16,6 +16,9 @@ target_include_directories(pub_sub_test PRIVATE ${OpenCV_INCLUDE_DIRS})
 add_executable(req_res_test req_res_test.cpp)
 target_link_libraries(req_res_test PRIVATE slam_common::slam_common)
 
+add_executable(callback_dispatcher_test callback_dispatcher_test.cpp)
+target_link_libraries(callback_dispatcher_test PRIVATE slam_common::slam_common)
+
 include(CTest)
 # Create the test executable
 # add_executable(slam_adapter_tests

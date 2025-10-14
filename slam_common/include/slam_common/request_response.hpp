@@ -3,7 +3,6 @@
 #include <memory>
 #include <string>
 #include <functional>
-#include <mutex>
 
 #include <iox2/iceoryx2.hpp>
 
@@ -37,7 +36,6 @@ class RPCServer
     {
         auto active_request = server_->receive().expect("receive successful");
         if (active_request.has_value()) {
-            std::lock_guard<std::mutex> lock(callback_mutex_);
             if (callback_) {
                 // 获取请求数据
                 const RequestType& request = active_request->payload();
@@ -62,7 +60,6 @@ class RPCServer
     // 设置请求处理回调
     void set_callback(ServerCallback callback)
     {
-        std::lock_guard<std::mutex> lock(callback_mutex_);
         callback_ = callback;
     }
 
@@ -73,7 +70,6 @@ class RPCServer
     iox::optional<iox2::Server<iox2::ServiceType::Ipc, RequestType, void, ResponseType, void>> server_;
 
     ServerCallback callback_;
-    std::mutex callback_mutex_;
 };
 
 // ============================================================================
