@@ -1,9 +1,9 @@
 /**
- * @file slam_crash_logger.hpp
- * @brief SLAM Crash Logger - 集成spdlog的signal-safe崩溃日志记录
+ * @file crash_logger.hpp
+ * @brief SLAM 崩溃日志记录器，集成 spdlog 的信号安全崩溃处理
  *
- * 这个模块提供了一个signal-safe的崩溃处理方案，当程序异常退出时
- * 自动将cpptrace堆栈信息写入spdlog日志文件。
+ * 该模块提供信号安全的崩溃处理方案，当程序异常退出时
+ * 自动将 cpptrace 堆栈信息写入 spdlog 日志文件。
  */
 
 #pragma once
@@ -13,6 +13,9 @@
 #include <functional>
 
 #include <spdlog/spdlog.h>
+#include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/sinks/dup_filter_sink.h>
 
 namespace ms_slam::slam_common
 {
@@ -23,11 +26,14 @@ struct LoggerConfig {
     /// spdlog日志文件路径
     std::string log_file_path = "slam.log";
 
-    /// 临时trace文件目录
+    /// 临时跟踪文件目录
     std::string temp_dir = "/tmp";
 
     /// 日志级别（spdlog格式）
     std::string log_level = "info";
+
+    /// 日志刷新级别（spdlog格式）
+    std::string flush_level = "warn";
 
     /// 是否启用文件轮转
     bool enable_rotation = false;
@@ -43,28 +49,27 @@ struct LoggerConfig {
 };
 
 /**
- * @brief SLAM崩溃日志记录器
- *
+ * @brief SLAM 崩溃日志记录器
  */
-class SlamCrashLogger
+class CrashLogger
 {
   public:
     /**
      * @brief 构造函数
      * @param config 配置参数
      */
-    explicit SlamCrashLogger(const std::shared_ptr<spdlog::logger>& spdlog_logger);
+    explicit CrashLogger(const std::shared_ptr<spdlog::logger>& spdlog_logger);
 
     /**
      * @brief 析构函数
      */
-    ~SlamCrashLogger();
+    ~CrashLogger();
 
     // 禁止复制和移动
-    SlamCrashLogger(const SlamCrashLogger&) = delete;
-    SlamCrashLogger& operator=(const SlamCrashLogger&) = delete;
-    SlamCrashLogger(SlamCrashLogger&&) = delete;
-    SlamCrashLogger& operator=(SlamCrashLogger&&) = delete;
+    CrashLogger(const CrashLogger&) = delete;
+    CrashLogger& operator=(const CrashLogger&) = delete;
+    CrashLogger(CrashLogger&&) = delete;
+    CrashLogger& operator=(CrashLogger&&) = delete;
 
     /**
      * @brief 初始化崩溃日志记录器
@@ -128,7 +133,7 @@ class GlobalCrashLogger
     static bool is_initialized();
 
   private:
-    static std::unique_ptr<SlamCrashLogger> instance_;
+    static std::unique_ptr<CrashLogger> instance_;
 };
 
 }  // namespace ms_slam::slam_common

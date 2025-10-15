@@ -1,4 +1,4 @@
-#include <slam_common/slam_crash_logger.hpp>
+#include <slam_common/crash_logger.hpp>
 
 #include <iostream>
 #include <chrono>
@@ -80,7 +80,7 @@ int main(int argc, char* argv[])
     auto dup_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(10));
     dup_filter->add_sink(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
     dup_filter->add_sink(std::make_shared<spdlog::sinks::basic_file_sink_mt>(config.log_file_path, true));
-    auto logger = std::make_shared<spdlog::logger>("slam_crash_logger", dup_filter);
+    auto logger = std::make_shared<spdlog::logger>("crash_logger", dup_filter);
 
     logger->set_pattern(config.log_pattern);
     logger->set_level(spdlog::level::from_str(config.log_level));

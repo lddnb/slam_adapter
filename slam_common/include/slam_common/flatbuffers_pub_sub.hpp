@@ -1,55 +1,79 @@
+/**
+ * @file flatbuffers_pub_sub.hpp
+ * @brief 基于 FlatBuffers 的发布订阅封装
+ */
 #pragma once
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <stdexcept>
+#include <utility>
+#include <string>
 #include <thread>
+#include <vector>
 
-#include <iox2/iceoryx2.hpp>
 #include <flatbuffers/flatbuffers.h>
+#include <iox2/iceoryx2.hpp>
 #include <spdlog/spdlog.h>
 
 namespace ms_slam::slam_common
 {
-
-// ============================================================================
-// 通用 FlatBuffers Publisher（非线程化，事件驱动）
-// ============================================================================
+/**
+ * @brief 发布订阅配置
+ */
 struct PubSubConfig {
+    /// 最大发布者数量
     uint32_t max_publishers{1};
+    /// 最大订阅者数量
     uint32_t max_subscribers{3};
-    uint64_t initial_max_slice_len{16 * 1024 * 1024};  // 16MB default
+    /// 初始最大共享内存切片大小（默认 16MB）
+    uint64_t initial_max_slice_len{16 * 1024 * 1024};
+    /// 分配策略配置
     iox2::AllocationStrategy allocation_strategy{iox2::AllocationStrategy::Static};
+    /// 单个订阅者缓冲队列深度
     uint32_t subscriber_max_buffer_size{10};
+    /// 轮询间隔
     std::chrono::milliseconds poll_interval{3};
 };
 
+/**
+ * @brief 通用 FlatBuffers 发布器（事件驱动）
+ * @tparam MessageType 业务消息类型
+ */
 template <typename MessageType>
 class FBSPublisher
 {
   public:
+    /// 发布结果回调
     using PublishCallback = std::function<void(uint32_t seq, const MessageType&)>;
 
-    FBSPublisher(
-        std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node,
-        const std::string& service_name,
-        PubSubConfig config = PubSubConfig())
-    : node_(std::move(node)),
-      service_name_(service_name),
-      config_(config),
-      published_count_(0)
+    /**
+     * @brief 构造发布器并初始化 iceoryx 服务
+     * @param node iceoryx 节点
+     * @param service_name 服务名
+     * @param config 发布订阅配置
+     */
+    FBSPublisher(std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node,
+                 const std::string& service_name,
+                 PubSubConfig config = PubSubConfig())
+    : node_(std::move(node))
+    , service_name_(service_name)
+    , config_(config)
+    , published_count_(0)
     {
         auto iox_service_name = iox2::ServiceName::create(service_name_.c_str()).expect("valid service name");
 
         service_ = node_->service_builder(iox_service_name)
-                        .publish_subscribe<iox::Slice<uint8_t>>()
-                        .max_publishers(config_.max_publishers)
-                        .max_subscribers(config_.max_subscribers)
-                        .subscriber_max_buffer_size(config_.subscriber_max_buffer_size)
-                        .enable_safe_overflow(true)
-                        .open_or_create()
-                        .expect("successful service open/create");
+                       .publish_subscribe<iox::Slice<uint8_t>>()
+                       .max_publishers(config_.max_publishers)
+                       .max_subscribers(config_.max_subscribers)
+                       .subscriber_max_buffer_size(config_.subscriber_max_buffer_size)
+                       .enable_safe_overflow(true)
+                       .open_or_create()
+                       .expect("successful service open/create");
 
         publisher_ = service_->publisher_builder()
                          .initial_max_slice_len(config_.initial_max_slice_len)
@@ -65,11 +89,20 @@ class FBSPublisher
             config_.initial_max_slice_len / 1024 / 1024);
     }
 
+    /**
+     * @brief 设置发布成功回调
+     * @param callback 回调函数
+     */
     void set_publish_callback(PublishCallback callback)
     {
         publish_callback_ = callback;
     }
 
+    /**
+     * @brief 发布一条业务消息
+     * @param message 待发布消息
+     * @return 发布成功返回 true
+     */
     bool publish(const MessageType& message)
     {
         if (!publisher_.has_value()) {
@@ -77,38 +110,30 @@ class FBSPublisher
         }
 
         try {
-            // 使用消息类型自己的序列化方法
             auto buffer = message.serialize();
-
-            // 分配动态大小的共享内存
             auto sample = publisher_->loan_slice_uninit(buffer.size()).expect("acquire sample");
-
-            // 使用 write_from_fn 初始化数据
-            auto initialized_sample = sample.write_from_fn([&buffer](uint64_t idx) {
-                return buffer.data()[idx];
-            });
-
-            // 发送
+            auto initialized_sample = sample.write_from_fn([&buffer](uint64_t idx) { return buffer.data()[idx]; });
             iox2::send(std::move(initialized_sample)).expect("send successful");
 
             published_count_++;
 
-            // 触发回调
             if (publish_callback_) {
                 publish_callback_(published_count_.load(), message);
             }
 
             return true;
         } catch (const std::exception& e) {
-            std::cerr << "FlatBuffers publish error: " << e.what() << std::endl;
+            spdlog::error("FlatBuffers publish error: {}", e.what());
             return false;
         }
     }
 
-    /// 直接发布已序列化的字节流 (零拷贝，用于Foxglove FlatBuffers消息)
-    /// @param data 指向已序列化FlatBuffers数据的指针
-    /// @param size 数据大小（字节）
-    /// @return 发布成功返回true，否则返回false
+    /**
+     * @brief 直接发布已序列化的字节流（零拷贝）
+     * @param data 序列化数据指针
+     * @param size 数据长度（字节）
+     * @return 发布成功返回 true
+     */
     bool publish_raw(const uint8_t* data, size_t size)
     {
         if (!publisher_.has_value()) {
@@ -116,35 +141,38 @@ class FBSPublisher
         }
 
         try {
-            // 分配动态大小的共享内存
             auto sample = publisher_->loan_slice_uninit(size).expect("acquire sample");
-
-            // 使用 write_from_fn 初始化数据
-            auto initialized_sample = sample.write_from_fn([data](uint64_t idx) {
-                return data[idx];
-            });
-
-            // 发送
+            auto initialized_sample = sample.write_from_fn([data](uint64_t idx) { return data[idx]; });
             iox2::send(std::move(initialized_sample)).expect("send successful");
-
             published_count_++;
 
             return true;
         } catch (const std::exception& e) {
-            std::cerr << "FlatBuffers publish_raw error: " << e.what() << std::endl;
+            spdlog::error("FlatBuffers publish_raw error: {}", e.what());
             return false;
         }
     }
 
-    /// 从 FlatBufferBuilder 直接发布（零拷贝）
-    /// @param fbb FlatBufferBuilder对象
-    /// @return 发布成功返回true，否则返回false
+    /**
+     * @brief 从 FlatBufferBuilder 发布（零拷贝）
+     * @param fbb FlatBufferBuilder 对象
+     * @return 发布成功返回 true
+     */
     bool publish_from_builder(flatbuffers::FlatBufferBuilder& fbb)
     {
         return publish_raw(fbb.GetBufferPointer(), fbb.GetSize());
     }
 
+    /**
+     * @brief 获取累计发布数量
+     * @return 已发布消息计数
+     */
     uint32_t get_published_count() const { return published_count_.load(); }
+
+    /**
+     * @brief 检查发布器是否已就绪
+     * @return 就绪返回 true
+     */
     bool is_ready() const { return publisher_.has_value(); }
 
   private:
@@ -159,37 +187,44 @@ class FBSPublisher
     PublishCallback publish_callback_;
 };
 
-// ============================================================================
-// 通用 FlatBuffers Subscriber（非线程化，按需接收）
-// ============================================================================
-
+/**
+ * @brief 通用 FlatBuffers 订阅器（按需拉取）
+ * @tparam MessageType 业务消息类型
+ */
 template <typename MessageType>
 class FBSSubscriber
 {
   public:
+    /// 接收回调
     using ReceiveCallback = std::function<void(const MessageType&)>;
 
-    FBSSubscriber(
-        std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node,
-        const std::string& service_name,
-        ReceiveCallback receive_callback = nullptr,
-        PubSubConfig config = PubSubConfig())
-    : node_(node),
-      service_name_(service_name),
-      receive_callback_(receive_callback),
-      config_(config),
-      received_count_(0)
+    /**
+     * @brief 构造订阅器
+     * @param node iceoryx 节点
+     * @param service_name 服务名
+     * @param receive_callback 接收回调
+     * @param config 发布订阅配置
+     */
+    FBSSubscriber(std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node,
+                  const std::string& service_name,
+                  ReceiveCallback receive_callback = nullptr,
+                  PubSubConfig config = PubSubConfig())
+    : node_(node)
+    , service_name_(service_name)
+    , receive_callback_(receive_callback)
+    , config_(config)
+    , received_count_(0)
     {
         auto iox_service_name = iox2::ServiceName::create(service_name_.c_str()).expect("valid service name");
 
         service_ = node_->service_builder(iox_service_name)
-                        .publish_subscribe<iox::Slice<uint8_t>>()
-                        .max_publishers(config_.max_publishers)
-                        .max_subscribers(config_.max_subscribers)
-                        .subscriber_max_buffer_size(config_.subscriber_max_buffer_size)
-                        .enable_safe_overflow(true)
-                        .open_or_create()
-                        .expect("successful service open/create");
+                       .publish_subscribe<iox::Slice<uint8_t>>()
+                       .max_publishers(config_.max_publishers)
+                       .max_subscribers(config_.max_subscribers)
+                       .subscriber_max_buffer_size(config_.subscriber_max_buffer_size)
+                       .enable_safe_overflow(true)
+                       .open_or_create()
+                       .expect("successful service open/create");
 
         subscriber_ = service_->subscriber_builder().create().expect("successful subscriber creation");
         spdlog::info(
@@ -199,11 +234,19 @@ class FBSSubscriber
             config_.subscriber_max_buffer_size);
     }
 
+    /**
+     * @brief 设置接收回调
+     * @param callback 回调函数
+     */
     void set_receive_callback(ReceiveCallback callback)
     {
         receive_callback_ = callback;
     }
 
+    /**
+     * @brief 接收单条消息
+     * @return 有效消息则返回 optional
+     */
     iox::optional<MessageType> receive_once()
     {
         try {
@@ -211,15 +254,12 @@ class FBSSubscriber
             if (sample.has_value()) {
                 received_count_++;
 
-                // 获取 payload (iox::Slice<uint8_t>)
                 auto payload = sample->payload();
                 const uint8_t* data = payload.begin();
                 size_t size = payload.number_of_bytes();
 
-                // 使用消息类型自己的反序列化方法
                 auto message = MessageType::deserialize(data, size);
 
-                // 触发回调
                 if (receive_callback_) {
                     receive_callback_(message);
                 }
@@ -227,11 +267,15 @@ class FBSSubscriber
                 return message;
             }
         } catch (const std::exception& e) {
-            std::cerr << "FlatBuffers receive error: " << e.what() << std::endl;
+            spdlog::error("FlatBuffers receive error: {}", e.what());
         }
         return iox::nullopt;
     }
 
+    /**
+     * @brief 接收所有可用消息
+     * @return 消息列表
+     */
     std::vector<MessageType> receive_all()
     {
         std::vector<MessageType> messages;
@@ -243,9 +287,10 @@ class FBSSubscriber
         return messages;
     }
 
-    /// 接收原始字节（单次，带拷贝）
-    /// @return 返回原始字节的拷贝（避免悬空指针）
-    /// @note 为了内存安全，必须拷贝数据。虽然有拷贝开销，但避免了FlatBuffers编解码
+    /**
+     * @brief 接收单条原始字节流（带拷贝）
+     * @return 有效数据则返回字节数组
+     */
     iox::optional<std::vector<uint8_t>> receive_raw_once()
     {
         try {
@@ -253,7 +298,6 @@ class FBSSubscriber
             if (sample.has_value()) {
                 received_count_++;
 
-                // 获取 payload 并拷贝
                 auto payload = sample->payload();
                 const uint8_t* data = payload.begin();
                 size_t size = payload.number_of_bytes();
@@ -261,14 +305,15 @@ class FBSSubscriber
                 return std::vector<uint8_t>(data, data + size);
             }
         } catch (const std::exception& e) {
-            std::cerr << "FlatBuffers receive_raw error: " << e.what() << std::endl;
+            spdlog::error("FlatBuffers receive_raw error: {}", e.what());
         }
         return iox::nullopt;
     }
 
-    /// 接收所有原始字节（批量，带拷贝）
-    /// @return 返回所有可用消息的原始字节拷贝
-    /// @note 由于需要保存多个消息，必须拷贝数据以避免悬空指针
+    /**
+     * @brief 批量接收所有原始字节流（带拷贝）
+     * @return 原始字节数组列表
+     */
     std::vector<std::vector<uint8_t>> receive_all_raw()
     {
         std::vector<std::vector<uint8_t>> raw_messages;
@@ -282,7 +327,6 @@ class FBSSubscriber
 
                 received_count_++;
 
-                // 获取 payload 并拷贝
                 auto payload = sample->payload();
                 const uint8_t* data = payload.begin();
                 size_t size = payload.number_of_bytes();
@@ -290,7 +334,7 @@ class FBSSubscriber
                 raw_messages.emplace_back(data, data + size);
 
             } catch (const std::exception& e) {
-                std::cerr << "FlatBuffers receive_all_raw error: " << e.what() << std::endl;
+                spdlog::error("FlatBuffers receive_all_raw error: {}", e.what());
                 break;
             }
         }
@@ -298,6 +342,10 @@ class FBSSubscriber
         return raw_messages;
     }
 
+    /**
+     * @brief 检查是否有待处理数据
+     * @return 有数据返回 true
+     */
     bool has_data() const
     {
         try {
@@ -308,7 +356,16 @@ class FBSSubscriber
         }
     }
 
+    /**
+     * @brief 获取累计接收数量
+     * @return 已接收消息数量
+     */
     uint32_t get_received_count() const { return received_count_.load(); }
+
+    /**
+     * @brief 检查订阅者是否已就绪
+     * @return 就绪返回 true
+     */
     bool is_ready() const { return subscriber_.has_value(); }
 
   private:
@@ -322,39 +379,46 @@ class FBSSubscriber
     iox::optional<iox2::Subscriber<iox2::ServiceType::Ipc, iox::Slice<uint8_t>, void>> subscriber_;
 };
 
-// ============================================================================
-// 线程化 FlatBuffers Subscriber（后台线程持续轮询）
-// ============================================================================
-
+/**
+ * @brief 线程化 FlatBuffers 订阅器
+ * @tparam MessageType 业务消息类型
+ */
 template <typename MessageType>
 class ThreadedFBSSubscriber
 {
   public:
+    /// 接收回调
     using ReceiveCallback = std::function<void(const MessageType&)>;
 
-    ThreadedFBSSubscriber(
-        std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node,
-        const std::string& service_name,
-        ReceiveCallback receive_callback,
-        PubSubConfig config = PubSubConfig())
-    : node_(node),
-      service_name_(service_name),
-      receive_callback_(receive_callback),
-      config_(config),
-      received_count_(0),
-      running_(false),
-      should_stop_(false)
+    /**
+     * @brief 构造线程化订阅器
+     * @param node iceoryx 节点
+     * @param service_name 服务名
+     * @param receive_callback 接收回调
+     * @param config 发布订阅配置
+     */
+    ThreadedFBSSubscriber(std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node,
+                          const std::string& service_name,
+                          ReceiveCallback receive_callback,
+                          PubSubConfig config = PubSubConfig())
+    : node_(node)
+    , service_name_(service_name)
+    , receive_callback_(receive_callback)
+    , config_(config)
+    , received_count_(0)
+    , running_(false)
+    , should_stop_(false)
     {
         auto iox_service_name = iox2::ServiceName::create(service_name_.c_str()).expect("valid service name");
 
         service_ = node_->service_builder(iox_service_name)
-                        .publish_subscribe<iox::Slice<uint8_t>>()
-                        .max_publishers(config_.max_publishers)
-                        .max_subscribers(config_.max_subscribers)
-                        .subscriber_max_buffer_size(config_.subscriber_max_buffer_size)
-                        .enable_safe_overflow(true)
-                        .open_or_create()
-                        .expect("successful service open/create");
+                       .publish_subscribe<iox::Slice<uint8_t>>()
+                       .max_publishers(config_.max_publishers)
+                       .max_subscribers(config_.max_subscribers)
+                       .subscriber_max_buffer_size(config_.subscriber_max_buffer_size)
+                       .enable_safe_overflow(true)
+                       .open_or_create()
+                       .expect("successful service open/create");
 
         subscriber_ = service_->subscriber_builder().create().expect("successful subscriber creation");
 
@@ -365,11 +429,17 @@ class ThreadedFBSSubscriber
             config_.subscriber_max_buffer_size);
     }
 
+    /**
+     * @brief 析构函数，确保线程停止
+     */
     ~ThreadedFBSSubscriber()
     {
         stop();
     }
 
+    /**
+     * @brief 启动后台轮询线程
+     */
     void start()
     {
         if (!running_.load()) {
@@ -379,6 +449,9 @@ class ThreadedFBSSubscriber
         }
     }
 
+    /**
+     * @brief 停止后台轮询线程
+     */
     void stop()
     {
         if (running_.load()) {
@@ -390,14 +463,31 @@ class ThreadedFBSSubscriber
         }
     }
 
+    /**
+     * @brief 判断线程是否正在运行
+     * @return 运行中返回 true
+     */
     bool is_running() const { return running_.load(); }
 
+    /**
+     * @brief 更新接收回调
+     * @param callback 新回调
+     */
     void set_receive_callback(ReceiveCallback callback)
     {
         receive_callback_ = callback;
     }
 
+    /**
+     * @brief 获取累计接收数量
+     * @return 已接收消息数量
+     */
     uint32_t get_received_count() const { return received_count_.load(); }
+
+    /**
+     * @brief 检查订阅者是否已就绪
+     * @return 就绪返回 true
+     */
     bool is_ready() const { return subscriber_.has_value(); }
 
   private:
@@ -408,7 +498,7 @@ class ThreadedFBSSubscriber
                 receive_messages();
                 std::this_thread::sleep_for(config_.poll_interval);
             } catch (const std::exception& e) {
-                std::cerr << "ThreadedFlatBuffer Subscriber error: " << e.what() << std::endl;
+                spdlog::error("ThreadedFlatBuffer Subscriber error: {}", e.what());
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
@@ -421,20 +511,17 @@ class ThreadedFBSSubscriber
             try {
                 received_count_++;
 
-                // 获取 payload
                 auto payload = sample->payload();
                 const uint8_t* data = payload.begin();
                 size_t size = payload.number_of_bytes();
 
-                // 反序列化
                 auto message = MessageType::deserialize(data, size);
 
-                // 触发回调（在独立线程中）
                 if (receive_callback_) {
                     receive_callback_(message);
                 }
             } catch (const std::exception& e) {
-                std::cerr << "Message processing error: " << e.what() << std::endl;
+                spdlog::error("Message processing error: {}", e.what());
             }
 
             sample = subscriber_->receive().expect("receive succeeds");

@@ -1,5 +1,7 @@
-// ROS1 MCAP 到 Flatbuffers MCAP 转换器
-// 读取ROS1编码的MCAP文件，转换并保存为Flatbuffers编码
+/**
+ * @file ros_read_save.cpp
+ * @brief ROS1 MCAP 转 FlatBuffers MCAP 保存工具
+ */
 #include "slam_recorder/ros1_msg.hpp"
 
 #include <iostream>
@@ -20,10 +22,11 @@
 #include <fbs/Quaternion_generated.h>
 #include <fbs/Imu_generated.h>
 
-// ============================================================================
-// 转换函数
-// ============================================================================
-
+/**
+ * @brief 将 ROS1 编码的 MCAP 文件转换为 FlatBuffers 并保存
+ * @param input_file 输入 MCAP 文件路径
+ * @param output_file 输出 MCAP 文件路径
+ */
 void convert_ros1_to_flatbuffers(const std::string& input_file, const std::string& output_file) {
     std::cout << "=== 转换ROS1 MCAP到Flatbuffers MCAP ===" << std::endl;
     std::cout << "输入文件: " << input_file << std::endl;
@@ -316,6 +319,9 @@ void convert_ros1_to_flatbuffers(const std::string& input_file, const std::strin
     std::cout << "输出文件: " << output_file << std::endl;
 }
 
+/**
+ * @brief 应用入口，执行转换示例
+ */
 int main() {
     std::cout << "ROS1 MCAP 到 Flatbuffers MCAP 转换工具\n" << std::endl;
 

@@ -1,5 +1,7 @@
-// ROS1 MCAP 到 Flatbuffers MCAP 转换器
-// 读取ROS1编码的MCAP文件，转换并保存为Flatbuffers编码
+/**
+ * @file ros_read_pub.cpp
+ * @brief ROS1 MCAP 转换并通过 iceoryx2 发布示例
+ */
 #include "slam_recorder/ros1_msg.hpp"
 
 #include <iostream>
@@ -22,11 +24,12 @@
 #include <slam_common/flatbuffers_pub_sub.hpp>
 #include <slam_common/foxglove_messages.hpp>
 
-// ============================================================================
-// 转换函数
-// ============================================================================
 using namespace ms_slam::slam_common;
 
+/**
+ * @brief 将 ROS1 编码的 MCAP 文件转换并发布为 FlatBuffers
+ * @param input_file 输入 MCAP 文件路径
+ */
 void convert_ros1_to_flatbuffers(const std::string& input_file) {
     std::cout << "=== 转换ROS1 MCAP到Flatbuffers MCAP ===" << std::endl;
     std::cout << "输入文件: " << input_file << std::endl;
@@ -243,6 +246,9 @@ void convert_ros1_to_flatbuffers(const std::string& input_file) {
     std::cout << "跳过的其他消息: " << other_count << std::endl;
 }
 
+/**
+ * @brief 应用入口，读取默认文件并触发转换
+ */
 int main() {
     std::cout << "ROS1 MCAP publish 工具\n" << std::endl;
 

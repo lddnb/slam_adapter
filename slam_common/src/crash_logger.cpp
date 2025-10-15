@@ -1,9 +1,9 @@
 /**
- * @file slam_crash_logger.cpp
- * @brief SLAM Crash Logger 实现
+ * @file crash_logger.cpp
+ * @brief Crash Logger 实现
  */
 
-#include "slam_common/slam_crash_logger.hpp"
+#include "slam_common/crash_logger.hpp"
 
 #include <sys/inotify.h>
 #include <unistd.h>
@@ -82,9 +82,9 @@ void signal_safe_crash_handler(int sig, siginfo_t* info, void* context)
 }
 
 /**
- * @brief SlamCrashLogger的私有实现
+ * @brief CrashLogger 的私有实现
  */
-class SlamCrashLogger::Impl
+class CrashLogger::Impl
 {
   public:
     explicit Impl(const std::shared_ptr<spdlog::logger>& spdlog_logger)
@@ -105,7 +105,7 @@ class SlamCrashLogger::Impl
                 return false;
             }
 
-            // 预热cpptrace
+            // 预热 cpptrace
             cpptrace::frame_ptr buffer[10];
             cpptrace::safe_generate_raw_trace(buffer, 10);
             cpptrace::safe_object_frame frame;
@@ -119,11 +119,11 @@ class SlamCrashLogger::Impl
             g_crash_logger_initialized.store(true);
 
             logger_initialized_ = true;
-            spdlog_logger_->info("SLAM Crash Logger initialized successfully");
+            spdlog_logger_->info("Crash Logger initialized successfully");
 
             return true;
         } catch (const std::exception& e) {
-            spdlog::error("Failed to initialize SlamCrashLogger: {}", e.what());
+            spdlog::error("Failed to initialize CrashLogger: {}", e.what());
             return false;
         }
     }
@@ -135,7 +135,7 @@ class SlamCrashLogger::Impl
         g_crash_logger_initialized.store(false);
 
         if (spdlog_logger_) {
-            spdlog_logger_->info("SLAM Crash Logger shutting down");
+            spdlog_logger_->info("Crash Logger shutting down");
             spdlog_logger_->flush();
         }
 
@@ -166,39 +166,39 @@ class SlamCrashLogger::Impl
     std::string temp_dir_;
 };
 
-// SlamCrashLogger implementation
-SlamCrashLogger::SlamCrashLogger(const std::shared_ptr<spdlog::logger>& spdlog_logger) : pImpl_(std::make_unique<Impl>(spdlog_logger)) {}
+// CrashLogger 实现
+CrashLogger::CrashLogger(const std::shared_ptr<spdlog::logger>& spdlog_logger) : pImpl_(std::make_unique<Impl>(spdlog_logger)) {}
 
-SlamCrashLogger::~SlamCrashLogger() = default;
+CrashLogger::~CrashLogger() = default;
 
-bool SlamCrashLogger::initialize()
+bool CrashLogger::initialize()
 {
     return pImpl_->initialize();
 }
 
-void SlamCrashLogger::shutdown()
+void CrashLogger::shutdown()
 {
     pImpl_->shutdown();
 }
 
-bool SlamCrashLogger::check_system_support()
+bool CrashLogger::check_system_support()
 {
     return cpptrace::can_signal_safe_unwind() && cpptrace::can_get_safe_object_frame();
 }
 
-std::shared_ptr<void> SlamCrashLogger::get_logger() const
+std::shared_ptr<void> CrashLogger::get_logger() const
 {
     return std::static_pointer_cast<void>(pImpl_->get_logger());
 }
 
-// GlobalCrashLogger implementation
-std::unique_ptr<SlamCrashLogger> GlobalCrashLogger::instance_;
+// GlobalCrashLogger 实现
+std::unique_ptr<CrashLogger> GlobalCrashLogger::instance_;
 
 bool GlobalCrashLogger::initialize(const std::shared_ptr<spdlog::logger>& spdlog_logger)
 {
     if (instance_) return true;
 
-    instance_ = std::make_unique<SlamCrashLogger>(spdlog_logger);
+    instance_ = std::make_unique<CrashLogger>(spdlog_logger);
     return instance_->initialize();
 }
 

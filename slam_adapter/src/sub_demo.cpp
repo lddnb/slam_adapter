@@ -1,11 +1,8 @@
 #include <slam_common/flatbuffers_pub_sub.hpp>
 #include <slam_common/foxglove_messages.hpp>
-#include <slam_common/slam_crash_logger.hpp>
+#include <slam_common/crash_logger.hpp>
 #include <slam_common/callback_dispatcher.hpp>
-#include <spdlog/sinks/stdout_color_sinks.h>
-#include <spdlog/sinks/basic_file_sink.h>
-#include <spdlog/sinks/dup_filter_sink.h>
-#include <spdlog/spdlog.h>
+#include <spdlog/stopwatch.h>
 #include <opencv2/opencv.hpp>
 
 using namespace ms_slam::slam_common;
@@ -17,7 +14,7 @@ int main()
     auto dup_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(10));
     dup_filter->add_sink(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
     dup_filter->add_sink(std::make_shared<spdlog::sinks::basic_file_sink_mt>(config.log_file_path, true));
-    auto logger = std::make_shared<spdlog::logger>("slam_crash_logger", dup_filter);
+    auto logger = std::make_shared<spdlog::logger>("crash_logger", dup_filter);
 
     logger->set_pattern(config.log_pattern);
     logger->set_level(spdlog::level::from_str(config.log_level));
@@ -64,15 +61,14 @@ int main()
     auto img_callback = [&received_count](const FoxgloveCompressedImage& img_wrapper) {
         received_count++;
 
-        auto start = std::chrono::steady_clock::now();
+        spdlog::stopwatch ws;
         const foxglove::CompressedImage* img = img_wrapper.get();
         spdlog::info("✓ Received Image #{}: format={}, {} bytes",
                     received_count.load(), img->format()->c_str(), img->data()->size());
         std::vector<uint8_t> buffer(img->data()->begin(), img->data()->end());
         cv::Mat mat = cv::imdecode(buffer, cv::IMREAD_COLOR);
         spdlog::info(" mat size: {}x{}", mat.size().width, mat.size().height);
-        auto duration = std::chrono::steady_clock::now() - start;
-        spdlog::warn("  Decoding time: {} us", std::chrono::duration_cast<std::chrono::microseconds>(duration).count());
+        spdlog::warn("  Decoding time: {} us", std::chrono::duration_cast<std::chrono::microseconds>(ws.elapsed()).count());
 
         // std::string filename = "received_image.jpg";
         // cv::imwrite(filename, mat);

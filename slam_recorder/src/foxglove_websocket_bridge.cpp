@@ -1,3 +1,8 @@
+/**
+ * @file foxglove_websocket_bridge.cpp
+ * @brief Foxglove WebSocket 桥接器实现
+ */
+
 #include "slam_recorder/foxglove_websocket_bridge.hpp"
 
 #include <chrono>
@@ -12,10 +17,9 @@
 namespace ms_slam::slam_recorder
 {
 
-// ============================================================================
-// 构造函数
-// ============================================================================
-
+/**
+ * @brief 构造函数，完成 iceoryx2 节点与 WebSocket 服务初始化
+ */
 FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config)
 : config_(config), context_(foxglove::Context::create())
 {
@@ -23,9 +27,7 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config)
     spdlog::info("  WebSocket enabled: {}", config_.websocket.enable);
     spdlog::info("  Recorder enabled: {}", config_.recorder.enable);
 
-    // -------------------------------------------------------------------------
-    // 1. 创建 iceoryx2 node
-    // -------------------------------------------------------------------------
+    // 创建 iceoryx2 node
     try {
         node_ = std::make_shared<iox2::Node<iox2::ServiceType::Ipc>>(
             iox2::NodeBuilder()
@@ -37,9 +39,7 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config)
         throw std::runtime_error(std::string("Failed to create iceoryx2 node: ") + e.what());
     }
 
-    // -------------------------------------------------------------------------
-    // 2. 创建 WebSocket 服务器（如果启用）
-    // -------------------------------------------------------------------------
+    // 创建 WebSocket 服务器（如果启用）
     if (config_.websocket.enable) {
         foxglove::WebSocketServerOptions options;
         options.context = context_;
@@ -67,9 +67,7 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config)
         spdlog::info("WebSocket server disabled");
     }
 
-    // -------------------------------------------------------------------------
-    // 3. 根据配置初始化 Topics
-    // -------------------------------------------------------------------------
+    // 根据配置初始化 Topics
     spdlog::info("Configuring topics...");
     for (const auto& topic : config_.topics) {
         if (!topic.enabled) {
@@ -126,10 +124,9 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config)
 }
 
 
-// ============================================================================
-// 析构函数
-// ============================================================================
-
+/**
+ * @brief 析构函数，确保资源释放
+ */
 FoxgloveWebSocketBridge::~FoxgloveWebSocketBridge()
 {
     spdlog::info("Destroying FoxgloveWebSocketBridge...");
@@ -137,10 +134,9 @@ FoxgloveWebSocketBridge::~FoxgloveWebSocketBridge()
     spdlog::info("✓ FoxgloveWebSocketBridge destroyed");
 }
 
-// ============================================================================
-// 启动/停止方法
-// ============================================================================
-
+/**
+ * @brief 启动桥接器服务
+ */
 void FoxgloveWebSocketBridge::start()
 {
     if (running_.load()) {
@@ -168,6 +164,9 @@ void FoxgloveWebSocketBridge::start()
     }
 }
 
+/**
+ * @brief 停止桥接器服务
+ */
 void FoxgloveWebSocketBridge::stop()
 {
     if (!running_.load()) {
@@ -211,10 +210,9 @@ void FoxgloveWebSocketBridge::stop()
     }
 }
 
-// ============================================================================
-// 录制控制方法
-// ============================================================================
-
+/**
+ * @brief 启动记录功能
+ */
 void FoxgloveWebSocketBridge::start_recording()
 {
     if (!config_.recorder.enable) {
@@ -236,6 +234,9 @@ void FoxgloveWebSocketBridge::start_recording()
     }
 }
 
+/**
+ * @brief 停止记录功能
+ */
 void FoxgloveWebSocketBridge::stop_recording()
 {
     if (!recording_.load()) {
@@ -250,10 +251,9 @@ void FoxgloveWebSocketBridge::stop_recording()
     spdlog::info("✓ Recording stopped: {}", current_output_file_);
 }
 
-// ============================================================================
-// 主运行循环
-// ============================================================================
-
+/**
+ * @brief 主循环，负责轮询并处理数据
+ */
 void FoxgloveWebSocketBridge::run()
 {
     spdlog::info("Main loop started (poll interval: {} ms)", config_.websocket.poll_interval_ms);
@@ -292,10 +292,11 @@ void FoxgloveWebSocketBridge::run()
     spdlog::info("Main loop exited");
 }
 
-// ============================================================================
-// 轮询并转发方法
-// ============================================================================
-
+/**
+ * @brief 轮询指定 Topic 并执行转发与录制
+ * @param topic_name Topic 名称
+ * @param schema Schema 名称
+ */
 void FoxgloveWebSocketBridge::poll_and_forward_topic(const std::string& topic_name, const std::string& schema)
 {
     // 检查是否有 WebSocket 客户端订阅或是否正在录制
@@ -387,10 +388,9 @@ void FoxgloveWebSocketBridge::poll_and_forward_topic(const std::string& topic_na
 }
 
 
-// ============================================================================
-// MCAP 录制方法
-// ============================================================================
-
+/**
+ * @brief 初始化 MCAP 写入器
+ */
 void FoxgloveWebSocketBridge::init_mcap_writer()
 {
     // 创建输出目录
@@ -427,6 +427,9 @@ void FoxgloveWebSocketBridge::init_mcap_writer()
     spdlog::info("  Compression: {}", config_.recorder.compression);
 }
 
+/**
+ * @brief 关闭 MCAP 写入器
+ */
 void FoxgloveWebSocketBridge::close_mcap_writer()
 {
     if (mcap_writer_) {
@@ -435,6 +438,10 @@ void FoxgloveWebSocketBridge::close_mcap_writer()
     }
 }
 
+/**
+ * @brief 生成 MCAP 输出文件名
+ * @return 文件路径
+ */
 std::string FoxgloveWebSocketBridge::generate_output_filename() const
 {
     // 生成时间戳：recording_20251011_143020.mcap
@@ -450,8 +457,16 @@ std::string FoxgloveWebSocketBridge::generate_output_filename() const
     return oss.str();
 }
 
+/**
+ * @brief 将消息写入 MCAP 文件
+ * @param topic_name Topic 名称
+ * @param schema_name Schema 名称
+ * @param data 数据指针
+ * @param size 数据长度
+ * @param timestamp_ns 时间戳（纳秒）
+ */
 void FoxgloveWebSocketBridge::record_to_mcap(const std::string& topic_name, const std::string& schema_name,
-                                           const uint8_t* data, size_t size, uint64_t timestamp_ns)
+                                             const uint8_t* data, size_t size, uint64_t timestamp_ns)
 {
     if (!mcap_writer_) {
         return;
@@ -510,10 +525,10 @@ void FoxgloveWebSocketBridge::record_to_mcap(const std::string& topic_name, cons
 }
 
 
-// ============================================================================
-// 辅助方法
-// ============================================================================
-
+/**
+ * @brief 获取当前系统时间戳（纳秒）
+ * @return 当前时间戳
+ */
 uint64_t FoxgloveWebSocketBridge::get_current_timestamp_ns()
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -521,6 +536,10 @@ uint64_t FoxgloveWebSocketBridge::get_current_timestamp_ns()
     ).count();
 }
 
+/**
+ * @brief 汇总 Topic 统计数据
+ * @return Statistics 结构体
+ */
 FoxgloveWebSocketBridge::Statistics FoxgloveWebSocketBridge::get_statistics() const
 {
     Statistics stats;

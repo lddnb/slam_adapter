@@ -4,6 +4,8 @@
 #include <memory>
 #include <stdexcept>
 #include <cstdlib>
+#include <execution>
+#include <omp.h>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
@@ -185,6 +187,41 @@ static void BM_PCL_Transform(benchmark::State& state) {
 }
 
 // ============================================================================
+// Benchmark 3.1: PCL PointCloud (In-Place)
+// ============================================================================
+
+static void BM_PCL_Transform_InPlace(benchmark::State& state) {
+    const size_t num_points = state.range(0);
+    const auto& test_data = get_test_data(num_points);
+
+    // Pre-build source point cloud once
+    pcl::PointCloud<pcl::PointXYZ>::Ptr source_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    source_cloud->points.reserve(num_points);
+    for (const auto& pt : test_data.points) {
+        source_cloud->points.emplace_back(pt.x(), pt.y(), pt.z());
+    }
+    source_cloud->width = source_cloud->points.size();
+    source_cloud->height = 1;
+    source_cloud->is_dense = true;
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+
+    // Benchmark loop
+    for (auto _ : state) {
+        state.PauseTiming();
+        *cloud = *source_cloud;
+        state.ResumeTiming();
+
+        // Perform in-place transform
+        pcl::transformPointCloud(*cloud, *cloud, test_data.T_4x4);
+        benchmark::DoNotOptimize(cloud->points.data());
+    }
+
+    state.SetItemsProcessed(state.iterations() * num_points);
+    state.SetBytesProcessed(state.iterations() * num_points * 3 * sizeof(float));
+}
+
+// ============================================================================
 // Benchmark 4: Naive Eigen Loop (baseline)
 // ============================================================================
 
@@ -275,6 +312,59 @@ static void BM_EigenMap_Transform(benchmark::State& state) {
 }
 
 // ============================================================================
+// Benchmark 7: OpenMP Parallel Loop
+// ============================================================================
+
+static void BM_OmpLoop_Transform(benchmark::State& state) {
+    const size_t num_points = state.range(0);
+    const auto& test_data = get_test_data(num_points);
+
+    std::vector<Eigen::Vector3f> transformed(num_points);
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        std::copy(test_data.points.begin(), test_data.points.end(), transformed.begin());
+        state.ResumeTiming();
+
+        #pragma omp parallel for
+        for (size_t i = 0; i < num_points; ++i) {
+            transformed[i] = test_data.R * transformed[i] + test_data.t;
+        }
+        benchmark::DoNotOptimize(transformed.data());
+    }
+
+    state.SetItemsProcessed(state.iterations() * num_points);
+    state.SetBytesProcessed(state.iterations() * num_points * 3 * sizeof(float));
+}
+
+// ============================================================================
+// Benchmark 8: C++17 Parallel ForEach
+// ============================================================================
+
+static void BM_StdParLoop_Transform(benchmark::State& state) {
+    const size_t num_points = state.range(0);
+    const auto& test_data = get_test_data(num_points);
+
+    std::vector<Eigen::Vector3f> transformed(num_points);
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        std::copy(test_data.points.begin(), test_data.points.end(), transformed.begin());
+        state.ResumeTiming();
+
+        std::for_each(std::execution::par, transformed.begin(), transformed.end(),
+            [&](Eigen::Vector3f& pt) {
+                pt = test_data.R * pt + test_data.t;
+            }
+        );
+        benchmark::DoNotOptimize(transformed.data());
+    }
+
+    state.SetItemsProcessed(state.iterations() * num_points);
+    state.SetBytesProcessed(state.iterations() * num_points * 3 * sizeof(float));
+}
+
+// ============================================================================
 // Register Benchmarks
 // ============================================================================
 
@@ -300,6 +390,13 @@ BENCHMARK(BM_PCL_Transform)
     ->Arg(1000000)
     ->Unit(benchmark::kMillisecond);
 
+BENCHMARK(BM_PCL_Transform_InPlace)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->Unit(benchmark::kMillisecond);
+
 BENCHMARK(BM_NaiveEigenLoop_Transform)
     ->Arg(1000)
     ->Arg(10000)
@@ -315,6 +412,20 @@ BENCHMARK(BM_EigenBatch_Transform)
     ->Unit(benchmark::kMillisecond);
 
 BENCHMARK(BM_EigenMap_Transform)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->Unit(benchmark::kMillisecond);
+
+BENCHMARK(BM_OmpLoop_Transform)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->Unit(benchmark::kMillisecond);
+
+BENCHMARK(BM_StdParLoop_Transform)
     ->Arg(1000)
     ->Arg(10000)
     ->Arg(100000)

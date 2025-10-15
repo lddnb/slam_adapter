@@ -1,3 +1,8 @@
+/**
+ * @file foxglove_bridge_main.cpp
+ * @brief Foxglove WebSocket Bridge 命令行入口
+ */
+
 #include "slam_recorder/foxglove_websocket_bridge.hpp"
 
 #include <csignal>
@@ -5,13 +10,18 @@
 
 #include <spdlog/spdlog.h>
 #include <yaml-cpp/yaml.h>
+#include <slam_common/crash_logger.hpp>
 
 using namespace ms_slam::slam_recorder;
+using namespace ms_slam::slam_common;
 
-// 全局指针用于信号处理
+/// 全局桥接指针，供信号处理函数使用
 static std::unique_ptr<FoxgloveWebSocketBridge> g_bridge;
 
-// 信号处理函数（SIGINT / Ctrl+C）
+/**
+ * @brief 处理 SIGINT 信号
+ * @param signal 信号编号
+ */
 void signal_handler(int signal)
 {
     if (signal == SIGINT) {
@@ -22,11 +32,30 @@ void signal_handler(int signal)
     }
 }
 
+/**
+ * @brief 应用入口，加载配置并启动桥接服务
+ */
 int main(int argc, char** argv)
 {
     // 设置日志级别
-    spdlog::set_level(spdlog::level::info);
-    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
+    LoggerConfig config;
+    config.log_file_path = "recorder.log";
+    config.temp_dir = "/tmp";
+
+    auto dup_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(10));
+    dup_filter->add_sink(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+    dup_filter->add_sink(std::make_shared<spdlog::sinks::basic_file_sink_mt>(config.log_file_path, true));
+    auto logger = std::make_shared<spdlog::logger>("crash_logger", dup_filter);
+
+    logger->set_level(spdlog::level::from_str(config.log_level));
+    logger->flush_on(spdlog::level::from_str(config.flush_level));
+    logger->set_pattern(config.log_pattern);
+    spdlog::set_default_logger(logger);
+
+    if (!SLAM_CRASH_LOGGER_INIT(logger)) {
+        spdlog::error("Failed to initialize crash logger!");
+        return 1;
+    }
 
     spdlog::info("========================================");
     spdlog::info("Foxglove WebSocket Bridge");
