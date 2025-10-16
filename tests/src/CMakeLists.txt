@@ -21,12 +21,11 @@ target_link_libraries(callback_dispatcher_test PRIVATE slam_common::slam_common)
 
 include(CTest)
 # Create the test executable
-# add_executable(slam_adapter_tests
-#     sample_test.cpp
-# )
-# target_link_libraries(slam_adapter_tests PRIVATE Catch2::Catch2WithMain)
-# add_test(NAME slam_adapter_tests COMMAND slam_adapter_tests)
-
+add_executable(point_cloud_test
+    point_cloud_test.cpp
+)
+target_link_libraries(point_cloud_test PRIVATE Catch2::Catch2WithMain slam_core::slam_core)
+add_test(NAME point_cloud_test COMMAND point_cloud_test)
 
 # add_executable(signal_handler_test
 #     signal_handler_test.cpp

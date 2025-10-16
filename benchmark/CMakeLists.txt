@@ -24,12 +24,14 @@ find_package(benchmark REQUIRED)
 # ============================================================================
 
 add_executable(transform_benchmark src/transform_benchmark.cpp)
-
+target_include_directories(transform_benchmark PRIVATE ${PCL_INCLUDE_DIRS})
 target_link_libraries(transform_benchmark PRIVATE
     slam_core::slam_core
     Eigen3::Eigen
     small_gicp::small_gicp
     benchmark::benchmark
+    ${PCL_LIBRARIES}
+    tbb
 )
 
 # OpenMP support
@@ -38,11 +40,6 @@ if(OpenMP_CXX_FOUND)
     target_compile_definitions(transform_benchmark PRIVATE HAVE_OPENMP)
     message(STATUS "OpenMP enabled for benchmark")
 endif()
-
-# PCL support
-target_link_libraries(transform_benchmark PRIVATE ${PCL_LIBRARIES})
-target_include_directories(transform_benchmark PRIVATE ${PCL_INCLUDE_DIRS})
-message(STATUS "PCL ${PCL_VERSION} found, enabling PCL benchmark")
 
 # Print build configuration
 message(STATUS "==============================================")

@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <utility>
 
+#include <spdlog/stopwatch.h>
+
 namespace ms_slam::slam_common
 {
 
@@ -91,9 +93,9 @@ void CallbackDispatcher::poll_once()
 
     for (auto& entry : entries_) {
         try {
-            auto start = std::chrono::steady_clock::now();
+            spdlog::stopwatch sw;
             bool processed = entry.poll_func();
-            auto duration = std::chrono::steady_clock::now() - start;
+            auto duration = duration_cast<std::chrono::nanoseconds>(sw.elapsed());
 
             if (processed) {
                 entry.total_calls++;

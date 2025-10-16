@@ -138,6 +138,7 @@ class CrashLogger::Impl
             spdlog_logger_->info("Crash Logger shutting down");
             spdlog_logger_->flush();
         }
+        spdlog::shutdown();
 
         logger_initialized_ = false;
     }

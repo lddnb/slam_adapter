@@ -12,9 +12,10 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_G
     add_compile_options(-Wno-stringop-overflow)
 endif()
 
-list(APPEND CMAKE_PREFIX_PATH "../slam_common/install")
+list(APPEND CMAKE_PREFIX_PATH "../slam_common/install" "../slam_core/install")
 
 find_package(slam_common REQUIRED)
+find_package(slam_core REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(mcap REQUIRED)
 

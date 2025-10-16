@@ -96,14 +96,13 @@ static void BM_SlamCore_Transform(benchmark::State& state) {
     const size_t num_points = state.range(0);
     const auto& test_data = get_test_data(num_points);
 
-    // Pre-build source point cloud once
-    PointCloudXYZ source_cloud(num_points);
+    PointCloudXYZ source_cloud;
+    source_cloud.reserve(num_points);
     for (size_t i = 0; i < num_points; ++i) {
         source_cloud.push_back(test_data.points[i]);
     }
-    PointCloudXYZ cloud(num_points);
+    PointCloudXYZ cloud = source_cloud;
 
-    // Benchmark loop
     for (auto _ : state) {
         state.PauseTiming();
         cloud = source_cloud;
@@ -111,6 +110,93 @@ static void BM_SlamCore_Transform(benchmark::State& state) {
 
         cloud.transform(test_data.transform);
         benchmark::DoNotOptimize(cloud.positions().data());
+    }
+
+    state.SetItemsProcessed(state.iterations() * num_points);
+    state.SetBytesProcessed(state.iterations() * num_points * 3 * sizeof(float));
+}
+
+// ============================================================================
+// Benchmark 1.2: slam_core SoA PointCloud (Copy Transform)
+// ============================================================================
+
+static void BM_SlamCore_Transform_Copy(benchmark::State& state) {
+    using namespace ms_slam::slam_core;
+
+    const size_t num_points = state.range(0);
+    const auto& test_data = get_test_data(num_points);
+
+    PointCloudXYZ source_cloud;
+    source_cloud.reserve(num_points);
+    for (size_t i = 0; i < num_points; ++i) {
+        source_cloud.push_back(test_data.points[i]);
+    }
+
+    for (auto _ : state) {
+        auto transformed_cloud = source_cloud.transformed(test_data.transform);
+        benchmark::DoNotOptimize(transformed_cloud.positions().data());
+    }
+
+    state.SetItemsProcessed(state.iterations() * num_points);
+    state.SetBytesProcessed(state.iterations() * num_points * 3 * sizeof(float));
+}
+
+// ============================================================================
+// Benchmark 1.3: slam_core SoA PointCloud (Parallel Transform)
+// ============================================================================
+
+static void BM_SlamCore_Transform_Parallel(benchmark::State& state) {
+    using namespace ms_slam::slam_core;
+
+    const size_t num_points = state.range(0);
+    const auto& test_data = get_test_data(num_points);
+
+    PointCloudXYZ source_cloud;
+    source_cloud.reserve(num_points);
+    for (size_t i = 0; i < num_points; ++i) {
+        source_cloud.push_back(test_data.points[i]);
+    }
+    PointCloudXYZ cloud;
+    cloud.reserve(num_points);
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        cloud = source_cloud;
+        state.ResumeTiming();
+
+        cloud.transform_parallel(test_data.transform);
+        benchmark::DoNotOptimize(cloud.positions().data());
+    }
+
+    state.SetItemsProcessed(state.iterations() * num_points);
+    state.SetBytesProcessed(state.iterations() * num_points * 3 * sizeof(float));
+}
+
+// ============================================================================
+// Benchmark 1.4: slam_core SoA PointCloud (Copy Parallel Transform)
+// ============================================================================
+
+static void BM_SlamCore_Transform_Parallel_Copy(benchmark::State& state) {
+    using namespace ms_slam::slam_core;
+
+    const size_t num_points = state.range(0);
+    const auto& test_data = get_test_data(num_points);
+
+    PointCloudXYZ source_cloud;
+    source_cloud.reserve(num_points);
+    for (size_t i = 0; i < num_points; ++i) {
+        source_cloud.push_back(test_data.points[i]);
+    }
+    PointCloudXYZ target_cloud;
+    target_cloud.reserve(num_points);
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        target_cloud = source_cloud;
+        state.ResumeTiming();
+
+        target_cloud.transform_parallel(test_data.transform);
+        benchmark::DoNotOptimize(target_cloud.positions().data());
     }
 
     state.SetItemsProcessed(state.iterations() * num_points);
@@ -370,6 +456,27 @@ static void BM_StdParLoop_Transform(benchmark::State& state) {
 
 // Test point cloud sizes: 1K, 10K, 100K, 1M
 BENCHMARK(BM_SlamCore_Transform)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->Unit(benchmark::kMillisecond);
+
+BENCHMARK(BM_SlamCore_Transform_Copy)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->Unit(benchmark::kMillisecond);
+
+BENCHMARK(BM_SlamCore_Transform_Parallel)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->Unit(benchmark::kMillisecond);
+
+BENCHMARK(BM_SlamCore_Transform_Parallel_Copy)
     ->Arg(1000)
     ->Arg(10000)
     ->Arg(100000)
