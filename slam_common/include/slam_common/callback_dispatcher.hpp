@@ -60,13 +60,8 @@ class CallbackDispatcher
                                  int priority = 0)
     {
         auto poll_func = [subscriber, name]() -> bool {
-            try {
-                auto sample = subscriber->receive_once();
-                return sample.has_value();
-            } catch (const std::exception& e) {
-                spdlog::error("[CallbackDispatcher] Subscriber '{}' error: {}", name, e.what());
-                return false;
-            }
+            auto sample = subscriber->receive_once();
+            return sample.has_value();
         };
 
         return register_poller(poll_func, name, priority);
@@ -86,12 +81,7 @@ class CallbackDispatcher
                              int priority = 0)
     {
         auto poll_func = [server, name]() -> bool {
-            try {
-                return server->receive_and_respond();
-            } catch (const std::exception& e) {
-                spdlog::error("[CallbackDispatcher] Server '{}' error: {}", name, e.what());
-                return false;
-            }
+            return server->receive_and_respond();
         };
 
         return register_poller(poll_func, name, priority);
@@ -132,7 +122,6 @@ class CallbackDispatcher
         std::string name;                 ///< 回调名称
         int priority;                     ///< 调度优先级
         uint64_t total_calls;             ///< 总调用次数
-        uint64_t total_errors;            ///< 错误次数
         std::chrono::microseconds avg_duration; ///< 平均处理耗时
     };
 
@@ -168,7 +157,6 @@ class CallbackDispatcher
         int priority;
         std::string name;
         uint64_t total_calls;
-        uint64_t total_errors;
         std::chrono::nanoseconds total_duration{0};
     };
 

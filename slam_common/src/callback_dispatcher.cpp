@@ -32,7 +32,7 @@ uint64_t CallbackDispatcher::register_poller(std::function<bool()> poll_func,
     std::lock_guard<std::mutex> lock(mutex_);
 
     uint64_t id = next_id_++;
-    entries_.push_back({id, std::move(poll_func), priority, name, 0, 0});
+    entries_.push_back({id, std::move(poll_func), priority, name, 0});
 
     std::sort(entries_.begin(), entries_.end(), [](const CallbackEntry& a, const CallbackEntry& b) {
         return a.priority > b.priority;
@@ -92,18 +92,13 @@ void CallbackDispatcher::poll_once()
     std::lock_guard<std::mutex> lock(mutex_);
 
     for (auto& entry : entries_) {
-        try {
-            spdlog::stopwatch sw;
-            bool processed = entry.poll_func();
-            auto duration = duration_cast<std::chrono::nanoseconds>(sw.elapsed());
+        spdlog::stopwatch sw;
+        bool processed = entry.poll_func();
+        auto duration = duration_cast<std::chrono::nanoseconds>(sw.elapsed());
 
-            if (processed) {
-                entry.total_calls++;
-                entry.total_duration += duration;
-            }
-        } catch (const std::exception& e) {
-            spdlog::error("[CallbackDispatcher] Uncaught exception in '{}': {}", entry.name, e.what());
-            entry.total_errors++;
+        if (processed) {
+            entry.total_calls++;
+            entry.total_duration += duration;
         }
     }
 }
@@ -126,7 +121,6 @@ std::vector<CallbackDispatcher::Stats> CallbackDispatcher::get_statistics() cons
         stat.name = entry.name;
         stat.priority = entry.priority;
         stat.total_calls = entry.total_calls;
-        stat.total_errors = entry.total_errors;
 
         if (entry.total_calls > 0) {
             stat.avg_duration = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -150,11 +144,10 @@ void CallbackDispatcher::print_statistics() const
     spdlog::info("---------------------+----------+----------+--------+-------------");
 
     for (const auto& s : stats) {
-        spdlog::info("{:<20} | {:>8} | {:>8} | {:>6} | {:>8} us",
+        spdlog::info("{:<20} | {:>8} | {:>8} | {:>8} us",
                       s.name,
                       s.priority,
                       s.total_calls,
-                      s.total_errors,
                       s.avg_duration.count());
     }
 

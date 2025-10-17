@@ -109,23 +109,18 @@ class FBSPublisher
             throw std::runtime_error("FlatBuffers Publisher service not initialized!");
         }
 
-        try {
-            auto buffer = message.serialize();
-            auto sample = publisher_->loan_slice_uninit(buffer.size()).expect("acquire sample");
-            auto initialized_sample = sample.write_from_fn([&buffer](uint64_t idx) { return buffer.data()[idx]; });
-            iox2::send(std::move(initialized_sample)).expect("send successful");
+        auto buffer = message.serialize();
+        auto sample = publisher_->loan_slice_uninit(buffer.size()).expect("acquire sample");
+        auto initialized_sample = sample.write_from_fn([&buffer](uint64_t idx) { return buffer.data()[idx]; });
+        iox2::send(std::move(initialized_sample)).expect("send successful");
 
-            published_count_++;
+        published_count_++;
 
-            if (publish_callback_) {
-                publish_callback_(published_count_.load(), message);
-            }
-
-            return true;
-        } catch (const std::exception& e) {
-            spdlog::error("FlatBuffers publish error: {}", e.what());
-            return false;
+        if (publish_callback_) {
+            publish_callback_(published_count_.load(), message);
         }
+
+        return true;
     }
 
     /**
@@ -140,17 +135,12 @@ class FBSPublisher
             throw std::runtime_error("FlatBuffers Publisher service not initialized!");
         }
 
-        try {
-            auto sample = publisher_->loan_slice_uninit(size).expect("acquire sample");
-            auto initialized_sample = sample.write_from_fn([data](uint64_t idx) { return data[idx]; });
-            iox2::send(std::move(initialized_sample)).expect("send successful");
-            published_count_++;
+        auto sample = publisher_->loan_slice_uninit(size).expect("acquire sample");
+        auto initialized_sample = sample.write_from_fn([data](uint64_t idx) { return data[idx]; });
+        iox2::send(std::move(initialized_sample)).expect("send successful");
+        published_count_++;
 
-            return true;
-        } catch (const std::exception& e) {
-            spdlog::error("FlatBuffers publish_raw error: {}", e.what());
-            return false;
-        }
+        return true;
     }
 
     /**
@@ -249,25 +239,21 @@ class FBSSubscriber
      */
     iox::optional<MessageType> receive_once()
     {
-        try {
-            auto sample = subscriber_->receive().expect("receive succeeds");
-            if (sample.has_value()) {
-                received_count_++;
+        auto sample = subscriber_->receive().expect("receive succeeds");
+        if (sample.has_value()) {
+            received_count_++;
 
-                auto payload = sample->payload();
-                const uint8_t* data = payload.begin();
-                size_t size = payload.number_of_bytes();
+            auto payload = sample->payload();
+            const uint8_t* data = payload.begin();
+            size_t size = payload.number_of_bytes();
 
-                auto message = MessageType::deserialize(data, size);
+            auto message = MessageType::deserialize(data, size);
 
-                if (receive_callback_) {
-                    receive_callback_(message);
-                }
-
-                return message;
+            if (receive_callback_) {
+                receive_callback_(message);
             }
-        } catch (const std::exception& e) {
-            spdlog::error("FlatBuffers receive error: {}", e.what());
+
+            return message;
         }
         return iox::nullopt;
     }
@@ -293,20 +279,18 @@ class FBSSubscriber
      */
     iox::optional<std::vector<uint8_t>> receive_raw_once()
     {
-        try {
-            auto sample = subscriber_->receive().expect("receive succeeds");
-            if (sample.has_value()) {
-                received_count_++;
+        
+        auto sample = subscriber_->receive().expect("receive succeeds");
+        if (sample.has_value()) {
+            received_count_++;
 
-                auto payload = sample->payload();
-                const uint8_t* data = payload.begin();
-                size_t size = payload.number_of_bytes();
+            auto payload = sample->payload();
+            const uint8_t* data = payload.begin();
+            size_t size = payload.number_of_bytes();
 
-                return std::vector<uint8_t>(data, data + size);
-            }
-        } catch (const std::exception& e) {
-            spdlog::error("FlatBuffers receive_raw error: {}", e.what());
+            return std::vector<uint8_t>(data, data + size);
         }
+        
         return iox::nullopt;
     }
 
@@ -319,41 +303,21 @@ class FBSSubscriber
         std::vector<std::vector<uint8_t>> raw_messages;
 
         while (true) {
-            try {
-                auto sample = subscriber_->receive().expect("receive succeeds");
-                if (!sample.has_value()) {
-                    break;
-                }
-
-                received_count_++;
-
-                auto payload = sample->payload();
-                const uint8_t* data = payload.begin();
-                size_t size = payload.number_of_bytes();
-
-                raw_messages.emplace_back(data, data + size);
-
-            } catch (const std::exception& e) {
-                spdlog::error("FlatBuffers receive_all_raw error: {}", e.what());
+            auto sample = subscriber_->receive().expect("receive succeeds");
+            if (!sample.has_value()) {
                 break;
             }
+
+            received_count_++;
+
+            auto payload = sample->payload();
+            const uint8_t* data = payload.begin();
+            size_t size = payload.number_of_bytes();
+
+            raw_messages.emplace_back(data, data + size);
         }
 
         return raw_messages;
-    }
-
-    /**
-     * @brief 检查是否有待处理数据
-     * @return 有数据返回 true
-     */
-    bool has_data() const
-    {
-        try {
-            auto sample = subscriber_->receive().expect("receive succeeds");
-            return sample.has_value();
-        } catch (const std::exception&) {
-            return false;
-        }
     }
 
     /**
@@ -494,13 +458,8 @@ class ThreadedFBSSubscriber
     void run()
     {
         while (!should_stop_.load()) {
-            try {
-                receive_messages();
-                std::this_thread::sleep_for(config_.poll_interval);
-            } catch (const std::exception& e) {
-                spdlog::error("ThreadedFlatBuffer Subscriber error: {}", e.what());
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
+            receive_messages();
+            std::this_thread::sleep_for(config_.poll_interval);
         }
     }
 
@@ -508,20 +467,16 @@ class ThreadedFBSSubscriber
     {
         auto sample = subscriber_->receive().expect("receive succeeds");
         while (sample.has_value()) {
-            try {
-                received_count_++;
+            received_count_++;
 
-                auto payload = sample->payload();
-                const uint8_t* data = payload.begin();
-                size_t size = payload.number_of_bytes();
+            auto payload = sample->payload();
+            const uint8_t* data = payload.begin();
+            size_t size = payload.number_of_bytes();
 
-                auto message = MessageType::deserialize(data, size);
+            auto message = MessageType::deserialize(data, size);
 
-                if (receive_callback_) {
-                    receive_callback_(message);
-                }
-            } catch (const std::exception& e) {
-                spdlog::error("Message processing error: {}", e.what());
+            if (receive_callback_) {
+                receive_callback_(message);
             }
 
             sample = subscriber_->receive().expect("receive succeeds");

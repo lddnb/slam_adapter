@@ -98,34 +98,30 @@ class CrashLogger::Impl
 
     bool initialize()
     {
-        try {
-            // 检查系统支持
-            if (!cpptrace::can_signal_safe_unwind() || !cpptrace::can_get_safe_object_frame()) {
-                spdlog::error("System doesn't support signal-safe unwinding or safe object frame");
-                return false;
-            }
-
-            // 预热 cpptrace
-            cpptrace::frame_ptr buffer[10];
-            cpptrace::safe_generate_raw_trace(buffer, 10);
-            cpptrace::safe_object_frame frame;
-            cpptrace::get_safe_object_frame(buffer[0], &frame);
-
-            // 安装信号处理器
-            install_signal_handlers();
-
-            // 设置全局状态
-            strncpy(g_temp_dir, temp_dir_.c_str(), sizeof(g_temp_dir) - 1);
-            g_crash_logger_initialized.store(true);
-
-            logger_initialized_ = true;
-            spdlog_logger_->info("Crash Logger initialized successfully");
-
-            return true;
-        } catch (const std::exception& e) {
-            spdlog::error("Failed to initialize CrashLogger: {}", e.what());
+        // 检查系统支持
+        if (!cpptrace::can_signal_safe_unwind() || !cpptrace::can_get_safe_object_frame()) {
+            spdlog::error("System doesn't support signal-safe unwinding or safe object frame");
             return false;
         }
+
+        // 预热 cpptrace
+        cpptrace::frame_ptr buffer[10];
+        cpptrace::safe_generate_raw_trace(buffer, 10);
+        cpptrace::safe_object_frame frame;
+        cpptrace::get_safe_object_frame(buffer[0], &frame);
+
+        // 安装信号处理器
+        install_signal_handlers();
+
+        // 设置全局状态
+        strncpy(g_temp_dir, temp_dir_.c_str(), sizeof(g_temp_dir) - 1);
+        g_crash_logger_initialized.store(true);
+
+        logger_initialized_ = true;
+        spdlog_logger_->info("Crash Logger initialized successfully");
+
+        return true;
+
     }
 
     void shutdown()

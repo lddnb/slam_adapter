@@ -5,6 +5,7 @@
 #include <catch2/catch_approx.hpp>
 
 #include <Eigen/Core>
+#include <cstdint>
 #include <vector>
 
 using namespace ms_slam::slam_core;
@@ -139,6 +140,118 @@ TEST_CASE("PointCloud FieldAccess", "[PointCloud]")
     auto intensity_block = cloud.field_block<IntensityTag>(0);
     REQUIRE(intensity_block.size() == 1);
     REQUIRE(intensity_block[0] == Approx(42.0f));
+
+    REQUIRE(cloud.intensity(0) == Approx(42.0f));
+    cloud.intensity(0) = 24.0f;
+    REQUIRE(cloud.intensity(0) == Approx(24.0f));
+}
+
+TEST_CASE("PointCloud FieldEigenMaps", "[PointCloud]")
+{
+    PointCloud<PointXYZINormalDescriptor> cloud;
+    cloud.push_back(PointXYZINormal{1.0f, 2.0f, 3.0f, 0.5f, 0.0f, 0.0f, 1.0f});
+    cloud.push_back(PointXYZINormal{4.0f, 5.0f, 6.0f, 1.5f, 0.0f, 1.0f, 0.0f});
+
+    auto position_1 = cloud.position(1);
+    position_1.x() = 10.0f;
+    position_1.y() = 20.0f;
+    position_1.z() = 30.0f;
+
+    auto normals_map = cloud.field_matrix<NormalTag>();
+    REQUIRE(normals_map.rows() == 3);
+    REQUIRE(normals_map.cols() == 2);
+    REQUIRE(normals_map(0, 0) == Approx(0.0f));
+    REQUIRE(normals_map(2, 0) == Approx(1.0f));
+    REQUIRE(normals_map(1, 1) == Approx(1.0f));
+
+    auto intensity_vec = cloud.field_vector<IntensityTag>();
+    REQUIRE(intensity_vec.size() == 2);
+    intensity_vec(0) = 2.5f;
+    intensity_vec(1) = 3.5f;
+    auto const& const_cloud = cloud;
+    auto const_normals = const_cloud.field_matrix<NormalTag>();
+    auto const_intensity = const_cloud.field_vector<IntensityTag>();
+    auto const_position = const_cloud.positions_matrix();
+    REQUIRE(const_normals(2, 0) == Approx(1.0f));
+    REQUIRE(const_intensity(0) == Approx(2.5f));
+    REQUIRE(const_intensity(1) == Approx(3.5f));
+    REQUIRE(const_position(0, 1) == Approx(10.0f));
+    REQUIRE(const_position(1, 1) == Approx(20.0f));
+    REQUIRE(const_position(2, 1) == Approx(30.0f));
+
+    auto normal0 = cloud.normal(0);
+    REQUIRE(normal0.rows() == 3);
+    REQUIRE(normal0(2) == Approx(1.0f));
+
+    auto normal1 = const_cloud.normal(1);
+    REQUIRE(normal1(1) == Approx(1.0f));
+}
+
+TEST_CASE("PointCloud SinglePointAccessors", "[PointCloud]")
+{
+    PointCloud<PointXYZINormalDescriptor> cloud;
+    cloud.push_back(PointXYZINormal{0.0f, 0.0f, 0.0f, 1.0f, 0.2f, 0.3f, 0.9f});
+    cloud.push_back(PointXYZINormal{1.0f, 1.0f, 1.0f, 2.0f, 0.5f, 0.4f, 0.7f});
+
+    auto normal0 = cloud.normal(0);
+    REQUIRE(normal0.rows() == 3);
+    normal0(0) = 1.0f;
+    normal0(1) = 0.0f;
+    normal0(2) = 0.0f;
+    REQUIRE(cloud.normal(0)(0) == Approx(1.0f));
+
+    cloud.intensity(1) = 3.5f;
+
+    const auto& const_cloud = cloud;
+    auto const_normal1 = const_cloud.normal(1);
+    REQUIRE(const_normal1(0) == Approx(0.5f));
+    REQUIRE(const_normal1(1) == Approx(0.4f));
+    REQUIRE(const_normal1(2) == Approx(0.7f));
+
+    const auto& intensity_ref = const_cloud.intensity(1);
+    REQUIRE(intensity_ref == Approx(3.5f));
+}
+
+TEST_CASE("PointCloud RGBAccess", "[PointCloud]")
+{
+    PointCloud<PointXYZIRGBDescriptor> cloud;
+    cloud.push_back(PointXYZIRGB{1.0f, 2.0f, 3.0f, 0.8f, 10, 20, 30});
+
+    auto rgb_map = cloud.rgb(0);
+    REQUIRE(rgb_map.rows() == 3);
+    REQUIRE(rgb_map(0) == 10);
+    REQUIRE(rgb_map(1) == 20);
+    REQUIRE(rgb_map(2) == 30);
+
+    rgb_map(1) = static_cast<std::uint8_t>(200);
+    REQUIRE(cloud.rgb(0)(1) == static_cast<std::uint8_t>(200));
+
+    const auto& const_cloud_rgb = cloud;
+    auto const_rgb_map = const_cloud_rgb.rgb(0);
+    REQUIRE(const_rgb_map(1) == static_cast<std::uint8_t>(200));
+}
+
+TEST_CASE("PointCloud CurvatureAccess", "[PointCloud]")
+{
+    PointCloud<PointXYZINormalCurvatureDescriptor> cloud;
+    cloud.resize(1);
+    cloud.curvature(0) = 0.75f;
+    REQUIRE(cloud.curvature(0) == Approx(0.75f));
+
+    const auto& const_cloud_curv = cloud;
+    REQUIRE(const_cloud_curv.curvature(0) == Approx(0.75f));
+}
+
+TEST_CASE("PointCloud TimestampAccess", "[PointCloud]")
+{
+    PointCloud<PointXYZITDescriptor> cloud;
+    cloud.push_back(PointXYZIT{1.0f, 2.0f, 3.0f, 4.0f, 123ULL});
+
+    cloud.timestamp(0) = 456ULL;
+    REQUIRE(cloud.timestamp(0) == 456ULL);
+
+    const auto& const_cloud = cloud;
+    REQUIRE(const_cloud.timestamp(0) == 456ULL);
 }
 
 struct CustomPoint {
@@ -160,6 +273,7 @@ TEST_CASE("PointCloud PushBackCustomPoint", "[PointCloud]")
 
     auto intensity = cloud.field_block<IntensityTag>(0);
     REQUIRE(intensity[0] == Approx(42.0f));
+    REQUIRE(cloud.intensity(0) == Approx(42.0f));
 }
 
 TEST_CASE("PointCloud AppendRange", "[PointCloud]")

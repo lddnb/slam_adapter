@@ -61,8 +61,36 @@ public:
     static_assert(std::is_same_v<PositionScalar, scalar_type>,
         "Position scalar must match descriptor scalar type");
 
-    using PositionMatrixMap = Eigen::Map<Eigen::Matrix<scalar_type, 3, Eigen::Dynamic, Eigen::ColMajor>>;
-    using ConstPositionMatrixMap = Eigen::Map<const Eigen::Matrix<scalar_type, 3, Eigen::Dynamic, Eigen::ColMajor>>;
+    template<typename Tag>
+    using field_descriptor_typed = field_descriptor_t<Tag, descriptor_type>;
+
+    template<typename Tag>
+        requires has_field_v<Tag, descriptor_type>
+    using FieldScalarT = typename field_descriptor_typed<Tag>::scalar_type;
+
+    template<typename Tag>
+        requires has_field_v<Tag, descriptor_type>
+    using FieldMatrixMap = Eigen::Map<Eigen::Matrix<FieldScalarT<Tag>, field_descriptor_typed<Tag>::dimensions, Eigen::Dynamic, Eigen::ColMajor>>;
+
+    template<typename Tag>
+        requires has_field_v<Tag, descriptor_type>
+    using ConstFieldMatrixMap = Eigen::Map<const Eigen::Matrix<FieldScalarT<Tag>, field_descriptor_typed<Tag>::dimensions, Eigen::Dynamic, Eigen::ColMajor>>;
+
+    template<typename Tag>
+        requires has_field_v<Tag, descriptor_type>
+    using FieldVectorMap = Eigen::Map<Eigen::Matrix<FieldScalarT<Tag>, Eigen::Dynamic, 1>>;
+
+    template<typename Tag>
+        requires has_field_v<Tag, descriptor_type>
+    using ConstFieldVectorMap = Eigen::Map<const Eigen::Matrix<FieldScalarT<Tag>, Eigen::Dynamic, 1>>;
+
+    template<typename Tag>
+        requires (has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions != 0)
+    using FieldPointMap = Eigen::Map<Eigen::Matrix<FieldScalarT<Tag>, field_descriptor_typed<Tag>::dimensions, 1>>;
+
+    template<typename Tag>
+        requires (has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions != 0)
+    using ConstFieldPointMap = Eigen::Map<const Eigen::Matrix<FieldScalarT<Tag>, field_descriptor_typed<Tag>::dimensions, 1>>;
 
     PointCloud() = default;
 
@@ -157,6 +185,44 @@ public:
         append(std::span(points.begin(), points.end()));
     }
 
+
+    template<typename Tag>
+    static constexpr bool is_scalar_field_v = (field_descriptor_typed<Tag>::dimensions == 1);
+
+    template<typename Tag>
+    auto field_view() noexcept
+    {
+        static_assert(has_field_v<Tag, descriptor_type>, "Requested field is not part of the descriptor");
+        if constexpr (is_scalar_field_v<Tag>) {
+            return field_span<Tag>();
+        } else {
+            auto& vec = storage_by_tag<Tag>();
+            return std::span<typename field_descriptor_typed<Tag>::scalar_type>(vec.data(), size_ * field_descriptor_typed<Tag>::dimensions);
+        }
+    }
+
+    template<typename Tag>
+    auto field_view() const noexcept
+    {
+        static_assert(has_field_v<Tag, descriptor_type>, "Requested field is not part of the descriptor");
+        if constexpr (is_scalar_field_v<Tag>) {
+            return field_span<Tag>();
+        } else {
+            const auto& vec = storage_by_tag<Tag>();
+            return std::span<const typename field_descriptor_typed<Tag>::scalar_type>(vec.data(), size_ * field_descriptor_typed<Tag>::dimensions);
+        }
+    }
+
+    [[nodiscard]] auto positions_view() noexcept
+    {
+        return field_view<PositionTag>();
+    }
+
+    [[nodiscard]] auto positions_view() const noexcept
+    {
+        return field_view<PositionTag>();
+    }
+
     [[nodiscard]] std::span<scalar_type> positions() noexcept
     {
         auto& pos = storage_by_tag<PositionTag>();
@@ -169,30 +235,84 @@ public:
         return std::span<const scalar_type>(pos.data(), size_ * position_dimensions);
     }
 
-    [[nodiscard]] PositionMatrixMap positions_matrix() noexcept
+    [[nodiscard]] auto positions_matrix() noexcept
     {
-        auto& pos = storage_by_tag<PositionTag>();
-        return PositionMatrixMap(pos.data(), 3, static_cast<Eigen::Index>(size_));
+        return field_matrix<PositionTag>();
     }
 
-    [[nodiscard]] ConstPositionMatrixMap positions_matrix() const noexcept
+    [[nodiscard]] auto positions_matrix() const noexcept
     {
-        const auto& pos = storage_by_tag<PositionTag>();
-        return ConstPositionMatrixMap(pos.data(), 3, static_cast<Eigen::Index>(size_));
+        return field_matrix<PositionTag>();
     }
 
-    [[nodiscard]] Eigen::Map<Eigen::Matrix<scalar_type, 3, 1>> position(std::size_t index) noexcept
+    [[nodiscard]] auto position(std::size_t index) noexcept
     {
-        assert(index < size_);
-        auto& pos = storage_by_tag<PositionTag>();
-        return Eigen::Map<Eigen::Matrix<scalar_type, 3, 1>>(pos.data() + index * position_dimensions);
+        return field_point<PositionTag>(index);
     }
 
-    [[nodiscard]] Eigen::Map<const Eigen::Matrix<scalar_type, 3, 1>> position(std::size_t index) const noexcept
+    [[nodiscard]] auto position(std::size_t index) const noexcept
     {
-        assert(index < size_);
-        const auto& pos = storage_by_tag<PositionTag>();
-        return Eigen::Map<const Eigen::Matrix<scalar_type, 3, 1>>(pos.data() + index * position_dimensions);
+        return field_point<PositionTag>(index);
+    }
+
+    [[nodiscard]] auto normal(std::size_t index) noexcept
+        requires has_field_v<NormalTag, descriptor_type>
+    {
+        return field_point<NormalTag>(index);
+    }
+
+    [[nodiscard]] auto normal(std::size_t index) const noexcept
+        requires has_field_v<NormalTag, descriptor_type>
+    {
+        return field_point<NormalTag>(index);
+    }
+
+    [[nodiscard]] auto rgb(std::size_t index) noexcept
+        requires has_field_v<RGBTag, descriptor_type>
+    {
+        return field_point<RGBTag>(index);
+    }
+
+    [[nodiscard]] auto rgb(std::size_t index) const noexcept
+        requires has_field_v<RGBTag, descriptor_type>
+    {
+        return field_point<RGBTag>(index);
+    }
+
+    [[nodiscard]] auto& intensity(std::size_t index) noexcept
+        requires has_field_v<IntensityTag, descriptor_type>
+    {
+        return field_value<IntensityTag>(index);
+    }
+
+    [[nodiscard]] const auto& intensity(std::size_t index) const noexcept
+        requires has_field_v<IntensityTag, descriptor_type>
+    {
+        return field_value<IntensityTag>(index);
+    }
+
+    [[nodiscard]] auto& timestamp(std::size_t index) noexcept
+        requires has_field_v<TimestampTag, descriptor_type>
+    {
+        return field_value<TimestampTag>(index);
+    }
+
+    [[nodiscard]] const auto& timestamp(std::size_t index) const noexcept
+        requires has_field_v<TimestampTag, descriptor_type>
+    {
+        return field_value<TimestampTag>(index);
+    }
+
+    [[nodiscard]] auto& curvature(std::size_t index) noexcept
+        requires has_field_v<CurvatureTag, descriptor_type>
+    {
+        return field_value<CurvatureTag>(index);
+    }
+
+    [[nodiscard]] const auto& curvature(std::size_t index) const noexcept
+        requires has_field_v<CurvatureTag, descriptor_type>
+    {
+        return field_value<CurvatureTag>(index);
     }
 
     template<typename Tag>
@@ -231,6 +351,78 @@ public:
         using FieldDesc = field_descriptor_t<Tag, descriptor_type>;
         const auto& vec = storage_by_tag<Tag>();
         return std::span<const typename FieldDesc::scalar_type>(vec.data(), size_ * FieldDesc::dimensions);
+    }
+
+    template<typename Tag>
+        requires has_field_v<Tag, descriptor_type>
+    [[nodiscard]] FieldMatrixMap<Tag> field_matrix() noexcept
+    {
+        auto& vec = storage_by_tag<Tag>();
+        static_assert(field_descriptor_typed<Tag>::dimensions > 0, "Field dimensions must be greater than zero");
+        
+        return FieldMatrixMap<Tag>(vec.data(), static_cast<Eigen::Index>(field_descriptor_typed<Tag>::dimensions), static_cast<Eigen::Index>(size_));
+    }
+
+    template<typename Tag>
+        requires has_field_v<Tag, descriptor_type>
+    [[nodiscard]] ConstFieldMatrixMap<Tag> field_matrix() const noexcept
+    {
+        const auto& vec = storage_by_tag<Tag>();
+        static_assert(field_descriptor_typed<Tag>::dimensions > 0, "Field dimensions must be greater than zero");
+
+        return ConstFieldMatrixMap<Tag>(vec.data(), static_cast<Eigen::Index>(field_descriptor_typed<Tag>::dimensions), static_cast<Eigen::Index>(size_));
+    }
+
+    template<typename Tag>
+        requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions == 1)
+    [[nodiscard]] FieldVectorMap<Tag> field_vector() noexcept
+    {
+        auto& vec = storage_by_tag<Tag>();
+        return FieldVectorMap<Tag>(vec.data(), static_cast<Eigen::Index>(size_));
+    }
+
+    template<typename Tag>
+        requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions == 1)
+    [[nodiscard]] ConstFieldVectorMap<Tag> field_vector() const noexcept
+    {
+        const auto& vec = storage_by_tag<Tag>();
+        return ConstFieldVectorMap<Tag>(vec.data(), static_cast<Eigen::Index>(size_));
+    }
+
+    template<typename Tag>
+        requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions > 1)
+    [[nodiscard]] FieldPointMap<Tag> field_point(std::size_t index) noexcept
+    {
+        assert(index < size_);
+        auto& vec = storage_by_tag<Tag>();
+        return FieldPointMap<Tag>(vec.data() + index * field_descriptor_typed<Tag>::dimensions);
+    }
+
+    template<typename Tag>
+        requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions > 1)
+    [[nodiscard]] ConstFieldPointMap<Tag> field_point(std::size_t index) const noexcept
+    {
+        assert(index < size_);
+        const auto& vec = storage_by_tag<Tag>();
+        return ConstFieldPointMap<Tag>(vec.data() + index * field_descriptor_typed<Tag>::dimensions);
+    }
+
+    template<typename Tag>
+        requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions == 1)
+    [[nodiscard]] FieldScalarT<Tag>& field_value(std::size_t index) noexcept
+    {
+        assert(index < size_);
+        auto& vec = storage_by_tag<Tag>();
+        return vec[index];
+    }
+
+    template<typename Tag>
+        requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions == 1)
+    [[nodiscard]] const FieldScalarT<Tag>& field_value(std::size_t index) const noexcept
+    {
+        assert(index < size_);
+        const auto& vec = storage_by_tag<Tag>();
+        return vec[index];
     }
 
     template<typename TransformType>
