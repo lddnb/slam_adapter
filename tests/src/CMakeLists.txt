@@ -27,6 +27,12 @@ add_executable(point_cloud_test
 target_link_libraries(point_cloud_test PRIVATE Catch2::Catch2WithMain slam_core::slam_core)
 add_test(NAME point_cloud_test COMMAND point_cloud_test)
 
+add_executable(point_cloud_field_view_demo_test
+    point_cloud_field_view_demo_test.cpp
+)
+target_link_libraries(point_cloud_field_view_demo_test PRIVATE Catch2::Catch2WithMain slam_core::slam_core)
+add_test(NAME point_cloud_field_view_demo_test COMMAND point_cloud_field_view_demo_test)
+
 # add_executable(signal_handler_test
 #     signal_handler_test.cpp
 # )

@@ -5,7 +5,11 @@
 #include <catch2/catch_approx.hpp>
 
 #include <Eigen/Core>
+#include <algorithm>
+#include <iterator>
+#include <ranges>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 using namespace ms_slam::slam_core;
@@ -185,6 +189,48 @@ TEST_CASE("PointCloud FieldEigenMaps", "[PointCloud]")
 
     auto normal1 = const_cloud.normal(1);
     REQUIRE(normal1(1) == Approx(1.0f));
+}
+
+TEST_CASE("PointCloud FieldViewSupportsRanges", "[PointCloud]")
+{
+    PointCloud<PointXYZINormalDescriptor> cloud;
+    cloud.push_back(PointXYZINormal{1.0f, 2.0f, 3.0f, 0.5f, 0.0f, 1.0f, 0.0f});
+    cloud.push_back(PointXYZINormal{4.0f, 5.0f, 6.0f, 0.8f, 1.0f, 0.0f, 0.0f});
+
+    auto intensity_view = cloud.field_view<IntensityTag>();
+    static_assert(std::ranges::random_access_range<decltype(intensity_view)>);
+    std::vector<float> intensities;
+    std::ranges::copy(intensity_view, std::back_inserter(intensities));
+    REQUIRE(intensities.size() == 2);
+    REQUIRE(intensities[0] == Approx(0.5f));
+    REQUIRE(intensities[1] == Approx(0.8f));
+
+    intensity_view[1] = 1.5f;
+    REQUIRE(cloud.intensity(1) == Approx(1.5f));
+
+    auto normal_view = cloud.field_view<NormalTag>();
+    static_assert(std::ranges::random_access_range<decltype(normal_view)>);
+    REQUIRE(normal_view.size() == cloud.size());
+    auto first_normal = normal_view[0];
+    REQUIRE(first_normal.size() == 3);
+    first_normal[2] = 2.0f;
+    REQUIRE(cloud.normal(0)(2) == Approx(2.0f));
+
+    auto x_components_view = normal_view | std::views::transform([](auto normal) { return normal[0]; });
+    std::vector<float> x_components;
+    x_components.reserve(cloud.size());
+    for (float value : x_components_view) {
+        x_components.push_back(value);
+    }
+    REQUIRE(x_components.size() == 2);
+    REQUIRE(x_components[0] == Approx(0.0f));
+    REQUIRE(x_components[1] == Approx(1.0f));
+
+    const auto& const_cloud = cloud;
+    auto const_normal_view = const_cloud.field_view<NormalTag>();
+    static_assert(std::ranges::random_access_range<decltype(const_normal_view)>);
+    REQUIRE(const_normal_view.size() == const_cloud.size());
+    REQUIRE(const_normal_view[0][2] == Approx(2.0f));
 }
 
 TEST_CASE("PointCloud SinglePointAccessors", "[PointCloud]")
@@ -404,4 +450,32 @@ TEST_CASE("PointCloud Transformed", "[PointCloud]")
 
     REQUIRE(transformed_cloud.size() == 1);
     REQUIRE(transformed_cloud.position(0).x() == Approx(6.0f));
+}
+
+TEST_CASE("PointCloud ExtractSubset", "[PointCloud]")
+{
+    PointCloud<PointXYZINormalDescriptor> cloud;
+    cloud.push_back(PointXYZINormal{1.0f, 2.0f, 3.0f, 0.5f, 1.0f, 0.0f, 0.0f});
+    cloud.push_back(PointXYZINormal{4.0f, 5.0f, 6.0f, 1.5f, 0.0f, 1.0f, 0.0f});
+    cloud.push_back(PointXYZINormal{7.0f, 8.0f, 9.0f, 2.5f, 0.0f, 0.0f, 1.0f});
+    cloud.push_back(PointXYZINormal{10.0f, 11.0f, 12.0f, 3.5f, 1.0f, 1.0f, 0.0f});
+
+    auto subset = cloud.extract(std::vector<std::size_t>{2, 0});
+    REQUIRE(subset.size() == 2);
+    auto first = subset.position(0);
+    REQUIRE(first.x() == Approx(7.0f));
+    REQUIRE(first.y() == Approx(8.0f));
+    REQUIRE(first.z() == Approx(9.0f));
+    REQUIRE(subset.intensity(0) == Approx(2.5f));
+    REQUIRE(subset.normal(0)(2) == Approx(1.0f));
+
+    auto view = std::views::iota(std::size_t{0}, cloud.size()) | std::views::filter([](std::size_t idx) { return idx % 2 == 0; });
+    auto even_subset = cloud.extract(view);
+    REQUIRE(even_subset.size() == 2);
+    REQUIRE(even_subset.position(0).x() == Approx(1.0f));
+    REQUIRE(even_subset.position(1).x() == Approx(7.0f));
+    REQUIRE(even_subset.intensity(0) == Approx(0.5f));
+    REQUIRE(even_subset.intensity(1) == Approx(2.5f));
+
+    REQUIRE_THROWS_AS(cloud.extract(std::vector<std::size_t>{4}), std::out_of_range);
 }
