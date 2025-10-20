@@ -140,8 +140,8 @@ void CallbackDispatcher::print_statistics() const
     auto stats = get_statistics();
 
     spdlog::info("=== CallbackDispatcher Statistics ===");
-    spdlog::info("Name                 | Priority | Calls    | Errors | Avg Duration");
-    spdlog::info("---------------------+----------+----------+--------+-------------");
+    spdlog::info("Name                 | Priority | Calls    | Avg Duration");
+    spdlog::info("---------------------+----------+----------+-------------");
 
     for (const auto& s : stats) {
         spdlog::info("{:<20} | {:>8} | {:>8} | {:>8} us",

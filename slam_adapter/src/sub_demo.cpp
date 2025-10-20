@@ -1,11 +1,13 @@
+#include <opencv2/imgcodecs.hpp>
 #include <slam_common/flatbuffers_pub_sub.hpp>
 #include <slam_common/foxglove_messages.hpp>
 #include <slam_common/crash_logger.hpp>
 #include <slam_common/callback_dispatcher.hpp>
 #include <spdlog/stopwatch.h>
-#include <opencv2/opencv.hpp>
+#include <slam_core/odometry.hpp>
 
 using namespace ms_slam::slam_common;
+using namespace ms_slam::slam_core;
 
 int main()
 {
@@ -36,38 +38,63 @@ int main()
 
     std::cout << "Creating generic publishers and subscribers..." << std::endl;
 
+    auto odom = std::make_unique<Odometry>();
+
     std::atomic<int> pc_received_count{0};
-    auto pc_callback = [&pc_received_count](const FoxglovePointCloud& pc_wrapper) {
+    auto pc_callback = [&pc_received_count, &odom](const FoxglovePointCloud& pc_wrapper) {
         pc_received_count++;
 
         // Get native Foxglove PointCloud pointer (zero-copy)
         const foxglove::PointCloud* pc = pc_wrapper.get();
 
-        spdlog::info("✓ Received PointCloud #{}: frame_id={}, point_stride={}, data_size={}",
-                     pc_received_count.load(),
-                     pc->frame_id()->c_str(),
-                     pc->point_stride(),
-                     pc->data()->size());
-
         // Calculate number of points
         size_t num_points = pc->data()->size() / pc->point_stride();
-        spdlog::info("  Number of points: {}", num_points);
+
+        // Parse point cloud fields
+        auto cur_pc = std::make_shared<PointCloud<PointXYZITDescriptor>>();
+        cur_pc->reserve(num_points);
+        
+        const uint32_t x_offset = 0, y_offset = 4, z_offset = 8, intensity_offset = 12, timestamp_offset = 18;
+
+        double timestamp = 0;
+        for (std::size_t i = 0; i < num_points; ++i) {
+            const auto data = pc->data()->Data() + i * pc->point_stride();
+            const float x = *reinterpret_cast<const float*>(data + x_offset);
+            const float y = *reinterpret_cast<const float*>(data + y_offset);
+            const float z = *reinterpret_cast<const float*>(data + z_offset);
+            const float intensity = *reinterpret_cast<const float*>(data + intensity_offset);
+            timestamp = *reinterpret_cast<const double*>(data + timestamp_offset);
+            cur_pc->push_back(PointXYZIT(x, y, z, intensity, timestamp));
+        }
+
+        odom->AddLidarData(cur_pc);
+        spdlog::info("✓ Received PointCloud #{}: timestamp={:.3f}, point_stride={}, data_size={}, points={}",
+                     pc_received_count.load(),
+                     timestamp,
+                     pc->point_stride(),
+                     pc->data()->size(),
+                     cur_pc->size());
     };
 
     auto pc_subscriber = std::make_shared<FBSSubscriber<FoxglovePointCloud>>(node, "/lidar_points", pc_callback);
     spdlog::info("Starting pointcloud threaded_subscriber...");
 
     std::atomic<int> received_count{0};
-    auto img_callback = [&received_count](const FoxgloveCompressedImage& img_wrapper) {
+    auto img_callback = [&received_count, &odom](const FoxgloveCompressedImage& img_wrapper) {
         received_count++;
 
         spdlog::stopwatch ws;
         const foxglove::CompressedImage* img = img_wrapper.get();
-        spdlog::info("✓ Received Image #{}: format={}, {} bytes",
-                    received_count.load(), img->format()->c_str(), img->data()->size());
         std::vector<uint8_t> buffer(img->data()->begin(), img->data()->end());
         cv::Mat mat = cv::imdecode(buffer, cv::IMREAD_COLOR);
-        spdlog::info(" mat size: {}x{}", mat.size().width, mat.size().height);
+        double timestamp = img->timestamp()->sec() + img->timestamp()->nsec() * 1e-9;
+
+        Image cur_img(mat, timestamp);
+        odom->AddImageData(cur_img);
+
+        spdlog::info("✓ Received Image #{}: timestamp={:.3f}, {} bytes, mat size: {}x{}",
+                    received_count.load(), timestamp, img->data()->size(), mat.size().width, mat.size().height);
+
         spdlog::warn("  Decoding time: {} us", std::chrono::duration_cast<std::chrono::microseconds>(ws.elapsed()).count());
 
         // std::string filename = "received_image.jpg";
@@ -80,17 +107,25 @@ int main()
     spdlog::info("Starting image threaded_subscriber...");
 
     std::atomic<int> imu_received_count{0};
-    auto imu_callback = [&imu_received_count](const FoxgloveImu& imu_wrapper) {
+    auto imu_callback = [&imu_received_count, &odom](const FoxgloveImu& imu_wrapper) {
         imu_received_count++;
 
         const foxglove::Imu* imu = imu_wrapper.get();
+        uint64_t timestamp = imu->timestamp()->sec() + imu->timestamp()->nsec() * 1e-9;
 
-        if (imu_received_count.load() % 30 == 0) {
-            spdlog::info("✓ Received Imu #{}: frame_id={}, angular_velocity=({:.3f}, {:.3f}, {:.3f}), linear_acceleration=({:.3f}, {:.3f}, {:.3f})",
+        IMU cur_imu(
+            Eigen::Vector3d(imu->angular_velocity()->x(), imu->angular_velocity()->y(), imu->angular_velocity()->z()),
+            Eigen::Vector3d(imu->linear_acceleration()->x(), imu->linear_acceleration()->y(), imu->linear_acceleration()->z()),
+            timestamp);
+
+        odom->AddIMUData(cur_imu);
+
+        if (imu_received_count.load() % 50 == 0) {
+            spdlog::info("✓ Received Imu #{}: timestamp={:.3f}, angular_velocity=({:.3f}, {:.3f}, {:.3f}), linear_acceleration=({:.3f}, {:.3f}, {:.3f})",
                          imu_received_count.load(),
-                         imu->frame_id()->c_str(),
-                         imu->angular_velocity()->x(), imu->angular_velocity()->y(), imu->angular_velocity()->z(),
-                         imu->linear_acceleration()->x(), imu->linear_acceleration()->y(), imu->linear_acceleration()->z());
+                         cur_imu.timestamp(),
+                         cur_imu.angular_velocity().x(), cur_imu.angular_velocity().y(), cur_imu.angular_velocity().z(),
+                         cur_imu.linear_acceleration().x(), cur_imu.linear_acceleration().y(), cur_imu.linear_acceleration().z());
         }
     };
 

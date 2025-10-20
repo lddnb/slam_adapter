@@ -10,6 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Find Eigen3
 find_package(Eigen3 3.4 REQUIRED NO_MODULE)
 find_package(spdlog REQUIRED)
+find_package(OpenCV REQUIRED)
 
 # ============================================================================
 # SLAM Core Library (Header-only for now)
@@ -31,9 +32,12 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 target_include_directories(${PROJECT_NAME} PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
+    ${OpenCV_INCLUDE_DIRS}
 )
 target_link_libraries(${PROJECT_NAME} PUBLIC
     Eigen3::Eigen
+    spdlog::spdlog
+    ${OpenCV_LIBS}
 )
 
 # ============================================================================

@@ -115,6 +115,9 @@ template<typename Descriptor>
 class PointCloud
 {
 public:
+    using Ptr = std::shared_ptr<PointCloud<Descriptor>>;
+    using ConstPtr = std::shared_ptr<const PointCloud<Descriptor>>;
+
     using descriptor_type = Descriptor;
     using scalar_type = typename descriptor_type::scalar_type;
 

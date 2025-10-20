@@ -94,7 +94,7 @@ using PointXYZRGBDescriptor = PointDescriptor<float,
 using PointXYZITDescriptor = PointDescriptor<float,
     FieldDescriptor<float, PositionTag, 3>,
     FieldDescriptor<float, IntensityTag, 1>,
-    FieldDescriptor<std::uint64_t, TimestampTag, 1>>;
+    FieldDescriptor<double, TimestampTag, 1>>;
 using PointXYZIRGBDescriptor = PointDescriptor<float,
     FieldDescriptor<float, PositionTag, 3>,
     FieldDescriptor<float, IntensityTag, 1>,
@@ -102,7 +102,7 @@ using PointXYZIRGBDescriptor = PointDescriptor<float,
 using PointXYZRGBTDescriptor = PointDescriptor<float,
     FieldDescriptor<float, PositionTag, 3>,
     FieldDescriptor<std::uint8_t, RGBTag, 3>,
-    FieldDescriptor<std::uint64_t, TimestampTag, 1>>;
+    FieldDescriptor<double, TimestampTag, 1>>;
 using PointXYZINormalDescriptor = PointDescriptor<float,
     FieldDescriptor<float, PositionTag, 3>,
     FieldDescriptor<float, IntensityTag, 1>,
@@ -190,10 +190,10 @@ struct PointXYZIT : PointXYZ
     using Descriptor = PointXYZITDescriptor;
 
     float intensity{0.0f};
-    std::uint64_t timestamp{0ULL};
+    double timestamp{0.0f};
 
     PointXYZIT() = default;
-    constexpr PointXYZIT(float x_, float y_, float z_, float intensity_, std::uint64_t timestamp_)
+    constexpr PointXYZIT(float x_, float y_, float z_, float intensity_, double timestamp_)
         : PointXYZ(x_, y_, z_), intensity(intensity_), timestamp(timestamp_) {}
 
     template<typename Tag>
@@ -242,10 +242,10 @@ struct PointXYZRGBT : PointXYZ
     using Descriptor = PointXYZRGBTDescriptor;
 
     std::array<std::uint8_t, 3> rgb{0, 0, 0};
-    std::uint64_t timestamp{0ULL};
+    double timestamp{0.0f};
 
     PointXYZRGBT() = default;
-    constexpr PointXYZRGBT(float x_, float y_, float z_, std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint64_t timestamp_)
+    constexpr PointXYZRGBT(float x_, float y_, float z_, std::uint8_t r, std::uint8_t g, std::uint8_t b, double timestamp_)
         : PointXYZ(x_, y_, z_), rgb{r, g, b}, timestamp(timestamp_) {}
 
     template<typename Tag>
