@@ -117,6 +117,14 @@ RUN cd /tmp && git clone https://github.com/jeremy-rifkin/cpptrace.git && \
     make -j && \
     make install
 
+# manif
+RUN cd /tmp && git clone https://github.com/artivis/manif.git && \
+    cd manif && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make install
+
 # RUN cd /tmp && git clone https://github.com/olympus-robotics/mcap_builder.git && \
 #     cd mcap_builder && \
 #     mkdir build && \

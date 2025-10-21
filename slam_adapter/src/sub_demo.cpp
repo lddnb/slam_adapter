@@ -6,8 +6,11 @@
 #include <spdlog/stopwatch.h>
 #include <slam_core/odometry.hpp>
 
+#include "slam_adapter/config_loader.hpp"
+
 using namespace ms_slam::slam_common;
 using namespace ms_slam::slam_core;
+using namespace ms_slam::slam_adapter;
 
 int main()
 {
@@ -37,6 +40,10 @@ int main()
         iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("successful node creation"));
 
     std::cout << "Creating generic publishers and subscribers..." << std::endl;
+
+    LoadConfigFromFile("../config/test.yaml");
+    auto* config_inst = Config::GetInstance();
+    LogConfig(*config_inst);
 
     auto odom = std::make_unique<Odometry>();
 
@@ -111,7 +118,7 @@ int main()
         imu_received_count++;
 
         const foxglove::Imu* imu = imu_wrapper.get();
-        uint64_t timestamp = imu->timestamp()->sec() + imu->timestamp()->nsec() * 1e-9;
+        double timestamp = imu->timestamp()->sec() + imu->timestamp()->nsec() * 1e-9;
 
         IMU cur_imu(
             Eigen::Vector3d(imu->angular_velocity()->x(), imu->angular_velocity()->y(), imu->angular_velocity()->z()),

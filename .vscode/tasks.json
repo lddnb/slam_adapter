@@ -1,0 +1,67 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "slam_core Build and Install",
+      "type": "shell",
+      "command": "make",
+      "args": [
+        "clean",
+        "&&",
+        "make",
+        "-j",
+        "&&",
+        "make",
+        "install"
+      ], 
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/slam_core/build"
+      },
+      "problemMatcher": [],
+      "detail": "build and install task for slam_core"
+    },
+    {
+      "label": "slam_common Build and Install",
+      "type": "shell",
+      "command": "make",
+      "args": [
+        "clean",
+        "&&",
+        "make",
+        "-j",
+        "&&",
+        "make",
+        "install"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/slam_common/build"
+      },
+      "problemMatcher": [],
+      "detail": "build and install task for slam_common"
+    },
+    {
+      "label": "ctest",
+      "type": "shell",
+      "command": "ctest",
+      "args": [
+        "-v"
+      ],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/tests/build"
+      },
+      "detail": "test task"
+    }
+  ]
+}

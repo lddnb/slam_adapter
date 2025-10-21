@@ -19,6 +19,7 @@ list(APPEND CMAKE_PREFIX_PATH "../slam_common/install" "../slam_core/install")
 find_package(slam_core REQUIRED)
 find_package(slam_common REQUIRED)
 find_package(mcap REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 add_executable(sub_demo src/sub_demo.cpp)
 target_include_directories(sub_demo PRIVATE
@@ -28,4 +29,5 @@ target_link_libraries(sub_demo PRIVATE
     slam_core::slam_core
     slam_common::slam_common
     mcap
+    yaml-cpp
 )
