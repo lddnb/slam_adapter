@@ -42,8 +42,7 @@ int main()
     std::cout << "Creating generic publishers and subscribers..." << std::endl;
 
     LoadConfigFromFile("../config/test.yaml");
-    auto* config_inst = Config::GetInstance();
-    LogConfig(*config_inst);
+    LogConfig();
 
     auto odom = std::make_unique<Odometry>();
 

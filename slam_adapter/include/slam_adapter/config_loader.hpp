@@ -93,12 +93,8 @@ inline void CollectImageInfo(const YAML::Node& common_node, const YAML::Node& ca
         }
 
         const auto index_str = key.substr(prefix.size());
-        try {
-            const int index = std::stoi(index_str);
-            ordered_topics.emplace_back(index, it.second.as<std::string>());
-        } catch (const std::exception&) {
-            continue;
-        }
+        const int index = std::stoi(index_str);
+        ordered_topics.emplace_back(index, it.second.as<std::string>());
     }
 
     if (!ordered_topics.empty()) {
@@ -317,29 +313,28 @@ inline bool LoadConfigFromFile(const std::string& yaml_path)
     try {
         root = YAML::LoadFile(yaml_path);
     } catch (const std::exception&) {
+        spdlog::critical("Failed to load config file: {}", yaml_path);
         return false;
     }
 
-    auto* config = slam_core::Config::GetInstance();
-    if (config == nullptr || !root) {
-        return false;
-    }
+    auto& config = slam_core::Config::GetInstance();
 
-    config->common_params = {};
-    config->mapping_params = {};
-    config->voxel_params = {};
-    config->camera_params = {};
+    config.common_params = {};
+    config.mapping_params = {};
+    config.voxel_params = {};
+    config.camera_params = {};
 
-    detail::FillCommonParams(root, config->common_params, config->camera_params);
-    detail::FillMappingParams(root["mapping"], config->mapping_params);
-    detail::FillVoxelParams(root["voxel"], config->voxel_params);
-    detail::FillCameraParams(root["camera"], config->camera_params);
+    detail::FillCommonParams(root, config.common_params, config.camera_params);
+    detail::FillMappingParams(root["mapping"], config.mapping_params);
+    detail::FillVoxelParams(root["voxel"], config.voxel_params);
+    detail::FillCameraParams(root["camera"], config.camera_params);
 
     return true;
 }
 
-inline void LogConfig(const slam_core::Config& config)
+inline void LogConfig()
 {
+    const auto& config = slam_core::Config::GetInstance();
     const auto& common = config.common_params;
     spdlog::info("[Config] Common.lid_topic: {}", common.lid_topic);
     spdlog::info("[Config] Common.imu_topic: {}", common.imu_topic);

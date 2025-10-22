@@ -7,6 +7,7 @@
 #include "slam_core/imu.hpp"
 #include "slam_core/point_cloud.hpp"
 #include "slam_core/image.hpp"
+#include "slam_core/state.hpp"
 
 namespace ms_slam::slam_core
 {
@@ -39,6 +40,10 @@ class Odometry
 
     [[nodiscard]] std::vector<SyncData> SyncPackages();
 
+    [[nodiscard]] PointCloudType::Ptr Deskew(const PointCloudType::ConstPtr& cloud, const State& state, const States& buffer) const;
+
+    void ProcessImuData(const SyncData& sync_data);
+
     void RunOdometry();
 
   private:
@@ -55,5 +60,11 @@ class Odometry
     double last_timestamp_imu_;
 
     std::atomic<bool> running_;  ///< 运行状态
+
+    State state_;          ///< 当前里程计状态
+    States state_buffer_;  ///< 里程计状态缓存
+    bool initialized_;     ///< 是否初始化
+
+    Eigen::Vector3d mean_acc_;  ///< 平均加速度
 };
 }  // namespace ms_slam::slam_core

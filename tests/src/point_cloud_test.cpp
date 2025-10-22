@@ -6,6 +6,7 @@
 
 #include <Eigen/Core>
 #include <algorithm>
+#include <array>
 #include <iterator>
 #include <ranges>
 #include <cstdint>
@@ -478,4 +479,138 @@ TEST_CASE("PointCloud ExtractSubset", "[PointCloud]")
     REQUIRE(even_subset.intensity(1) == Approx(2.5f));
 
     REQUIRE_THROWS_AS(cloud.extract(std::vector<std::size_t>{4}), std::out_of_range);
+}
+
+TEST_CASE("PointCloud EraseSingleIndex", "[PointCloud]")
+{
+    PointCloud<PointXYZINormalDescriptor> cloud;
+    cloud.push_back(PointXYZINormal{0.0f, 1.0f, 2.0f, 0.1f, 1.0f, 0.0f, 0.0f});
+    cloud.push_back(PointXYZINormal{3.0f, 4.0f, 5.0f, 0.2f, 0.0f, 1.0f, 0.0f});
+    cloud.push_back(PointXYZINormal{6.0f, 7.0f, 8.0f, 0.3f, 0.0f, 0.0f, 1.0f});
+
+    cloud.erase(std::size_t{1});
+
+    REQUIRE(cloud.size() == 2);
+
+    auto first = cloud.position(0);
+    REQUIRE(first.x() == Approx(0.0f));
+    REQUIRE(first.y() == Approx(1.0f));
+    REQUIRE(first.z() == Approx(2.0f));
+    REQUIRE(cloud.intensity(0) == Approx(0.1f));
+    REQUIRE(cloud.normal(0)(0) == Approx(1.0f));
+
+    auto second = cloud.position(1);
+    REQUIRE(second.x() == Approx(6.0f));
+    REQUIRE(second.y() == Approx(7.0f));
+    REQUIRE(second.z() == Approx(8.0f));
+    REQUIRE(cloud.intensity(1) == Approx(0.3f));
+    REQUIRE(cloud.normal(1)(2) == Approx(1.0f));
+}
+
+TEST_CASE("PointCloud EraseMultipleIndices", "[PointCloud]")
+{
+    PointCloud<PointXYZIDescriptor> cloud;
+    for (std::size_t i = 0; i < 5; ++i) {
+        cloud.push_back(static_cast<float>(i), static_cast<float>(i + 10), static_cast<float>(i + 20));
+        cloud.intensity(i) = static_cast<float>(i * 5);
+    }
+
+    cloud.erase(std::vector<std::size_t>{3, 1, 3});
+
+    REQUIRE(cloud.size() == 3);
+
+    auto pos0 = cloud.position(0);
+    REQUIRE(pos0.x() == Approx(0.0f));
+    REQUIRE(cloud.intensity(0) == Approx(0.0f));
+
+    auto pos1 = cloud.position(1);
+    REQUIRE(pos1.x() == Approx(2.0f));
+    REQUIRE(cloud.intensity(1) == Approx(10.0f));
+
+    auto pos2 = cloud.position(2);
+    REQUIRE(pos2.x() == Approx(4.0f));
+    REQUIRE(cloud.intensity(2) == Approx(20.0f));
+
+    REQUIRE_THROWS_AS(cloud.erase(std::vector<std::size_t>{5}), std::out_of_range);
+}
+
+TEST_CASE("PointCloud EraseAllIndices", "[PointCloud]")
+{
+    PointCloud<PointXYZDescriptor> cloud;
+    cloud.push_back(1.0f, 2.0f, 3.0f);
+    cloud.push_back(4.0f, 5.0f, 6.0f);
+
+    cloud.erase(std::vector<std::size_t>{0, 1});
+
+    REQUIRE(cloud.size() == 0);
+    REQUIRE(cloud.empty());
+    REQUIRE(cloud.capacity() >= 2);
+
+    cloud.push_back(7.0f, 8.0f, 9.0f);
+    REQUIRE(cloud.size() == 1);
+    REQUIRE(cloud.position(0).x() == Approx(7.0f));
+}
+
+TEST_CASE("PointCloud EraseWithViewPipeline", "[PointCloud]")
+{
+    PointCloud<PointXYZIDescriptor> cloud;
+    for (std::size_t i = 0; i < 6; ++i) {
+        cloud.push_back(static_cast<float>(i), static_cast<float>(i + 10), static_cast<float>(i + 20));
+        cloud.intensity(i) = static_cast<float>(i);
+    }
+
+    auto even_index_view = std::views::iota(std::size_t{0}, cloud.size())
+        | std::views::filter([](std::size_t idx) { return (idx % 2) == 0; });
+
+    cloud.erase(even_index_view);
+
+    REQUIRE(cloud.size() == 3);
+
+    auto pos0 = cloud.position(0);
+    REQUIRE(pos0.x() == Approx(1.0f));
+    REQUIRE(cloud.intensity(0) == Approx(1.0f));
+
+    auto pos1 = cloud.position(1);
+    REQUIRE(pos1.x() == Approx(3.0f));
+    REQUIRE(cloud.intensity(1) == Approx(3.0f));
+
+    auto pos2 = cloud.position(2);
+    REQUIRE(pos2.x() == Approx(5.0f));
+    REQUIRE(cloud.intensity(2) == Approx(5.0f));
+}
+
+TEST_CASE("PointCloud EraseWithTransformedView", "[PointCloud]")
+{
+    PointCloud<PointXYZDescriptor> cloud;
+    for (std::size_t i = 0; i < 6; ++i) {
+        cloud.push_back(static_cast<float>(i), static_cast<float>(i + 1), static_cast<float>(i + 2));
+    }
+
+    const std::array<std::size_t, 5> raw_indices{4, 1, 4, 3, 1};
+    auto transformed_view = raw_indices | std::views::transform([](std::size_t value) { return value; });
+
+    cloud.erase(transformed_view);
+
+    REQUIRE(cloud.size() == 3);
+    REQUIRE(cloud.position(0).x() == Approx(0.0f));
+    REQUIRE(cloud.position(1).x() == Approx(2.0f));
+    REQUIRE(cloud.position(2).x() == Approx(5.0f));
+}
+
+TEST_CASE("PointCloud EraseWithSubrange", "[PointCloud]")
+{
+    PointCloud<PointXYZDescriptor> cloud;
+    for (std::size_t i = 0; i < 5; ++i) {
+        cloud.push_back(static_cast<float>(i), static_cast<float>(i * 2), static_cast<float>(i * 3));
+    }
+
+    std::array<std::size_t, 3> erase_indices{4, 0, 4};
+    auto subrange = std::ranges::subrange(erase_indices.begin(), erase_indices.end());
+
+    cloud.erase(subrange);
+
+    REQUIRE(cloud.size() == 3);
+    REQUIRE(cloud.position(0).x() == Approx(1.0f));
+    REQUIRE(cloud.position(1).x() == Approx(2.0f));
+    REQUIRE(cloud.position(2).x() == Approx(3.0f));
 }

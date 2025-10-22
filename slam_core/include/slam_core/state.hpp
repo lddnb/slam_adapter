@@ -1,5 +1,7 @@
 #pragma once
 
+#include <deque>
+
 #include <manif/manif.h>
 
 namespace ms_slam::slam_core
@@ -8,7 +10,7 @@ namespace ms_slam::slam_core
 class State
 {
   public:
-    using BundleT = manif::Bundle<
+    using BundleState = manif::Bundle<
         double,
         manif::R3,   // position
         manif::SO3,  // rotation
@@ -18,9 +20,15 @@ class State
         manif::R3    // gravity
         >;
 
-    using Tangent = typename BundleT::Tangent;
-    static constexpr int DoF = BundleT::DoF;  // DoF whole state
-    static constexpr int DoFNoise = 12;       // b_w, b_a, n_{b_w}, n_{b_a}
+    using BundleInput = manif::Bundle<
+        double,
+        manif::R3,  // gyro
+        manif::R3   // acc
+        >;
+
+    using Tangent = typename BundleState::Tangent;
+    static constexpr int DoF = BundleState::DoF;  // DoF whole state
+    static constexpr int DoFNoise = 12;           // b_w, b_a, n_{b_w}, n_{b_a}
     // TODO: DoFObs
     static constexpr int DoFObs = manif::SGal3<double>::DoF;  // DoF obsevation equation
 
@@ -28,18 +36,42 @@ class State
     using MappingMatrix = Eigen::Matrix<double, DoF, DoFNoise>;
     using NoiseMatrix = Eigen::Matrix<double, DoFNoise, DoFNoise>;
 
-    // clang-format off
-    inline Eigen::Vector3d p()       const { return X.element<0>().coeffs();                  }
-    inline Eigen::Matrix3d R()       const { return X.element<1>().quat().toRotationMatrix(); }
-    inline Eigen::Quaterniond quat() const { return X.element<1>().quat();                    }
-    inline Eigen::Vector3d v()       const { return X.element<2>().coeffs();                  }
-    inline Eigen::Vector3d b_g()     const { return X.element<3>().coeffs();                  }
-    inline Eigen::Vector3d b_a()     const { return X.element<4>().coeffs();                  }
-    inline Eigen::Vector3d g()       const { return X.element<5>().coeffs();                  }
+    State();
+    ~State() = default;
 
-    void b_g(const Eigen::Vector3d& in) { X.element<1>() = manif::R3d(in); }
-    void b_a(const Eigen::Vector3d& in) { X.element<2>() = manif::R3d(in); }
-    void g(const Eigen::Vector3d& in)   { X.element<3>() = manif::R3d(in); }
+    void Predict(const BundleInput& imu, double dt, double timestamp);
+    void Predict(double timestamp);
+
+    [[nodiscard]] Tangent f(const Eigen::Vector3d& ang_vel, const Eigen::Vector3d& lin_acc) const;
+    /**
+     * @brief ∂f(x ⊕ δx, u, 0) / ∂δx|_{δx = 0}
+     *
+     * @param imu
+     * @param dt
+     * @return ProcessMatrix
+     */
+    [[nodiscard]] ProcessMatrix df_dx(const BundleInput& imu) const;
+    /**
+     * @brief ∂f(x, u, w) / ∂w|_{w = 0}
+     *
+     * @param imu
+     * @param dt
+     * @return MappingMatrix
+     */
+    [[nodiscard]] MappingMatrix df_dw(const BundleInput& imu) const;
+
+    // clang-format off
+    inline Eigen::Vector3d p()       const noexcept { return X.element<0>().coeffs();                  }
+    inline Eigen::Matrix3d R()       const noexcept { return X.element<1>().quat().toRotationMatrix(); }
+    inline Eigen::Quaterniond quat() const noexcept { return X.element<1>().quat();                    }
+    inline Eigen::Vector3d v()       const noexcept { return X.element<2>().coeffs();                  }
+    inline Eigen::Vector3d b_g()     const noexcept { return X.element<3>().coeffs();                  }
+    inline Eigen::Vector3d b_a()     const noexcept { return X.element<4>().coeffs();                  }
+    inline Eigen::Vector3d g()       const noexcept { return X.element<5>().coeffs();                  }
+
+    void b_g(const Eigen::Vector3d& in) { X.element<3>() = manif::R3d(in); }
+    void b_a(const Eigen::Vector3d& in) { X.element<4>() = manif::R3d(in); }
+    void g(const Eigen::Vector3d& in)   { X.element<5>() = manif::R3d(in); }
     // clang-format on
 
     inline Eigen::Isometry3d isometry3d() const
@@ -50,8 +82,11 @@ class State
         return T;
     }
 
+    inline double timestamp() const noexcept { return stamp; }
+    void timestamp(double in) noexcept { stamp = in; }
+
   private:
-    BundleT X;
+    BundleState X;
     ProcessMatrix P;
     NoiseMatrix Q;
 
@@ -60,4 +95,7 @@ class State
 
     double stamp;
 };
+
+using States = std::deque<State>;
+
 }  // namespace ms_slam::slam_core

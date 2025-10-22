@@ -260,11 +260,15 @@ public:
 
     template<std::ranges::input_range Range>
         requires std::same_as<std::ranges::range_value_t<std::decay_t<Range>>, std::size_t>
-    [[nodiscard]] PointCloud extract(Range indices) const
+    [[nodiscard]] PointCloud extract(Range&& indices_range) const
     {
         // 遍历索引 range，将每个合法索引复制到新的点云实例中
         std::vector<std::size_t> index_list;
-        for (std::size_t idx : indices) {
+        if constexpr (std::ranges::sized_range<Range>) {
+            index_list.reserve(static_cast<std::size_t>(std::ranges::size(indices_range)));
+        }
+
+        for (std::size_t idx : indices_range) {
             if (idx >= size_) {
                 throw std::out_of_range("PointCloud::extract - index out of range");
             }
@@ -277,6 +281,67 @@ public:
             copy_fields_by_indices(result, index_list);
         }
         return result;
+    }
+
+    void erase(std::size_t index)
+    {
+        erase(std::array<std::size_t, 1>{index});
+    }
+
+    template<std::ranges::input_range Range>
+        requires std::same_as<std::ranges::range_value_t<std::decay_t<Range>>, std::size_t>
+    void erase(Range&& indices_range)
+    {
+        if (size_ == 0) {
+            throw std::out_of_range("PointCloud::erase - index out of range");
+        }
+
+        std::vector<std::size_t> indices;
+        if constexpr (std::ranges::sized_range<Range>) {
+            indices.reserve(static_cast<std::size_t>(std::ranges::size(indices_range)));
+        }
+
+        bool is_strictly_increasing = true;
+        bool has_previous = false;
+        std::size_t previous_value = 0;
+
+        for (std::size_t idx : indices_range) {
+            if (idx >= size_) {
+                throw std::out_of_range("PointCloud::erase - index out of range");
+            }
+            if (has_previous) {
+                if (idx < previous_value) {
+                    is_strictly_increasing = false;
+                } else if (idx == previous_value) {
+                    continue;
+                }
+            }
+
+            indices.push_back(idx);
+            previous_value = idx;
+            has_previous = true;
+        }
+
+        if (indices.empty()) {
+            return;
+        }
+
+        if (!is_strictly_increasing) {
+            std::sort(indices.begin(), indices.end());
+            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+        }
+
+        if (indices.size() == size_) {
+            clear();
+            return;
+        }
+
+        const std::size_t original_size = size_;
+        const std::size_t new_size = original_size - indices.size();
+
+        compact_fields(original_size, new_size, indices);
+
+        size_ = new_size;
     }
 
     template<typename Tag>
@@ -610,6 +675,56 @@ private:
         constexpr std::size_t idx = field_index_v<Tag, descriptor_type>;
         static_assert(idx != kInvalidFieldIndex, "Requested field not available");
         return std::get<idx>(storage_);
+    }
+
+    void compact_fields(std::size_t original_size, std::size_t new_size, const std::vector<std::size_t>& sorted_indices)
+    {
+        compact_fields_impl(original_size, new_size, sorted_indices, std::make_index_sequence<field_count>{});
+    }
+
+    template<std::size_t... FieldIndices>
+    void compact_fields_impl(std::size_t original_size,
+        std::size_t new_size,
+        const std::vector<std::size_t>& sorted_indices,
+        std::index_sequence<FieldIndices...>)
+    {
+        (compact_single_field<FieldIndices>(original_size, new_size, sorted_indices), ...);
+    }
+
+    template<std::size_t FieldIndex>
+    void compact_single_field(std::size_t original_size, std::size_t new_size, const std::vector<std::size_t>& sorted_indices)
+    {
+        auto& vec = std::get<FieldIndex>(storage_);
+        constexpr std::size_t dims = field_dimensions_by_index<FieldIndex>();
+
+        if constexpr (dims == 0) {
+            vec.resize(new_size * dims);
+            return;
+        }
+
+        if (sorted_indices.empty()) {
+            vec.resize(new_size * dims);
+            return;
+        }
+
+        auto* data = vec.data();
+        std::size_t write_index = 0;
+        std::size_t erase_cursor = 0;
+
+        for (std::size_t read_index = 0; read_index < original_size; ++read_index) {
+            if (erase_cursor < sorted_indices.size() && sorted_indices[erase_cursor] == read_index) {
+                ++erase_cursor;
+                continue;
+            }
+
+            if (write_index != read_index) {
+                std::copy_n(data + read_index * dims, dims, data + write_index * dims);
+            }
+
+            ++write_index;
+        }
+
+        vec.resize(new_size * dims);
     }
 
     void copy_fields_by_indices(PointCloud& other, const std::vector<std::size_t>& indices) const

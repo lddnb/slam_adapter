@@ -25,8 +25,8 @@ struct MappingParams {
     bool non_station_start, extrinsic_est_en, gravity_align, prop_at_freq_of_imu, check_satu;
     int init_map_size;
     float imu_time_inte, satu_acc, satu_gyro, acc_norm;
-    float laser_point_cov, acc_cov_output, gyr_cov_output, b_acc_cov, b_gyr_cov;
-    float imu_meas_acc_cov, imu_meas_omg_cov, gyr_cov, acc_cov;
+    float laser_point_cov, gyr_cov, acc_cov, b_acc_cov, b_gyr_cov;
+    float imu_meas_acc_cov, imu_meas_omg_cov;  ///< for point-lio imu output model
     float plane_thr, match_s, fov_deg, DET_RANGE;
     Eigen::Vector3d gravity_init, gravity;
     Eigen::Vector3d extrinT;
@@ -63,9 +63,9 @@ class Config
     VoxelParams voxel_params;
     CameraParams camera_params;
 
-    static Config* GetInstance()
+    static Config& GetInstance()
     {
-        static Config* config = new Config();
+        static Config config;
         return config;
     }
 
