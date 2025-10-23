@@ -102,6 +102,16 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config)
             schema.data = reinterpret_cast<const std::byte*>(foxglove::ImuBinarySchema::data());
             schema.data_len = foxglove::ImuBinarySchema::size();
             imu_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxgloveImu>>(node_, topic.name, nullptr, slam_common::PubSubConfig{.subscriber_max_buffer_size = 100});
+        } else if (topic.schema == "foxglove.PoseInFrame") {
+            schema.name = "foxglove.PoseInFrame";
+            schema.data = reinterpret_cast<const std::byte*>(foxglove::PoseInFrameBinarySchema::data());
+            schema.data_len = foxglove::PoseInFrameBinarySchema::size();
+            pose_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxglovePoseInFrame>>(node_, topic.name);
+        } else if (topic.schema == "foxglove.PosesInFrame") {
+            schema.name = "foxglove.PosesInFrame";
+            schema.data = reinterpret_cast<const std::byte*>(foxglove::PosesInFrameBinarySchema::data());
+            schema.data_len = foxglove::PosesInFrameBinarySchema::size();
+            poses_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxglovePosesInFrame>>(node_, topic.name);
 
         } else {
             spdlog::warn("  - Unsupported schema type '{}' for topic '{}'", topic.schema, topic.name);
@@ -380,6 +390,54 @@ void FoxgloveWebSocketBridge::poll_and_forward_topic(const std::string& topic_na
                     record_to_mcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
                 }
             }
+        } else if (schema == "foxglove.PoseInFrame" && pose_subs_.count(topic_name)) {
+            auto raw_samples = pose_subs_.at(topic_name)->receive_all_raw();
+            for (const auto& raw_data : raw_samples) {
+                uint64_t timestamp_ns = get_current_timestamp_ns();
+
+                if (has_websocket_sinks) {
+                    auto result = channels_.at(topic_name)->log(
+                        reinterpret_cast<const std::byte*>(raw_data.data()),
+                        raw_data.size(),
+                        timestamp_ns
+                    );
+                    if (result == foxglove::FoxgloveError::Ok) {
+                        forwarded_count_.at(topic_name)++;
+                    } else {
+                        error_count_.at(topic_name)++;
+                        spdlog::error("Failed to forward PoseInFrame on '{}': {}",
+                                      topic_name, foxglove::strerror(result));
+                    }
+                }
+
+                if (recording_.load()) {
+                    record_to_mcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
+                }
+            }
+        } else if (schema == "foxglove.PosesInFrame" && poses_subs_.count(topic_name)) {
+            auto raw_samples = poses_subs_.at(topic_name)->receive_all_raw();
+            for (const auto& raw_data : raw_samples) {
+                uint64_t timestamp_ns = get_current_timestamp_ns();
+
+                if (has_websocket_sinks) {
+                    auto result = channels_.at(topic_name)->log(
+                        reinterpret_cast<const std::byte*>(raw_data.data()),
+                        raw_data.size(),
+                        timestamp_ns
+                    );
+                    if (result == foxglove::FoxgloveError::Ok) {
+                        forwarded_count_.at(topic_name)++;
+                    } else {
+                        error_count_.at(topic_name)++;
+                        spdlog::error("Failed to forward PosesInFrame on '{}': {}",
+                                      topic_name, foxglove::strerror(result));
+                    }
+                }
+
+                if (recording_.load()) {
+                    record_to_mcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
+                }
+            }
         }
     } catch (const std::exception& e) {
         error_count_.at(topic_name)++;
@@ -491,6 +549,14 @@ void FoxgloveWebSocketBridge::record_to_mcap(const std::string& topic_name, cons
                 std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size()));
         } else if (schema_name == "foxglove.Imu") {
             foxglove::ImuBinarySchema schema_data;
+            mcap_schema = mcap::Schema(schema_name, "flatbuffer",
+                std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size()));
+        } else if (schema_name == "foxglove.PoseInFrame") {
+            foxglove::PoseInFrameBinarySchema schema_data;
+            mcap_schema = mcap::Schema(schema_name, "flatbuffer",
+                std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size()));
+        } else if (schema_name == "foxglove.PosesInFrame") {
+            foxglove::PosesInFrameBinarySchema schema_data;
             mcap_schema = mcap::Schema(schema_name, "flatbuffer",
                 std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size()));
         } else {

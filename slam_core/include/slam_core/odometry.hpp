@@ -46,6 +46,8 @@ class Odometry
 
     void RunOdometry();
 
+    void GetLidarState(States& buffer);
+
   private:
     std::deque<IMU> imu_buffer_;                         ///< imu缓存
     std::deque<PointCloudType::ConstPtr> lidar_buffer_;  ///< lidar缓存
@@ -62,9 +64,11 @@ class Odometry
     std::atomic<bool> running_;  ///< 运行状态
 
     State state_;          ///< 当前里程计状态
-    States state_buffer_;  ///< 里程计状态缓存
+    States imu_state_buffer_;  ///< imu时刻状态缓存
+    States lidar_state_buffer_;  ///< lidar时刻状态缓存
     bool initialized_;     ///< 是否初始化
 
     Eigen::Vector3d mean_acc_;  ///< 平均加速度
+    std::mutex state_mutex_;   ///< 状态互斥锁
 };
 }  // namespace ms_slam::slam_core

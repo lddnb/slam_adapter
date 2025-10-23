@@ -11,6 +11,8 @@
 #include <fbs/PointCloud_generated.h>
 #include <fbs/CompressedImage_generated.h>
 #include <fbs/Imu_generated.h>
+#include <fbs/PoseInFrame_generated.h>
+#include <fbs/PosesInFrame_generated.h>
 
 namespace ms_slam::slam_common
 {
@@ -90,5 +92,8 @@ class FoxgloveMsg
 using FoxglovePointCloud = FoxgloveMsg<foxglove::PointCloud>;
 using FoxgloveCompressedImage = FoxgloveMsg<foxglove::CompressedImage>;
 using FoxgloveImu = FoxgloveMsg<foxglove::Imu>;
+using FoxglovePose = FoxgloveMsg<foxglove::Pose>;
+using FoxglovePoseInFrame = FoxgloveMsg<foxglove::PoseInFrame>;
+using FoxglovePosesInFrame = FoxgloveMsg<foxglove::PosesInFrame>;
 
 }  // namespace ms_slam::slam_common

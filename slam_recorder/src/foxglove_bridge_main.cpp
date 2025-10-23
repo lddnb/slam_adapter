@@ -70,7 +70,11 @@ int main(int argc, char** argv)
 
         // 加载 YAML 配置
         spdlog::info("Loading config from: {}", config_file);
-        YAML::Node yaml_config = YAML::LoadFile(config_file);
+        YAML::Node yaml_config_node = YAML::LoadFile(config_file);
+        auto yaml_config = yaml_config_node["Foxglove"];
+        if (!yaml_config) {
+            throw std::runtime_error("Foxglove WebSocket Bridge section not found in config: " + config_file);
+        }
 
         // 创建桥接配置
         FoxgloveWebSocketBridge::Config config;

@@ -209,6 +209,7 @@ void Odometry::ProcessImuData(const SyncData& sync_data)
             }
             gyro = 0.5 * (last_imu.angular_velocity() + imu.angular_velocity());
             acc = 0.5 * (last_imu.linear_acceleration() + imu.linear_acceleration());
+            // 校正比例因子
             acc = acc / mean_acc_.norm() * 9.81;
 
             const State::BundleInput input = {gyro, acc};
@@ -231,11 +232,15 @@ void Odometry::ProcessImuData(const SyncData& sync_data)
 
             const State::BundleInput input = {gyro, acc};
             state_.Predict(input, dt, sync_data.lidar_end_time);
+            {
+                std::unique_lock<std::mutex> lock(state_mutex_);
+                lidar_state_buffer_.emplace_back(state_);
+            }
         }
-        state_buffer_.emplace_back(state_);
+        imu_state_buffer_.emplace_back(state_);
     }
-    while (state_buffer_.size() > 2000) {
-        state_buffer_.pop_front();
+    while (imu_state_buffer_.size() > 1 && imu_state_buffer_[1].timestamp() < sync_data.lidar_beg_time) {
+        imu_state_buffer_.pop_front();
     }
 }
 
@@ -287,6 +292,15 @@ PointCloudType::Ptr Odometry::Deskew(const PointCloudType::ConstPtr& cloud, cons
     return deskewed_cloud;
 }
 
+void Odometry::GetLidarState(States& buffer)
+{
+    std::unique_lock<std::mutex> lock(state_mutex_);
+    buffer.clear();
+    if (!lidar_state_buffer_.empty()) {
+        buffer.swap(lidar_state_buffer_);
+    }
+}
+
 void Odometry::RunOdometry()
 {
     while (running_) {
@@ -312,7 +326,7 @@ void Odometry::RunOdometry()
                 continue;
             }
             ProcessImuData(sync_data);
-            auto deskewed_cloud = Deskew(sync_data.lidar_data, state_, state_buffer_);
+            auto deskewed_cloud = Deskew(sync_data.lidar_data, state_, imu_state_buffer_);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

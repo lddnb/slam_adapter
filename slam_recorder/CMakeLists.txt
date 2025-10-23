@@ -15,22 +15,14 @@ find_package(slam_common REQUIRED)
 find_package(mcap REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
-add_executable(ros_read_save src/ros_read_save.cpp)
-target_include_directories(ros_read_save PRIVATE
+add_executable(bag_tool src/bag_tool.cpp)
+target_include_directories(bag_tool PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_link_libraries(ros_read_save PRIVATE
+target_link_libraries(bag_tool PRIVATE
     slam_common::slam_common
     mcap
-)
-
-add_executable(ros_read_pub src/ros_read_pub.cpp)
-target_include_directories(ros_read_pub PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-target_link_libraries(ros_read_pub PRIVATE
-    slam_common::slam_common
-    mcap
+    yaml-cpp
 )
 
 # Foxglove WebSocket Bridge (iceoryx2 → Foxglove Studio 实时可视化)

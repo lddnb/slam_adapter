@@ -23,6 +23,8 @@
 #include <fbs/CompressedImage_generated.h>
 #include <fbs/Imu_generated.h>
 #include <fbs/PointCloud_generated.h>
+#include <fbs/PoseInFrame_generated.h>
+#include <fbs/PosesInFrame_generated.h>
 
 namespace ms_slam::slam_recorder
 {
@@ -241,6 +243,8 @@ class FoxgloveWebSocketBridge
     std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxglovePointCloud>>> pc_subs_;
     std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxgloveCompressedImage>>> img_subs_;
     std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxgloveImu>>> imu_subs_;
+    std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxglovePoseInFrame>>> pose_subs_;
+    std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxglovePosesInFrame>>> poses_subs_;
 
     // MCAP 录制器
     std::unique_ptr<mcap::McapWriter> mcap_writer_;

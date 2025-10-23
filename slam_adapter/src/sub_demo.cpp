@@ -36,8 +36,8 @@ int main()
     spdlog::info("Crash logger initialized successfully");
 
     // Create unique node for subscriber
-    auto node = std::make_shared<iox2::Node<iox2::ServiceType::Ipc>>(
-        iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("successful node creation"));
+    auto node =
+        std::make_shared<iox2::Node<iox2::ServiceType::Ipc>>(iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("successful node creation"));
 
     std::cout << "Creating generic publishers and subscribers..." << std::endl;
 
@@ -59,7 +59,7 @@ int main()
         // Parse point cloud fields
         auto cur_pc = std::make_shared<PointCloud<PointXYZITDescriptor>>();
         cur_pc->reserve(num_points);
-        
+
         const uint32_t x_offset = 0, y_offset = 4, z_offset = 8, intensity_offset = 12, timestamp_offset = 18;
 
         double timestamp = 0;
@@ -74,12 +74,13 @@ int main()
         }
 
         odom->AddLidarData(cur_pc);
-        spdlog::info("✓ Received PointCloud #{}: timestamp={:.3f}, point_stride={}, data_size={}, points={}",
-                     pc_received_count.load(),
-                     timestamp,
-                     pc->point_stride(),
-                     pc->data()->size(),
-                     cur_pc->size());
+        spdlog::info(
+            "✓ Received PointCloud #{}: timestamp={:.3f}, point_stride={}, data_size={}, points={}",
+            pc_received_count.load(),
+            timestamp,
+            pc->point_stride(),
+            pc->data()->size(),
+            cur_pc->size());
     };
 
     auto pc_subscriber = std::make_shared<FBSSubscriber<FoxglovePointCloud>>(node, "/lidar_points", pc_callback);
@@ -98,8 +99,13 @@ int main()
         Image cur_img(mat, timestamp);
         odom->AddImageData(cur_img);
 
-        spdlog::info("✓ Received Image #{}: timestamp={:.3f}, {} bytes, mat size: {}x{}",
-                    received_count.load(), timestamp, img->data()->size(), mat.size().width, mat.size().height);
+        spdlog::info(
+            "✓ Received Image #{}: timestamp={:.3f}, {} bytes, mat size: {}x{}",
+            received_count.load(),
+            timestamp,
+            img->data()->size(),
+            mat.size().width,
+            mat.size().height);
 
         spdlog::warn("  Decoding time: {} us", std::chrono::duration_cast<std::chrono::microseconds>(ws.elapsed()).count());
 
@@ -108,8 +114,7 @@ int main()
         // spdlog::info("  Saved to {}", filename);
     };
 
-    auto img_subscriber = std::make_shared<FBSSubscriber<FoxgloveCompressedImage>>(
-        node, "/camera/image_raw", img_callback);
+    auto img_subscriber = std::make_shared<FBSSubscriber<FoxgloveCompressedImage>>(node, "/camera/image_raw", img_callback);
     spdlog::info("Starting image threaded_subscriber...");
 
     std::atomic<int> imu_received_count{0};
@@ -127,16 +132,21 @@ int main()
         odom->AddIMUData(cur_imu);
 
         if (imu_received_count.load() % 50 == 0) {
-            spdlog::info("✓ Received Imu #{}: timestamp={:.3f}, angular_velocity=({:.3f}, {:.3f}, {:.3f}), linear_acceleration=({:.3f}, {:.3f}, {:.3f})",
-                         imu_received_count.load(),
-                         cur_imu.timestamp(),
-                         cur_imu.angular_velocity().x(), cur_imu.angular_velocity().y(), cur_imu.angular_velocity().z(),
-                         cur_imu.linear_acceleration().x(), cur_imu.linear_acceleration().y(), cur_imu.linear_acceleration().z());
+            spdlog::info(
+                "✓ Received Imu #{}: timestamp={:.3f}, angular_velocity=({:.3f}, {:.3f}, {:.3f}), linear_acceleration=({:.3f}, {:.3f}, {:.3f})",
+                imu_received_count.load(),
+                cur_imu.timestamp(),
+                cur_imu.angular_velocity().x(),
+                cur_imu.angular_velocity().y(),
+                cur_imu.angular_velocity().z(),
+                cur_imu.linear_acceleration().x(),
+                cur_imu.linear_acceleration().y(),
+                cur_imu.linear_acceleration().z());
         }
     };
 
-    auto imu_subscriber = std::make_shared<FBSSubscriber<FoxgloveImu>>(
-        node, "/lidar_imu", imu_callback, PubSubConfig{.subscriber_max_buffer_size = 100});
+    auto imu_subscriber =
+        std::make_shared<FBSSubscriber<FoxgloveImu>>(node, "/lidar_imu", imu_callback, PubSubConfig{.subscriber_max_buffer_size = 100});
     spdlog::info("Starting imu threaded_subscriber...");
 
     CallbackDispatcher dispatcher;
@@ -146,7 +156,37 @@ int main()
     dispatcher.register_subscriber<FBSSubscriber<FoxgloveImu>>(imu_subscriber, "Imu_Subscriber", 10);
     dispatcher.start();
 
-    std::this_thread::sleep_for(std::chrono::seconds(200));
+    States lidar_states_buffer;
+    auto odom_pub = std::make_shared<FBSPublisher<FoxglovePoseInFrame>>(node, "/odom");
+    flatbuffers::FlatBufferBuilder fbb(1024 * 1024);
+    while (true) {
+        // Get latest states from the odometry
+        odom->GetLidarState(lidar_states_buffer);
+
+        for (const auto& state : lidar_states_buffer) {
+            fbb.Clear();
+
+            const double timestamp_sec = state.timestamp();
+            const std::uint32_t sec = static_cast<std::uint32_t>(timestamp_sec);
+            const std::uint32_t nsec = static_cast<std::uint32_t>(std::round((timestamp_sec - sec) * 1e9));
+            foxglove::Time timestamp(sec, nsec);
+
+            const std::string frame_source = "odom";
+            auto frame_id = fbb.CreateString(frame_source);
+
+            const auto& position = state.p();
+            const auto& quat_state = state.quat();
+
+            auto pos_vec = foxglove::CreateVector3(fbb, position.x(), position.y(), position.z());
+            auto quat = foxglove::CreateQuaternion(fbb, quat_state.x(), quat_state.y(), quat_state.z(), quat_state.w());
+            auto pose = foxglove::CreatePose(fbb, pos_vec, quat);
+            auto pose_in_frame = foxglove::CreatePoseInFrame(fbb, &timestamp, frame_id, pose);
+            fbb.Finish(pose_in_frame);
+            odom_pub->publish_from_builder(fbb);
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
 
     dispatcher.stop();
     dispatcher.print_statistics();
