@@ -1,6 +1,7 @@
 #pragma once
 
 #include <deque>
+#include <optional>
 
 #include <manif/manif.h>
 
@@ -40,7 +41,7 @@ class State
     ~State() = default;
 
     void Predict(const BundleInput& imu, double dt, double timestamp);
-    void Predict(double timestamp);
+    [[nodiscard]] std::optional<Eigen::Isometry3d> Predict(double timestamp) const;
 
     [[nodiscard]] Tangent f(const Eigen::Vector3d& ang_vel, const Eigen::Vector3d& lin_acc) const;
     /**

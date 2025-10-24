@@ -11,7 +11,6 @@
 #include <sstream>
 #include <stdexcept>
 
-#define MCAP_IMPLEMENTATION
 #include <mcap/writer.hpp>
 
 namespace ms_slam::slam_recorder
@@ -112,6 +111,11 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config)
             schema.data = reinterpret_cast<const std::byte*>(foxglove::PosesInFrameBinarySchema::data());
             schema.data_len = foxglove::PosesInFrameBinarySchema::size();
             poses_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxglovePosesInFrame>>(node_, topic.name);
+        } else if (topic.schema == "foxglove.FrameTransforms") {
+            schema.name = "foxglove.FrameTransforms";
+            schema.data = reinterpret_cast<const std::byte*>(foxglove::FrameTransformsBinarySchema::data());
+            schema.data_len = foxglove::FrameTransformsBinarySchema::size();
+            frame_tf_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxgloveFrameTransforms>>(node_, topic.name);
 
         } else {
             spdlog::warn("  - Unsupported schema type '{}' for topic '{}'", topic.schema, topic.name);
@@ -186,14 +190,14 @@ void FoxgloveWebSocketBridge::stop()
     spdlog::info("Stopping FoxgloveWebSocketBridge...");
     running_.store(false);
 
-    // 停止录制
-    if (recording_.load()) {
-        stop_recording();
-    }
-
     // 等待工作线程退出
     if (worker_thread_ && worker_thread_->joinable()) {
         worker_thread_->join();
+    }
+
+    // 停止录制
+    if (recording_.load()) {
+        stop_recording();
     }
 
     // 停止 WebSocket 服务器
@@ -430,6 +434,31 @@ void FoxgloveWebSocketBridge::poll_and_forward_topic(const std::string& topic_na
                     } else {
                         error_count_.at(topic_name)++;
                         spdlog::error("Failed to forward PosesInFrame on '{}': {}",
+                                      topic_name, foxglove::strerror(result));
+                    }
+                }
+
+                if (recording_.load()) {
+                    record_to_mcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
+                }
+            }
+        }
+        else if (schema == "foxglove.FrameTransforms" && frame_tf_subs_.count(topic_name)) {
+            auto raw_samples = frame_tf_subs_.at(topic_name)->receive_all_raw();
+            for (const auto& raw_data : raw_samples) {
+                uint64_t timestamp_ns = get_current_timestamp_ns();
+
+                if (has_websocket_sinks) {
+                    auto result = channels_.at(topic_name)->log(
+                        reinterpret_cast<const std::byte*>(raw_data.data()),
+                        raw_data.size(),
+                        timestamp_ns
+                    );
+                    if (result == foxglove::FoxgloveError::Ok) {
+                        forwarded_count_.at(topic_name)++;
+                    } else {
+                        error_count_.at(topic_name)++;
+                        spdlog::error("Failed to forward FrameTransforms on '{}': {}",
                                       topic_name, foxglove::strerror(result));
                     }
                 }

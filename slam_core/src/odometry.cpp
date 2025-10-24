@@ -38,35 +38,8 @@ void Odometry::AddIMUData(const IMU& imu_data)
         last_timestamp_imu_ = 0.0;
         return;
     }
-
-    if (!initialized_) {
-        static int N(0);
-        static Eigen::Vector3d gyro_avg(0., 0., 0.);
-        static Eigen::Vector3d accel_avg(0., 0., 0.);
-
-        if (N == 0) {
-            gyro_avg += imu_data.angular_velocity();
-            accel_avg += imu_data.linear_acceleration();
-            N++;
-        } else {
-            N++;
-            accel_avg += (imu_data.linear_acceleration() - accel_avg) / N;
-            gyro_avg += (imu_data.angular_velocity() - gyro_avg) / N;
-
-            if (N >= 100) {
-                auto grav_vec = accel_avg.normalized() * 9.81;
-                state_.g(-grav_vec);
-                state_.b_g(gyro_avg);
-                state_.b_a(accel_avg - grav_vec);
-                state_.timestamp(imu_data.timestamp());
-                mean_acc_ = accel_avg;
-                initialized_ = true;
-            }
-        }
-    }
-
-    imu_buffer_.emplace_back(imu_data);
     last_timestamp_imu_ = imu_data.timestamp();
+    imu_buffer_.emplace_back(imu_data);
 }
 
 void Odometry::AddLidarData(const PointCloudType::ConstPtr& lidar_data)
@@ -191,6 +164,52 @@ std::vector<SyncData> Odometry::SyncPackages()
     return sync_data_list;
 }
 
+void Odometry::Initialize(const SyncData& sync_data)
+{
+    static int N(0);
+    static Eigen::Vector3d gyro_avg(0., 0., 0.);
+    static Eigen::Vector3d accel_avg(0., 0., 0.);
+
+    for (const auto& imu_data : sync_data.imu_data) {
+        if (N == 0) {
+            gyro_avg += imu_data.angular_velocity();
+            accel_avg += imu_data.linear_acceleration();
+            N++;
+        } else {
+            N++;
+            accel_avg += (imu_data.linear_acceleration() - accel_avg) / N;
+            gyro_avg += (imu_data.angular_velocity() - gyro_avg) / N;
+        }
+    }
+    if (N >= 100) {
+        spdlog::info(
+            "Final imu gyro = [{:.3f}, {:.3f}, {:.3f}], accel = [{:.3f}, {:.3f}, {:.3f}]",
+            gyro_avg.x(),
+            gyro_avg.y(),
+            gyro_avg.z(),
+            accel_avg.x(),
+            accel_avg.y(),
+            accel_avg.z());
+        Eigen::Vector3d grav_vec = accel_avg.normalized() * 9.81;
+        state_.g(-grav_vec);
+        state_.b_g(gyro_avg);
+        state_.b_a(accel_avg - grav_vec);
+        state_.timestamp(std::prev(sync_data.imu_data.end(), 2)->timestamp());
+        mean_acc_ = accel_avg;
+        initialized_ = true;
+
+        // clang-format off
+        spdlog::info(
+            "Initialize with {} IMU:g = [{:.3f}, {:.3f}, {:.3f}], b_g = [{:.3f}, {:.3f}, {:.3f}], b_a = [{:.3f}, {:.3f}, {:.3f}], timestamp = {:.3f}",
+            N,
+            state_.g().x(), state_.g().y(), state_.g().z(),
+            state_.b_g().x(), state_.b_g().y(), state_.b_g().z(),
+            state_.b_a().x(), state_.b_a().y(), state_.b_a().z(),
+            state_.timestamp());
+        // clang-format on
+    }
+}
+
 void Odometry::ProcessImuData(const SyncData& sync_data)
 {
     IMU last_imu(Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), 0.0);
@@ -204,7 +223,7 @@ void Odometry::ProcessImuData(const SyncData& sync_data)
         } else if (imu.timestamp() < sync_data.lidar_end_time) {
             dt = imu.timestamp() - state_.timestamp();
             if (dt <= 0.0) {
-                spdlog::error("Invalid IMU data timestamp, dt {:.3f}", dt);
+                spdlog::error("Invalid IMU data timestamp, imu ts {:.3f}, state ts {:.3f}, dt {:.3f}", imu.timestamp(), state_.timestamp(), dt);
                 continue;
             }
             gyro = 0.5 * (last_imu.angular_velocity() + imu.angular_velocity());
@@ -277,10 +296,12 @@ PointCloudType::Ptr Odometry::Deskew(const PointCloudType::ConstPtr& cloud, cons
         const auto& point_time = cloud->field_view<TimestampTag>()[k];
         int i_f = binary_search(point_time);
 
-        State X0 = buffer[i_f];
-        X0.Predict(point_time);
+        auto X0 = buffer[i_f].Predict(point_time);
+        if (!X0) {
+            spdlog::error("Failed to predict point at time {:.3f}", point_time);
+        }
 
-        Eigen::Isometry3f T0 = (X0.isometry3d() * T_i_l).cast<float>();
+        Eigen::Isometry3f T0 = (X0.value() * T_i_l).cast<float>();
 
         Eigen::Vector3f p = cloud->position(k);
 
@@ -322,11 +343,12 @@ void Odometry::RunOdometry()
 
         for (const auto& sync_data : sync_data_list) {
             if (!initialized_) {
-                spdlog::warn("Odometry not initialized yet, skipping sync data at PC ts {:.3f}", sync_data.lidar_beg_time);
+                spdlog::warn("Odometry is initializing, sync data PC ts {:.3f}", sync_data.lidar_beg_time);
+                Initialize(sync_data);
                 continue;
             }
             ProcessImuData(sync_data);
-            auto deskewed_cloud = Deskew(sync_data.lidar_data, state_, imu_state_buffer_);
+            // auto deskewed_cloud = Deskew(sync_data.lidar_data, state_, imu_state_buffer_);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

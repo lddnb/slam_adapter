@@ -267,6 +267,41 @@ struct ROS1PoseStamped {
     }
 };
 
+struct ROS1Transform {
+    ROS1Vector3 translation;
+    ROS1Quaternion rotation;
+
+    bool parse(const uint8_t*& data, size_t& remaining)
+    {
+        return translation.parse(data, remaining) && rotation.parse(data, remaining);
+    }
+};
+
+struct ROS1TransformStamped {
+    ROS1Header header;
+    std::string child_frame_id;
+    ROS1Transform transform;
+
+    bool parse(const uint8_t*& data, size_t& remaining)
+    {
+        return header.parse(data, remaining) &&
+               ros1_detail::read_string(data, remaining, child_frame_id) &&
+               transform.parse(data, remaining);
+    }
+};
+
+struct ROS1TFMessage {
+    std::vector<ROS1TransformStamped> transforms;
+
+    bool parse(const uint8_t* msg_data, size_t msg_size)
+    {
+        const uint8_t* data_ptr = msg_data;
+        size_t remaining = msg_size;
+
+        return ros1_detail::read_sequence(data_ptr, remaining, transforms) && remaining == 0;
+    }
+};
+
 struct ROS1Path {
     ROS1Header header;
     std::vector<ROS1PoseStamped> poses;

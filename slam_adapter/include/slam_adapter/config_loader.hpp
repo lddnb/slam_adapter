@@ -228,8 +228,6 @@ inline void FillMappingParams(const YAML::Node& node, slam_core::MappingParams& 
     AssignIfPresent(node, "satu_gyro", mapping.satu_gyro);
     AssignIfPresent(node, "acc_norm", mapping.acc_norm);
     AssignIfPresent(node, "lidar_meas_cov", mapping.laser_point_cov);
-    AssignIfPresent(node, "acc_cov_output", mapping.acc_cov_output);
-    AssignIfPresent(node, "gyr_cov_output", mapping.gyr_cov_output);
     AssignIfPresent(node, "imu_meas_acc_cov", mapping.imu_meas_acc_cov);
     AssignIfPresent(node, "imu_meas_omg_cov", mapping.imu_meas_omg_cov);
     AssignIfPresent(node, "acc_cov", mapping.acc_cov);
@@ -365,8 +363,6 @@ inline void LogConfig()
     spdlog::info("[Config] Mapping.satu_gyro: {}", mapping.satu_gyro);
     spdlog::info("[Config] Mapping.acc_norm: {}", mapping.acc_norm);
     spdlog::info("[Config] Mapping.laser_point_cov: {}", mapping.laser_point_cov);
-    spdlog::info("[Config] Mapping.acc_cov_output: {}", mapping.acc_cov_output);
-    spdlog::info("[Config] Mapping.gyr_cov_output: {}", mapping.gyr_cov_output);
     spdlog::info("[Config] Mapping.b_acc_cov: {}", mapping.b_acc_cov);
     spdlog::info("[Config] Mapping.b_gyr_cov: {}", mapping.b_gyr_cov);
     spdlog::info("[Config] Mapping.imu_meas_acc_cov: {}", mapping.imu_meas_acc_cov);

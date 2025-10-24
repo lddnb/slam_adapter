@@ -44,6 +44,8 @@ class Odometry
 
     void ProcessImuData(const SyncData& sync_data);
 
+    void Initialize(const SyncData& sync_data);
+
     void RunOdometry();
 
     void GetLidarState(States& buffer);

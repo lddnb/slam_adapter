@@ -32,6 +32,7 @@
 #include <fbs/PointCloud_generated.h>
 #include <fbs/PoseInFrame_generated.h>
 #include <fbs/PosesInFrame_generated.h>
+#include <fbs/FrameTransforms_generated.h>
 #include <iox2/iceoryx2.hpp>
 #include <slam_common/flatbuffers_pub_sub.hpp>
 #include <slam_common/foxglove_messages.hpp>
@@ -48,8 +49,9 @@ using ms_slam::slam_common::FoxgloveImu;
 using ms_slam::slam_common::FoxglovePointCloud;
 using ms_slam::slam_common::FoxglovePoseInFrame;
 using ms_slam::slam_common::FoxglovePosesInFrame;
+using ms_slam::slam_common::FoxgloveFrameTransforms;
 
-enum class MessageKind { PointCloud, CompressedImage, Imu, PoseInFrame, PosesInFrame, Unsupported };
+enum class MessageKind { PointCloud, CompressedImage, Imu, PoseInFrame, PosesInFrame, FrameTransforms, Unsupported };
 
 struct MessageDescriptor {
     MessageKind kind{MessageKind::Unsupported};
@@ -115,6 +117,10 @@ MessageDescriptor describe_message(const mcap::MessageView& view)
         descriptor.is_livox = true;
         return descriptor;
     }
+    if (schema_name == "tf2_msgs/TFMessage") {
+        set_ros(MessageKind::FrameTransforms);
+        return descriptor;
+    }
 
     if (encoding == "flatbuffer") {
         if (schema_name == "foxglove.PointCloud") {
@@ -139,6 +145,11 @@ MessageDescriptor describe_message(const mcap::MessageView& view)
         }
         if (schema_name == "foxglove.PosesInFrame") {
             descriptor.kind = MessageKind::PosesInFrame;
+            descriptor.is_flatbuffer = true;
+            return descriptor;
+        }
+        if (schema_name == "foxglove.FrameTransforms") {
+            descriptor.kind = MessageKind::FrameTransforms;
             descriptor.is_flatbuffer = true;
             return descriptor;
         }
@@ -175,6 +186,7 @@ struct SchemaCache {
     std::optional<mcap::SchemaId> imu;
     std::optional<mcap::SchemaId> pose_in_frame;
     std::optional<mcap::SchemaId> poses_in_frame;
+    std::optional<mcap::SchemaId> frame_transforms;
 };
 
 struct RecorderContext {
@@ -232,6 +244,7 @@ struct MessageStats {
     size_t imu{0};
     size_t pose{0};
     size_t path{0};
+    size_t tf{0};
     size_t filtered{0};
     size_t skipped{0};
 };
@@ -288,6 +301,14 @@ mcap::SchemaId ensure_schema(RecorderContext& recorder, MessageKind kind)
                 foxglove::PosesInFrameBinarySchema schema_buffer;
                 return mcap::Schema(
                     "foxglove.PosesInFrame",
+                    "flatbuffer",
+                    std::string(reinterpret_cast<const char*>(schema_buffer.data()), schema_buffer.size()));
+            });
+        case MessageKind::FrameTransforms:
+            return add_schema(recorder.schemas.frame_transforms, [] {
+                foxglove::FrameTransformsBinarySchema schema_buffer;
+                return mcap::Schema(
+                    "foxglove.FrameTransforms",
                     "flatbuffer",
                     std::string(reinterpret_cast<const char*>(schema_buffer.data()), schema_buffer.size()));
             });
@@ -368,6 +389,9 @@ PlaybackPublisherBase* ensure_publisher(PlaybackContext& ctx, const TopicSetting
             break;
         case MessageKind::PosesInFrame:
             publisher = std::make_unique<PlaybackPublisher<FoxglovePosesInFrame>>(ctx.node, topic_settings.publish_service, queue_depth);
+            break;
+        case MessageKind::FrameTransforms:
+            publisher = std::make_unique<PlaybackPublisher<FoxgloveFrameTransforms>>(ctx.node, topic_settings.publish_service, queue_depth);
             break;
         case MessageKind::Unsupported:
         default:
@@ -593,6 +617,44 @@ bool convert_odometry(const mcap::MessageView& view, flatbuffers::FlatBufferBuil
     return true;
 }
 
+bool convert_tf_message(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+{
+    ROS1TFMessage tf;
+    if (!tf.parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
+        spdlog::error("Failed to parse tf2_msgs/TFMessage at topic {}", view.channel->topic);
+        return false;
+    }
+
+    fbb.Clear();
+    std::vector<flatbuffers::Offset<foxglove::FrameTransform>> transform_offsets;
+    transform_offsets.reserve(tf.transforms.size());
+
+    for (const auto& transform_stamped : tf.transforms) {
+        foxglove::Time timestamp(transform_stamped.header.stamp_sec, transform_stamped.header.stamp_nsec);
+        auto parent = fbb.CreateString(transform_stamped.header.frame_id);
+        auto child = fbb.CreateString(transform_stamped.child_frame_id);
+        auto translation = foxglove::CreateVector3(
+            fbb,
+            transform_stamped.transform.translation.x,
+            transform_stamped.transform.translation.y,
+            transform_stamped.transform.translation.z);
+        auto rotation = foxglove::CreateQuaternion(
+            fbb,
+            transform_stamped.transform.rotation.x,
+            transform_stamped.transform.rotation.y,
+            transform_stamped.transform.rotation.z,
+            transform_stamped.transform.rotation.w);
+
+        transform_offsets.emplace_back(foxglove::CreateFrameTransform(fbb, &timestamp, parent, child, translation, rotation));
+    }
+
+    auto transforms_vector = fbb.CreateVector(transform_offsets);
+    auto frame_transforms = foxglove::CreateFrameTransforms(fbb, transforms_vector);
+    fbb.Finish(frame_transforms);
+    return true;
+}
+
+
 bool convert_ros_message(const mcap::MessageView& view, const MessageDescriptor& descriptor, flatbuffers::FlatBufferBuilder& fbb)
 {
     switch (descriptor.kind) {
@@ -606,6 +668,8 @@ bool convert_ros_message(const mcap::MessageView& view, const MessageDescriptor&
             return convert_odometry(view, fbb);
         case MessageKind::PosesInFrame:
             return convert_path(view, fbb);
+        case MessageKind::FrameTransforms:
+            return convert_tf_message(view, fbb);
         case MessageKind::Unsupported:
         default:
             return false;
@@ -898,6 +962,9 @@ int run_tool_impl(const ToolConfig& config)
             case MessageKind::PosesInFrame:
                 ++stats.path;
                 break;
+            case MessageKind::FrameTransforms:
+                ++stats.tf;
+                break;
             case MessageKind::Unsupported:
                 break;
         }
@@ -923,6 +990,7 @@ int run_tool_impl(const ToolConfig& config)
     spdlog::info("IMU messages: {}", stats.imu);
     spdlog::info("Pose messages: {}", stats.pose);
     spdlog::info("Path messages: {}", stats.path);
+    spdlog::info("FrameTransforms messages: {}", stats.tf);
     spdlog::info("Filtered messages: {}", stats.filtered);
     spdlog::info("Skipped messages: {}", stats.skipped);
     spdlog::info("===== bag_tool finished =====");

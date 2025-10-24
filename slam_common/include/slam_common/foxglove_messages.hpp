@@ -13,6 +13,7 @@
 #include <fbs/Imu_generated.h>
 #include <fbs/PoseInFrame_generated.h>
 #include <fbs/PosesInFrame_generated.h>
+#include <fbs/FrameTransforms_generated.h>
 
 namespace ms_slam::slam_common
 {
@@ -95,5 +96,6 @@ using FoxgloveImu = FoxgloveMsg<foxglove::Imu>;
 using FoxglovePose = FoxgloveMsg<foxglove::Pose>;
 using FoxglovePoseInFrame = FoxgloveMsg<foxglove::PoseInFrame>;
 using FoxglovePosesInFrame = FoxgloveMsg<foxglove::PosesInFrame>;
+using FoxgloveFrameTransforms = FoxgloveMsg<foxglove::FrameTransforms>;
 
 }  // namespace ms_slam::slam_common

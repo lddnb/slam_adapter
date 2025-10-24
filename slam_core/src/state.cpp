@@ -55,15 +55,20 @@ void State::Predict(const BundleInput& imu, double dt, double timestamp)
     stamp = timestamp;
 }
 
-void State::Predict(double timestamp)
+std::optional<Eigen::Isometry3d> State::Predict(double timestamp) const
 {
     double dt = timestamp - stamp;
     if (dt < 0.0) {
-      spdlog::critical("State::Predict: dt is negative: {} vs. {}", timestamp, stamp);
-      return;
+        spdlog::critical("State::Predict: dt is negative: {} vs. {}", timestamp, stamp);
+        return std::nullopt;
     }
 
-    X = X.plus(f(gyro, acc) * dt);
+    BundleState X_tmp = X.plus(f(gyro, acc) * dt);
+    Eigen::Isometry3d res = Eigen::Isometry3d::Identity();
+    res.translation() = X_tmp.element<0>().coeffs();
+    res.linear() = X_tmp.element<1>().quat().toRotationMatrix();
+
+    return res;
 }
 
 State::Tangent State::f(const Eigen::Vector3d& ang_vel, const Eigen::Vector3d& lin_acc) const

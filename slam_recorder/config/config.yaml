@@ -33,6 +33,9 @@ Foxglove:
     - name: /odom
       schema: foxglove.PoseInFrame
       enabled: true
+    - name: /tf
+      schema: foxglove.FrameTransforms
+      enabled: true
 
 BagTool:
   input:
@@ -87,4 +90,10 @@ BagTool:
         playback_enabled: true
         record_enabled: true
         publish_service: /odom
+        queue_depth: 10
+      - name: /tf
+        schema: tf2_msgs/TFMessage
+        playback_enabled: true
+        record_enabled: true
+        publish_service: /tf
         queue_depth: 10

@@ -7,6 +7,7 @@
 #include <slam_core/odometry.hpp>
 
 #include "slam_adapter/config_loader.hpp"
+#include "slam_adapter/sensor_preprocess.hpp"
 
 using namespace ms_slam::slam_common;
 using namespace ms_slam::slam_core;
@@ -53,34 +54,20 @@ int main()
         // Get native Foxglove PointCloud pointer (zero-copy)
         const foxglove::PointCloud* pc = pc_wrapper.get();
 
-        // Calculate number of points
-        size_t num_points = pc->data()->size() / pc->point_stride();
-
-        // Parse point cloud fields
-        auto cur_pc = std::make_shared<PointCloud<PointXYZITDescriptor>>();
-        cur_pc->reserve(num_points);
-
-        const uint32_t x_offset = 0, y_offset = 4, z_offset = 8, intensity_offset = 12, timestamp_offset = 18;
-
-        double timestamp = 0;
-        for (std::size_t i = 0; i < num_points; ++i) {
-            const auto data = pc->data()->Data() + i * pc->point_stride();
-            const float x = *reinterpret_cast<const float*>(data + x_offset);
-            const float y = *reinterpret_cast<const float*>(data + y_offset);
-            const float z = *reinterpret_cast<const float*>(data + z_offset);
-            const float intensity = *reinterpret_cast<const float*>(data + intensity_offset);
-            timestamp = *reinterpret_cast<const double*>(data + timestamp_offset);
-            cur_pc->push_back(PointXYZIT(x, y, z, intensity, timestamp));
+        auto cloud = std::make_shared<PointCloud<PointXYZITDescriptor>>();
+        if (!ConvertLivoxPointCloudMessage(*pc, cloud)) {
+            spdlog::warn("⚠️ Failed to convert point cloud message");
+            return;
         }
 
-        odom->AddLidarData(cur_pc);
-        spdlog::info(
-            "✓ Received PointCloud #{}: timestamp={:.3f}, point_stride={}, data_size={}, points={}",
-            pc_received_count.load(),
-            timestamp,
-            pc->point_stride(),
-            pc->data()->size(),
-            cur_pc->size());
+        odom->AddLidarData(cloud);
+        // spdlog::info(
+        //     "✓ Received PointCloud #{}: timestamp={:.3f}, point_stride={}, data_size={}, points={}",
+        //     pc_received_count.load(),
+        //     cloud->timestamp(0),
+        //     pc->point_stride(),
+        //     pc->data()->size(),
+        //     cloud->size());
     };
 
     auto pc_subscriber = std::make_shared<FBSSubscriber<FoxglovePointCloud>>(node, "/lidar_points", pc_callback);
@@ -92,22 +79,23 @@ int main()
 
         spdlog::stopwatch ws;
         const foxglove::CompressedImage* img = img_wrapper.get();
-        std::vector<uint8_t> buffer(img->data()->begin(), img->data()->end());
-        cv::Mat mat = cv::imdecode(buffer, cv::IMREAD_COLOR);
-        double timestamp = img->timestamp()->sec() + img->timestamp()->nsec() * 1e-9;
+        Image image;
+        if (!DecodeCompressedImageMessage(*img, image)) {
+            spdlog::warn("⚠️ Failed to decode compressed image");
+            return;
+        }
 
-        Image cur_img(mat, timestamp);
-        odom->AddImageData(cur_img);
+        odom->AddImageData(image);
 
-        spdlog::info(
-            "✓ Received Image #{}: timestamp={:.3f}, {} bytes, mat size: {}x{}",
-            received_count.load(),
-            timestamp,
-            img->data()->size(),
-            mat.size().width,
-            mat.size().height);
+        // spdlog::info(
+        //     "✓ Received Image #{}: timestamp={:.3f}, {} bytes, mat size: {}x{}",
+        //     received_count.load(),
+        //     image.timestamp(),
+        //     img->data()->size(),
+        //     image.data().size().width,
+        //     image.data().size().height);
 
-        spdlog::warn("  Decoding time: {} us", std::chrono::duration_cast<std::chrono::microseconds>(ws.elapsed()).count());
+        // spdlog::warn("  Decoding time: {} us", std::chrono::duration_cast<std::chrono::microseconds>(ws.elapsed()).count());
 
         // std::string filename = "received_image.jpg";
         // cv::imwrite(filename, mat);
@@ -122,27 +110,26 @@ int main()
         imu_received_count++;
 
         const foxglove::Imu* imu = imu_wrapper.get();
-        double timestamp = imu->timestamp()->sec() + imu->timestamp()->nsec() * 1e-9;
-
-        IMU cur_imu(
-            Eigen::Vector3d(imu->angular_velocity()->x(), imu->angular_velocity()->y(), imu->angular_velocity()->z()),
-            Eigen::Vector3d(imu->linear_acceleration()->x(), imu->linear_acceleration()->y(), imu->linear_acceleration()->z()),
-            timestamp);
+        IMU cur_imu;
+        if (!ConvertImuMessage(*imu, cur_imu, false)) {
+            spdlog::warn("⚠️ Failed to convert IMU message");
+            return;
+        }
 
         odom->AddIMUData(cur_imu);
 
-        if (imu_received_count.load() % 50 == 0) {
-            spdlog::info(
-                "✓ Received Imu #{}: timestamp={:.3f}, angular_velocity=({:.3f}, {:.3f}, {:.3f}), linear_acceleration=({:.3f}, {:.3f}, {:.3f})",
-                imu_received_count.load(),
-                cur_imu.timestamp(),
-                cur_imu.angular_velocity().x(),
-                cur_imu.angular_velocity().y(),
-                cur_imu.angular_velocity().z(),
-                cur_imu.linear_acceleration().x(),
-                cur_imu.linear_acceleration().y(),
-                cur_imu.linear_acceleration().z());
-        }
+        // if (imu_received_count.load() % 50 == 0) {
+        //     spdlog::info(
+        //         "✓ Received Imu #{}: timestamp={:.3f}, angular_velocity=({:.3f}, {:.3f}, {:.3f}), linear_acceleration=({:.3f}, {:.3f}, {:.3f})",
+        //         imu_received_count.load(),
+        //         cur_imu.timestamp(),
+        //         cur_imu.angular_velocity().x(),
+        //         cur_imu.angular_velocity().y(),
+        //         cur_imu.angular_velocity().z(),
+        //         cur_imu.linear_acceleration().x(),
+        //         cur_imu.linear_acceleration().y(),
+        //         cur_imu.linear_acceleration().z());
+        // }
     };
 
     auto imu_subscriber =
@@ -159,10 +146,17 @@ int main()
     States lidar_states_buffer;
     auto odom_pub = std::make_shared<FBSPublisher<FoxglovePoseInFrame>>(node, "/odom");
     flatbuffers::FlatBufferBuilder fbb(1024 * 1024);
+
+    auto tf_pub = std::make_shared<FBSPublisher<FoxgloveFrameTransforms>>(node, "/tf");
+    std::vector<flatbuffers::Offset<foxglove::FrameTransform>> transform_offsets;
+    flatbuffers::FlatBufferBuilder tf_fbb(1024 * 1024);
+
     while (true) {
         // Get latest states from the odometry
         odom->GetLidarState(lidar_states_buffer);
 
+        transform_offsets.reserve(lidar_states_buffer.size());
+        tf_fbb.Clear();
         for (const auto& state : lidar_states_buffer) {
             fbb.Clear();
 
@@ -183,7 +177,26 @@ int main()
             auto pose_in_frame = foxglove::CreatePoseInFrame(fbb, &timestamp, frame_id, pose);
             fbb.Finish(pose_in_frame);
             odom_pub->publish_from_builder(fbb);
+
+            auto parent = tf_fbb.CreateString("odom");
+            auto child = tf_fbb.CreateString("base_link");
+            auto translation = foxglove::CreateVector3(tf_fbb, position.x(), position.y(), position.z());
+            auto rotation = foxglove::CreateQuaternion(tf_fbb, quat_state.x(), quat_state.y(), quat_state.z(), quat_state.w());
+
+            transform_offsets.emplace_back(foxglove::CreateFrameTransform(tf_fbb, &timestamp, parent, child, translation, rotation));
+
+            // static tf
+            auto T_imu_lidar_parent = tf_fbb.CreateString("base_link");
+            auto T_imu_lidar_child = tf_fbb.CreateString("livox_frame");
+            auto T_imu_lidar_translation = foxglove::CreateVector3(tf_fbb, -0.011, -0.02329, 0.04412);
+            auto T_imu_lidar_rotation = foxglove::CreateQuaternion(tf_fbb, 0, 0, 0, 1);
+            transform_offsets.emplace_back(foxglove::CreateFrameTransform(tf_fbb, &timestamp, T_imu_lidar_parent, T_imu_lidar_child, T_imu_lidar_translation, T_imu_lidar_rotation));
         }
+        auto transforms_vector = tf_fbb.CreateVector(transform_offsets);
+        auto frame_transforms = foxglove::CreateFrameTransforms(tf_fbb, transforms_vector);
+        tf_fbb.Finish(frame_transforms);
+        tf_pub->publish_from_builder(tf_fbb);
+        transform_offsets.clear();
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
