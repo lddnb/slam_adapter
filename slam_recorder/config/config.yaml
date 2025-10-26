@@ -36,6 +36,9 @@ Foxglove:
     - name: /tf
       schema: foxglove.FrameTransforms
       enabled: true
+    - name: /marker
+      schema: foxglove.SceneUpdate
+      enabled: true
 
 BagTool:
   input:

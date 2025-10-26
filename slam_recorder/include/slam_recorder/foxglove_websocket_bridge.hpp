@@ -26,6 +26,7 @@
 #include <fbs/PoseInFrame_generated.h>
 #include <fbs/PosesInFrame_generated.h>
 #include <fbs/FrameTransforms_generated.h>
+#include <fbs/SceneUpdate_generated.h>
 
 namespace ms_slam::slam_recorder
 {
@@ -247,6 +248,7 @@ class FoxgloveWebSocketBridge
     std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxglovePoseInFrame>>> pose_subs_;
     std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxglovePosesInFrame>>> poses_subs_;
     std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxgloveFrameTransforms>>> frame_tf_subs_;
+    std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxgloveSceneUpdate>>> frame_marker_subs_;
 
     // MCAP 录制器
     std::unique_ptr<mcap::McapWriter> mcap_writer_;

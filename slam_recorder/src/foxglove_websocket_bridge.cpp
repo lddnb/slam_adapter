@@ -116,7 +116,11 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config)
             schema.data = reinterpret_cast<const std::byte*>(foxglove::FrameTransformsBinarySchema::data());
             schema.data_len = foxglove::FrameTransformsBinarySchema::size();
             frame_tf_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxgloveFrameTransforms>>(node_, topic.name);
-
+        } else if (topic.schema == "foxglove.SceneUpdate") {
+            schema.name = "foxglove.SceneUpdate";
+            schema.data = reinterpret_cast<const std::byte*>(foxglove::SceneUpdateBinarySchema::data());
+            schema.data_len = foxglove::SceneUpdateBinarySchema::size();
+            frame_marker_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxgloveSceneUpdate>>(node_, topic.name);
         } else {
             spdlog::warn("  - Unsupported schema type '{}' for topic '{}'", topic.schema, topic.name);
             continue;
@@ -442,8 +446,7 @@ void FoxgloveWebSocketBridge::poll_and_forward_topic(const std::string& topic_na
                     record_to_mcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
                 }
             }
-        }
-        else if (schema == "foxglove.FrameTransforms" && frame_tf_subs_.count(topic_name)) {
+        } else if (schema == "foxglove.FrameTransforms" && frame_tf_subs_.count(topic_name)) {
             auto raw_samples = frame_tf_subs_.at(topic_name)->receive_all_raw();
             for (const auto& raw_data : raw_samples) {
                 uint64_t timestamp_ns = get_current_timestamp_ns();
@@ -459,6 +462,30 @@ void FoxgloveWebSocketBridge::poll_and_forward_topic(const std::string& topic_na
                     } else {
                         error_count_.at(topic_name)++;
                         spdlog::error("Failed to forward FrameTransforms on '{}': {}",
+                                      topic_name, foxglove::strerror(result));
+                    }
+                }
+
+                if (recording_.load()) {
+                    record_to_mcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
+                }
+            }
+        } else if (schema == "foxglove.SceneUpdate" && frame_marker_subs_.count(topic_name)) {
+            auto raw_samples = frame_marker_subs_.at(topic_name)->receive_all_raw();
+            for (const auto& raw_data : raw_samples) {
+                uint64_t timestamp_ns = get_current_timestamp_ns();
+
+                if (has_websocket_sinks) {
+                    auto result = channels_.at(topic_name)->log(
+                        reinterpret_cast<const std::byte*>(raw_data.data()),
+                        raw_data.size(),
+                        timestamp_ns
+                    );
+                    if (result == foxglove::FoxgloveError::Ok) {
+                        forwarded_count_.at(topic_name)++;
+                    } else {
+                        error_count_.at(topic_name)++;
+                        spdlog::error("Failed to forward SceneUpdate on '{}': {}",
                                       topic_name, foxglove::strerror(result));
                     }
                 }
@@ -588,7 +615,15 @@ void FoxgloveWebSocketBridge::record_to_mcap(const std::string& topic_name, cons
             foxglove::PosesInFrameBinarySchema schema_data;
             mcap_schema = mcap::Schema(schema_name, "flatbuffer",
                 std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size()));
-        } else {
+        } else if (schema_name == "foxglove.FrameTransforms") {
+            foxglove::FrameTransformsBinarySchema schema_data;
+            mcap_schema = mcap::Schema(schema_name, "flatbuffer",
+                std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size()));
+        } else if (schema_name == "foxglove.SceneUpdate") {
+            foxglove::SceneUpdateBinarySchema schema_data;
+            mcap_schema = mcap::Schema(schema_name, "flatbuffer",
+                std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size())); 
+        }else {
             // 不支持的 schema，不录制
             return;
         }
