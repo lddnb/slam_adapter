@@ -83,6 +83,7 @@ class State
         return T;
     }
 
+    inline ProcessMatrix Cov() const noexcept { return P; }
     inline double timestamp() const noexcept { return stamp; }
     void timestamp(double in) noexcept { stamp = in; }
 

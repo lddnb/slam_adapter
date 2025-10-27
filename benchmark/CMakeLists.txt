@@ -13,11 +13,12 @@ list(APPEND CMAKE_PREFIX_PATH "../slam_core/install" "../thirdparty/small_gicp/i
 
 # Find dependencies
 find_package(Eigen3 3.4 REQUIRED NO_MODULE)
-find_package(PCL 1.14 REQUIRED COMPONENTS common)
+find_package(PCL 1.14 REQUIRED COMPONENTS common filters)
 find_package(OpenMP)
 find_package(slam_core REQUIRED)
 find_package(small_gicp REQUIRED)
 find_package(benchmark REQUIRED)
+find_package(spdlog REQUIRED)
 
 # ============================================================================
 # Benchmark executable
@@ -34,10 +35,23 @@ target_link_libraries(transform_benchmark PRIVATE
     tbb
 )
 
+add_executable(downsample_benchmark src/downsample_benchmark.cpp)
+target_include_directories(downsample_benchmark PRIVATE ${PCL_INCLUDE_DIRS})
+target_link_libraries(downsample_benchmark PRIVATE
+    slam_core::slam_core
+    Eigen3::Eigen
+    benchmark::benchmark
+    ${PCL_LIBRARIES}
+    tbb
+    spdlog::spdlog
+)
+
 # OpenMP support
 if(OpenMP_CXX_FOUND)
     target_link_libraries(transform_benchmark PRIVATE OpenMP::OpenMP_CXX)
     target_compile_definitions(transform_benchmark PRIVATE HAVE_OPENMP)
+    target_link_libraries(downsample_benchmark PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_definitions(downsample_benchmark PRIVATE HAVE_OPENMP)
     message(STATUS "OpenMP enabled for benchmark")
 endif()
 

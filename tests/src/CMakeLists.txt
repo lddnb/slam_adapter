@@ -19,6 +19,10 @@ target_link_libraries(req_res_test PRIVATE slam_common::slam_common)
 add_executable(callback_dispatcher_test callback_dispatcher_test.cpp)
 target_link_libraries(callback_dispatcher_test PRIVATE slam_common::slam_common)
 
+add_executable(filter_test filter_test.cpp)
+target_include_directories(filter_test PRIVATE ${PCL_INCLUDE_DIRS})
+target_link_libraries(filter_test PRIVATE slam_core::slam_core ${PCL_LIBRARIES})
+
 include(CTest)
 # Create the test executable
 add_executable(point_cloud_test

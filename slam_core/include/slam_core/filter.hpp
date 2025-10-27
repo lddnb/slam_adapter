@@ -5,17 +5,18 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <execution>
-#include <iostream>
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
 
+#include <spdlog/spdlog.h>
 #include <Eigen/Core>
 
 #include "slam_core/point_cloud.hpp"
@@ -23,14 +24,27 @@
 namespace ms_slam::slam_core
 {
 
-inline Eigen::Array3i fast_floor(const Eigen::Array3f& pt)
+/**
+ * @brief 计算三维坐标的快速向下取整结果
+ * @param pt 输入的三维浮点数组
+ * @return 向下取整后的三维整型数组
+ */
+inline Eigen::Array3i FastFloor(const Eigen::Array3f& pt)
 {
     const Eigen::Array3i ncoord = pt.cast<int>();
     return ncoord - (pt < ncoord.cast<float>()).cast<int>();
 }
 
+/**
+ * @brief 基于 OpenMP 的快速排序内部实现
+ * @tparam RandomAccessIterator 随机访问迭代器类型
+ * @tparam Compare 比较仿函数类型
+ * @param first 排序起始迭代器
+ * @param last 排序结束迭代器
+ * @param comp 比较函数对象
+ */
 template <typename RandomAccessIterator, typename Compare>
-void quick_sort_omp_impl(RandomAccessIterator first, RandomAccessIterator last, const Compare& comp)
+void QuickSortOmpImpl(RandomAccessIterator first, RandomAccessIterator last, const Compare& comp)
 {
     const std::ptrdiff_t n = std::distance(first, last);
     if (n < 1024) {
@@ -52,21 +66,30 @@ void quick_sort_omp_impl(RandomAccessIterator first, RandomAccessIterator last, 
     auto middle2 = std::partition(middle1, last, [&](const auto& val) { return !comp(pivot, val); });
 
 #pragma omp task
-    quick_sort_omp_impl(first, middle1, comp);
+    QuickSortOmpImpl(first, middle1, comp);
 
 #pragma omp task
-    quick_sort_omp_impl(middle2, last, comp);
+    QuickSortOmpImpl(middle2, last, comp);
 }
 
+/**
+ * @brief 使用 OpenMP 并行加速的快速排序
+ * @tparam RandomAccessIterator 随机访问迭代器类型
+ * @tparam Compare 比较仿函数类型
+ * @param first 排序起始迭代器
+ * @param last 排序结束迭代器
+ * @param comp 比较函数对象
+ * @param num_threads OpenMP 并行线程数
+ */
 template <typename RandomAccessIterator, typename Compare>
-void quick_sort_omp(RandomAccessIterator first, RandomAccessIterator last, const Compare& comp, int num_threads)
+void QuickSortOmp(RandomAccessIterator first, RandomAccessIterator last, const Compare& comp, int num_threads)
 {
 #ifndef _MSC_VER
 #pragma omp parallel num_threads(num_threads)
     {
 #pragma omp single nowait
         {
-            quick_sort_omp_impl(first, last, comp);
+            QuickSortOmpImpl(first, last, comp);
         }
     }
 #else
@@ -185,9 +208,17 @@ void write_voxel_average(PointCloud<Descriptor>& cloud, std::size_t index, const
 
 }  // namespace detail
 
+/**
+ * @brief 使用 OpenMP 对点云执行体素降采样
+ * @tparam Descriptor 点云描述符类型
+ * @param points 输入点云指针
+ * @param leaf_size 体素边长（米）
+ * @param num_threads OpenMP 并行线程数
+ * @return 降采样后的点云
+ */
 template <typename Descriptor>
 typename PointCloud<Descriptor>::Ptr
-voxelgrid_sampling_omp(const typename PointCloud<Descriptor>::ConstPtr& points, double leaf_size, int num_threads = 4)
+VoxelGridSamplingOmp(const typename PointCloud<Descriptor>::ConstPtr& points, double leaf_size, int num_threads = 4)
 {
     using Cloud = PointCloud<Descriptor>;
     if (!points || points->empty()) {
@@ -208,9 +239,9 @@ voxelgrid_sampling_omp(const typename PointCloud<Descriptor>::ConstPtr& points, 
     for (std::int64_t i = 0; i < static_cast<std::int64_t>(point_count); ++i) {
         const auto pos = points->position(static_cast<std::size_t>(i));
         const Eigen::Array3f pt_f = pos.array();
-        const Eigen::Array3i coord = fast_floor(pt_f * static_cast<float>(inv_leaf_size)) + coord_offset;
+        const Eigen::Array3i coord = FastFloor(pt_f * static_cast<float>(inv_leaf_size)) + coord_offset;
         if ((coord < 0).any() || (coord > coord_bit_mask).any()) {
-            std::cerr << "warning: voxel coord is out of range!!" << std::endl;
+            spdlog::warn("Voxel coord is out of range.");
             coord_pt[static_cast<std::size_t>(i)] = {invalid_coord, static_cast<std::size_t>(i)};
             continue;
         }
@@ -221,65 +252,68 @@ voxelgrid_sampling_omp(const typename PointCloud<Descriptor>::ConstPtr& points, 
         coord_pt[static_cast<std::size_t>(i)] = {bits, static_cast<std::size_t>(i)};
     }
 
-    quick_sort_omp(coord_pt.begin(), coord_pt.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; }, num_threads);
+    QuickSortOmp(coord_pt.begin(), coord_pt.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; }, num_threads);
 
-    auto downsampled = std::make_shared<Cloud>();
-    downsampled->resize(point_count);
+    std::vector<std::size_t> voxel_starts;
+    voxel_starts.reserve(point_count + 1);
+    if (!coord_pt.empty()) {
+        voxel_starts.emplace_back(0);
+        for (std::size_t i = 1; i < coord_pt.size(); ++i) {
+            if (coord_pt[i].first != coord_pt[i - 1].first) {
+                voxel_starts.emplace_back(i);
+            }
+        }
+        voxel_starts.emplace_back(coord_pt.size());
+    }
 
-    const int block_size = 1024;
-    std::atomic_uint64_t num_points = 0;
+    const std::size_t voxel_count = voxel_starts.empty() ? 0 : voxel_starts.size() - 1;
+    std::vector<detail::VoxelAccumulator<Descriptor>> accumulators(voxel_count);
 
 #pragma omp parallel for num_threads(num_threads) schedule(guided, 4)
-    for (std::int64_t block_begin = 0; block_begin < static_cast<std::int64_t>(point_count); block_begin += block_size) {
-        const std::size_t block_end = std::min<std::size_t>(point_count, static_cast<std::size_t>(block_begin + block_size));
+    for (std::int64_t v = 0; v < static_cast<std::int64_t>(voxel_count); ++v) {
+        auto& accumulator = accumulators[static_cast<std::size_t>(v)];
+        accumulator.reset();
 
-        std::size_t first = static_cast<std::size_t>(block_begin);
-        while (first < block_end && coord_pt[first].first == invalid_coord) {
-            ++first;
-        }
-
-        if (first >= block_end) {
+        const std::size_t start_idx = voxel_starts[static_cast<std::size_t>(v)];
+        if (coord_pt[start_idx].first == invalid_coord) {
             continue;
         }
 
-        std::vector<detail::VoxelAccumulator<Descriptor>> sub_accums;
-        sub_accums.reserve(block_size);
-
-        detail::VoxelAccumulator<Descriptor> accum;
-        accum.reset();
-        accum.accumulate(*points, coord_pt[first].second);
-        std::uint64_t current_key = coord_pt[first].first;
-
-        for (std::size_t i = first + 1; i < block_end; ++i) {
-            const auto key = coord_pt[i].first;
-            if (key == invalid_coord) {
+        const std::size_t end_idx = voxel_starts[static_cast<std::size_t>(v) + 1];
+        for (std::size_t i = start_idx; i < end_idx; ++i) {
+            if (coord_pt[i].first == invalid_coord) {
                 continue;
             }
-
-            if (key != current_key) {
-                sub_accums.push_back(accum);
-                accum.reset();
-                accum.accumulate(*points, coord_pt[i].second);
-                current_key = key;
-            } else {
-                accum.accumulate(*points, coord_pt[i].second);
-            }
-        }
-
-        sub_accums.push_back(accum);
-
-        const std::size_t point_index_begin = num_points.fetch_add(sub_accums.size());
-        for (std::size_t i = 0; i < sub_accums.size(); ++i) {
-            detail::write_voxel_average(*downsampled, point_index_begin + i, sub_accums[i]);
+            accumulator.accumulate(*points, coord_pt[i].second);
         }
     }
 
-    downsampled->resize(num_points.load());
+    std::vector<detail::VoxelAccumulator<Descriptor>> valid_accums;
+    valid_accums.reserve(accumulators.size());
+    for (const auto& accum : accumulators) {
+        if (accum.count > 0) {
+            valid_accums.push_back(accum);
+        }
+    }
+
+    auto downsampled = std::make_shared<Cloud>();
+    downsampled->resize(valid_accums.size());
+    for (std::size_t i = 0; i < valid_accums.size(); ++i) {
+        detail::write_voxel_average(*downsampled, i, valid_accums[i]);
+    }
+
     return downsampled;
 }
 
+/**
+ * @brief 基于并行标准库的体素降采样实现
+ * @tparam Descriptor 点云描述符类型
+ * @param points 输入点云指针
+ * @param leaf_size 体素边长（米）
+ * @return 降采样后的点云
+ */
 template <typename Descriptor>
-typename PointCloud<Descriptor>::Ptr voxelgrid_sampling_pstl(const typename PointCloud<Descriptor>::ConstPtr& points, double leaf_size)
+typename PointCloud<Descriptor>::Ptr VoxelGridSamplingPstl(const typename PointCloud<Descriptor>::ConstPtr& points, double leaf_size)
 {
     using Cloud = PointCloud<Descriptor>;
     if (!points || points->empty()) {
@@ -300,9 +334,9 @@ typename PointCloud<Descriptor>::Ptr voxelgrid_sampling_pstl(const typename Poin
         const std::size_t i = static_cast<std::size_t>(&pair - coord_pt.data());
         const auto pos = points->position(i);
         const Eigen::Array3f pt_f = pos.array();
-        const Eigen::Array3i coord = fast_floor(pt_f * static_cast<float>(inv_leaf_size)) + coord_offset;
+        const Eigen::Array3i coord = FastFloor(pt_f * static_cast<float>(inv_leaf_size)) + coord_offset;
         if ((coord < 0).any() || (coord > coord_bit_mask).any()) {
-            std::cerr << "warning: voxel coord is out of range!!" << std::endl;
+            spdlog::warn("Voxel coord is out of range.");
             pair = {invalid_coord, i};
             return;
         }

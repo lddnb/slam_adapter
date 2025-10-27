@@ -133,13 +133,49 @@ RUN cd /tmp && git clone https://github.com/artivis/manif.git && \
 #     make -j && \
 #     make install
 
-# RUN cd /tmp && git clone https://github.com/foxglove/foxglove-sdk && \
-#     cd foxglove-sdk/cpp && \
-#     make build && \
-#     cd build && \
-#     cmake .. -DCMAKE_BUILD_TYPE=Release && \
-#     make -j && \
-#     make install
+RUN cd /tmp && git clone https://github.com/foxglove/foxglove-sdk && \
+    cd foxglove-sdk/cpp
+
+RUN cat <<'EOF' >> CMakeLists.txt
+
+### Install
+
+include(GNUInstallDirs)
+
+# Install C++ library (static and shared)
+install(TARGETS foxglove_cpp_static foxglove_cpp_shared
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# Install C headers
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../c/include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING PATTERN "*.h"
+)
+
+# Install C++ headers
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/foxglove/include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING PATTERN "*.hpp" PATTERN "*.inl"
+)
+
+# Install Rust-generated C library files
+# These are copied to the build directory root by Corrosion
+install(FILES
+  ${CMAKE_BINARY_DIR}/libfoxglove.a
+  ${CMAKE_BINARY_DIR}/libfoxglove.so
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  OPTIONAL
+)
+EOF
+
+RUN make build && \
+    cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make -j && \
+    make install
 
 RUN cd /tmp && git clone https://github.com/google/flatbuffers.git && \
     cd flatbuffers && \

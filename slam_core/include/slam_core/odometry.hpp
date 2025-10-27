@@ -50,6 +50,8 @@ class Odometry
 
     void GetLidarState(States& buffer);
 
+    void GetDeskewedCloud(std::vector<PointCloudType::Ptr>& cloud_buffer);
+
   private:
     std::deque<IMU> imu_buffer_;                         ///< imu缓存
     std::deque<PointCloudType::ConstPtr> lidar_buffer_;  ///< lidar缓存
@@ -72,5 +74,7 @@ class Odometry
 
     Eigen::Vector3d mean_acc_;  ///< 平均加速度
     std::mutex state_mutex_;   ///< 状态互斥锁
+
+    std::vector<PointCloudType::Ptr> deskewed_cloud_buffer_;  ///< 同步数据列表
 };
 }  // namespace ms_slam::slam_core

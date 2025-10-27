@@ -1,5 +1,9 @@
 #pragma once
 
+#include "slam_core/point_cloud.hpp"
+#define TINYPLY_IMPLEMENTATION
+#include "slam_core/tinyply.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -10,9 +14,7 @@
 #include <type_traits>
 #include <vector>
 
-#include "slam_core/point_cloud.hpp"
-#define TINYPLY_IMPLEMENTATION
-#include "slam_core/tinyply.h"
+#include <spdlog/spdlog.h>
 
 namespace ms_slam::slam_core
 {
@@ -21,17 +23,36 @@ namespace ply_io
 namespace detail
 {
 
+/**
+ * @brief 判断Ply元素是否包含指定属性
+ * @param element tinyply元素对象
+ * @param name 属性名称
+ * @return 是否找到对应属性
+ */
 inline bool ElementHasProperty(const tinyply::PlyElement& element, const std::string& name)
 {
-    return std::any_of(element.properties.begin(), element.properties.end(), [&](const tinyply::PlyProperty& prop) {
-        return prop.name == name;
-    });
+    return std::any_of(element.properties.begin(), element.properties.end(), [&](const tinyply::PlyProperty& prop) { return prop.name == name; });
 }
 
-template<typename Target>
+/**
+ * @brief 从Ply数据缓冲区读取指定类型的值
+ * @tparam Target 需要转换的目标类型
+ * @param data tinyply数据引用
+ * @param index 数据索引
+ * @return 转换后的目标类型数值
+ * @throws std::out_of_range 当索引越界时抛出异常
+ * @throws std::runtime_error 当遇到不支持的Ply类型时抛出异常
+ */
+template <typename Target>
 Target ReadValue(const tinyply::PlyData& data, std::size_t index)
 {
-    if (index >= data.count) {
+    const auto property_it = tinyply::PropertyTable.find(data.t);
+    if (property_it == tinyply::PropertyTable.end() || property_it->second.stride == 0) {
+        throw std::runtime_error("unsupported ply property type");
+    }
+
+    const auto total_entries = data.buffer.size_bytes() / static_cast<std::size_t>(property_it->second.stride);
+    if (index >= total_entries) {
         throw std::out_of_range("ply data index out of range");
     }
 
@@ -58,7 +79,13 @@ Target ReadValue(const tinyply::PlyData& data, std::size_t index)
     }
 }
 
-template<typename T>
+/**
+ * @brief 将模板类型映射为对应的Ply类型枚举
+ * @tparam T 输入的标量类型
+ * @param 无
+ * @return tinyply::Type 对应的Ply标量类型
+ */
+template <typename T>
 constexpr tinyply::Type PlyTypeFor()
 {
     if constexpr (std::is_same_v<T, float>) {
@@ -82,11 +109,17 @@ constexpr tinyply::Type PlyTypeFor()
     }
 }
 
-template<typename Descriptor>
-void AssignOptionalScalarField(PointCloud<Descriptor>& cloud,
-    std::size_t index,
-    const std::shared_ptr<tinyply::PlyData>& data,
-    auto&& accessor)
+/**
+ * @brief 为点云描述符填充可选的标量字段
+ * @tparam Descriptor 点云描述符类型
+ * @param cloud 点云对象
+ * @param index 点索引
+ * @param data tinyply数据指针
+ * @param accessor 字段访问器
+ * @return 无
+ */
+template <typename Descriptor>
+void AssignOptionalScalarField(PointCloud<Descriptor>& cloud, std::size_t index, const std::shared_ptr<tinyply::PlyData>& data, auto&& accessor)
 {
     using Scalar = std::remove_reference_t<decltype(accessor(cloud, index))>;
     if (!data) {
@@ -96,15 +129,22 @@ void AssignOptionalScalarField(PointCloud<Descriptor>& cloud,
     accessor(cloud, index) = detail::ReadValue<Scalar>(*data, index);
 }
 
-template<typename Descriptor>
-void AssignOptionalVectorField(PointCloud<Descriptor>& cloud,
-    std::size_t index,
-    const std::shared_ptr<tinyply::PlyData>& data,
-    auto&& accessor)
+/**
+ * @brief 为点云描述符填充可选的向量字段
+ * @tparam Descriptor 点云描述符类型
+ * @param cloud 点云对象
+ * @param index 点索引
+ * @param data tinyply数据指针
+ * @param accessor 字段访问器
+ * @return 无
+ */
+template <typename Descriptor>
+void AssignOptionalVectorField(PointCloud<Descriptor>& cloud, std::size_t index, const std::shared_ptr<tinyply::PlyData>& data, auto&& accessor)
 {
     auto field = accessor(cloud, index);
     using Scalar = std::remove_reference_t<decltype(field(0))>;
     if (!data) {
+        // 当文件中缺失该字段时填充零值，保证下游流程拥有确定性输入
         for (Eigen::Index i = 0; i < field.size(); ++i) {
             field(i) = Scalar{};
         }
@@ -113,13 +153,21 @@ void AssignOptionalVectorField(PointCloud<Descriptor>& cloud,
 
     const std::size_t dims = static_cast<std::size_t>(field.size());
     for (std::size_t d = 0; d < dims; ++d) {
+        // tinyply向量字段展平存储，需按维度索引恢复
         field(static_cast<Eigen::Index>(d)) = detail::ReadValue<Scalar>(*data, index * dims + d);
     }
 }
 
 }  // namespace detail
 
-template<typename Descriptor>
+/**
+ * @brief 从输入流读取Ply点云数据
+ * @tparam Descriptor 点云描述符类型
+ * @param input 输入流引用
+ * @return 智能指针形式的点云对象
+ * @throws std::runtime_error 当Ply头解析失败或关键字段缺失时抛出异常
+ */
+template <typename Descriptor>
 typename PointCloud<Descriptor>::Ptr ReadPointCloud(std::istream& input)
 {
     tinyply::PlyFile file;
@@ -128,16 +176,13 @@ typename PointCloud<Descriptor>::Ptr ReadPointCloud(std::istream& input)
     }
 
     const auto elements = file.get_elements();
-    const auto vertex_it = std::find_if(elements.begin(), elements.end(), [](const tinyply::PlyElement& element) {
-        return element.name == "vertex";
-    });
+    const auto vertex_it =
+        std::find_if(elements.begin(), elements.end(), [](const tinyply::PlyElement& element) { return element.name == "vertex"; });
     if (vertex_it == elements.end()) {
         throw std::runtime_error("ply file is missing vertex element");
     }
 
-    auto has_property = [&](const std::string& name) {
-        return detail::ElementHasProperty(*vertex_it, name);
-    };
+    auto has_property = [&](const std::string& name) { return detail::ElementHasProperty(*vertex_it, name); };
 
     if (!has_property("x") || !has_property("y") || !has_property("z")) {
         throw std::runtime_error("ply file is missing xyz coordinates");
@@ -183,7 +228,16 @@ typename PointCloud<Descriptor>::Ptr ReadPointCloud(std::istream& input)
     file.read(input);
 
     const std::size_t vertex_count = vertex_it->size;
-    if (!xyz_data || xyz_data->count != vertex_count * 3) {
+    if (!xyz_data) {
+        throw std::runtime_error("unexpected vertex coordinate layout in ply file");
+    }
+    const auto xyz_property_it = tinyply::PropertyTable.find(xyz_data->t);
+    if (xyz_property_it == tinyply::PropertyTable.end() || xyz_property_it->second.stride == 0) {
+        throw std::runtime_error("unsupported vertex coordinate type in ply file");
+    }
+    const auto xyz_entry_count =
+        xyz_data->buffer.size_bytes() / static_cast<std::size_t>(xyz_property_it->second.stride);
+    if (xyz_entry_count != vertex_count * 3) {
         throw std::runtime_error("unexpected vertex coordinate layout in ply file");
     }
 
@@ -192,46 +246,44 @@ typename PointCloud<Descriptor>::Ptr ReadPointCloud(std::istream& input)
 
     using PositionScalar = typename PointCloud<Descriptor>::scalar_type;
     for (std::size_t i = 0; i < vertex_count; ++i) {
+        // 将展平坐标写入点云内的向量表示
         auto position = cloud->position(i);
         position(0) = detail::ReadValue<PositionScalar>(*xyz_data, i * 3 + 0);
         position(1) = detail::ReadValue<PositionScalar>(*xyz_data, i * 3 + 1);
         position(2) = detail::ReadValue<PositionScalar>(*xyz_data, i * 3 + 2);
 
         if constexpr (has_field_v<IntensityTag, Descriptor>) {
-            detail::AssignOptionalScalarField(*cloud, i, intensity_data, [](auto& c, std::size_t idx) -> auto& {
-                return c.intensity(idx);
-            });
+            detail::AssignOptionalScalarField(*cloud, i, intensity_data, [](auto& c, std::size_t idx) -> auto& { return c.intensity(idx); });
         }
 
         if constexpr (has_field_v<TimestampTag, Descriptor>) {
-            detail::AssignOptionalScalarField(*cloud, i, timestamp_data, [](auto& c, std::size_t idx) -> auto& {
-                return c.timestamp(idx);
-            });
+            detail::AssignOptionalScalarField(*cloud, i, timestamp_data, [](auto& c, std::size_t idx) -> auto& { return c.timestamp(idx); });
         }
 
         if constexpr (has_field_v<CurvatureTag, Descriptor>) {
-            detail::AssignOptionalScalarField(*cloud, i, curvature_data, [](auto& c, std::size_t idx) -> auto& {
-                return c.curvature(idx);
-            });
+            detail::AssignOptionalScalarField(*cloud, i, curvature_data, [](auto& c, std::size_t idx) -> auto& { return c.curvature(idx); });
         }
 
         if constexpr (has_field_v<RGBTag, Descriptor>) {
-            detail::AssignOptionalVectorField(*cloud, i, rgb_data, [](auto& c, std::size_t idx) {
-                return c.rgb(idx);
-            });
+            detail::AssignOptionalVectorField(*cloud, i, rgb_data, [](auto& c, std::size_t idx) { return c.rgb(idx); });
         }
 
         if constexpr (has_field_v<NormalTag, Descriptor>) {
-            detail::AssignOptionalVectorField(*cloud, i, normal_data, [](auto& c, std::size_t idx) {
-                return c.normal(idx);
-            });
+            detail::AssignOptionalVectorField(*cloud, i, normal_data, [](auto& c, std::size_t idx) { return c.normal(idx); });
         }
     }
 
     return cloud;
 }
 
-template<typename Descriptor>
+/**
+ * @brief 从文件路径加载Ply点云
+ * @tparam Descriptor 点云描述符类型
+ * @param filename Ply文件路径
+ * @return 智能指针形式的点云对象
+ * @throws std::runtime_error 当文件无法打开时抛出异常
+ */
+template <typename Descriptor>
 typename PointCloud<Descriptor>::Ptr LoadPointCloud(const std::string& filename)
 {
     std::ifstream input(filename, std::ios::binary);
@@ -241,7 +293,16 @@ typename PointCloud<Descriptor>::Ptr LoadPointCloud(const std::string& filename)
     return ReadPointCloud<Descriptor>(input);
 }
 
-template<typename Descriptor>
+/**
+ * @brief 将点云写入Ply输出流
+ * @tparam Descriptor 点云描述符类型
+ * @param cloud 点云对象
+ * @param output 输出流引用
+ * @param binary 是否使用二进制格式
+ * @throws std::runtime_error 当点云布局与期望不符时抛出异常
+ * @return 无
+ */
+template <typename Descriptor>
 void WritePointCloud(const PointCloud<Descriptor>& cloud, std::ostream& output, bool binary = true)
 {
     tinyply::PlyFile file;
@@ -253,7 +314,8 @@ void WritePointCloud(const PointCloud<Descriptor>& cloud, std::ostream& output, 
     }
 
     using PositionScalar = typename PointCloud<Descriptor>::scalar_type;
-    file.add_properties_to_element("vertex",
+    file.add_properties_to_element(
+        "vertex",
         {"x", "y", "z"},
         detail::PlyTypeFor<PositionScalar>(),
         vertex_count,
@@ -263,7 +325,8 @@ void WritePointCloud(const PointCloud<Descriptor>& cloud, std::ostream& output, 
 
     if constexpr (has_field_v<IntensityTag, Descriptor>) {
         const auto intensity = cloud.template field_vector<IntensityTag>();
-        file.add_properties_to_element("vertex",
+        file.add_properties_to_element(
+            "vertex",
             {"intensity"},
             detail::PlyTypeFor<typename PointCloud<Descriptor>::template FieldScalarT<IntensityTag>>(),
             vertex_count,
@@ -274,7 +337,8 @@ void WritePointCloud(const PointCloud<Descriptor>& cloud, std::ostream& output, 
 
     if constexpr (has_field_v<TimestampTag, Descriptor>) {
         const auto timestamp = cloud.template field_vector<TimestampTag>();
-        file.add_properties_to_element("vertex",
+        file.add_properties_to_element(
+            "vertex",
             {"timestamp"},
             detail::PlyTypeFor<typename PointCloud<Descriptor>::template FieldScalarT<TimestampTag>>(),
             vertex_count,
@@ -285,7 +349,8 @@ void WritePointCloud(const PointCloud<Descriptor>& cloud, std::ostream& output, 
 
     if constexpr (has_field_v<CurvatureTag, Descriptor>) {
         const auto curvature = cloud.template field_vector<CurvatureTag>();
-        file.add_properties_to_element("vertex",
+        file.add_properties_to_element(
+            "vertex",
             {"curvature"},
             detail::PlyTypeFor<typename PointCloud<Descriptor>::template FieldScalarT<CurvatureTag>>(),
             vertex_count,
@@ -296,7 +361,8 @@ void WritePointCloud(const PointCloud<Descriptor>& cloud, std::ostream& output, 
 
     if constexpr (has_field_v<RGBTag, Descriptor>) {
         const auto rgb = cloud.template field_matrix<RGBTag>();
-        file.add_properties_to_element("vertex",
+        file.add_properties_to_element(
+            "vertex",
             {"red", "green", "blue"},
             detail::PlyTypeFor<typename PointCloud<Descriptor>::template FieldScalarT<RGBTag>>(),
             vertex_count,
@@ -307,7 +373,8 @@ void WritePointCloud(const PointCloud<Descriptor>& cloud, std::ostream& output, 
 
     if constexpr (has_field_v<NormalTag, Descriptor>) {
         const auto normal = cloud.template field_matrix<NormalTag>();
-        file.add_properties_to_element("vertex",
+        file.add_properties_to_element(
+            "vertex",
             {"nx", "ny", "nz"},
             detail::PlyTypeFor<typename PointCloud<Descriptor>::template FieldScalarT<NormalTag>>(),
             vertex_count,
@@ -319,7 +386,16 @@ void WritePointCloud(const PointCloud<Descriptor>& cloud, std::ostream& output, 
     file.write(output, binary);
 }
 
-template<typename Descriptor>
+/**
+ * @brief 将点云保存为指定路径下的Ply文件
+ * @tparam Descriptor 点云描述符类型
+ * @param cloud 点云对象
+ * @param filename 输出文件路径
+ * @param binary 是否使用二进制格式
+ * @throws std::runtime_error 当文件无法打开写入时抛出异常
+ * @return 无
+ */
+template <typename Descriptor>
 void SavePointCloud(const PointCloud<Descriptor>& cloud, const std::string& filename, bool binary = true)
 {
     std::ofstream output(filename, std::ios::binary);
@@ -331,4 +407,3 @@ void SavePointCloud(const PointCloud<Descriptor>& cloud, const std::string& file
 
 }  // namespace ply_io
 }  // namespace ms_slam::slam_core
-

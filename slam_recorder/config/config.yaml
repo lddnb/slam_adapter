@@ -21,6 +21,9 @@ Foxglove:
     - name: /lidar_points
       schema: foxglove.PointCloud
       enabled: true
+    - name: /deskewed_cloud
+      schema: foxglove.PointCloud
+      enabled: true
     - name: /camera/image_raw
       schema: foxglove.CompressedImage
       enabled: true

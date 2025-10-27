@@ -194,7 +194,9 @@ void Odometry::Initialize(const SyncData& sync_data)
         state_.g(-grav_vec);
         state_.b_g(gyro_avg);
         state_.b_a(accel_avg - grav_vec);
+        // 设置时间戳为最后一个小于lidar_end_time的IMU数据的时间
         state_.timestamp(std::prev(sync_data.imu_data.end(), 2)->timestamp());
+        imu_state_buffer_.emplace_back(state_);
         mean_acc_ = accel_avg;
         initialized_ = true;
 
@@ -263,25 +265,17 @@ void Odometry::ProcessImuData(const SyncData& sync_data)
     }
 }
 
+/**
+ * @brief 对输入点云进行时间去畸变处理
+ * @param cloud 原始点云
+ * @param state 当前里程计状态
+ * @param buffer IMU预测状态缓冲区
+ * @return 去畸变后的点云
+ * @note 假设点时间戳严格位于缓冲区时间范围内
+ */
 PointCloudType::Ptr Odometry::Deskew(const PointCloudType::ConstPtr& cloud, const State& state, const States& buffer) const
 {
     PointCloudType::Ptr deskewed_cloud = std::make_shared<PointCloudType>(*cloud);
-
-    auto binary_search = [&](const double& t) {
-        int l(0), r(buffer.size() - 1);
-
-        while (l < r) {
-            int m = (l + r) / 2;
-            if (buffer[m].timestamp() == t)
-                return m;
-            else if (t < buffer[m].timestamp())
-                r = m - 1;
-            else
-                l = m + 1;
-        }
-
-        return l - 1 > 0 ? l - 1 : l;
-    };
 
     const auto& config = Config::GetInstance();
     Eigen::Isometry3d T_i_l = Eigen::Isometry3d::Identity();
@@ -292,11 +286,34 @@ PointCloudType::Ptr Odometry::Deskew(const PointCloudType::ConstPtr& cloud, cons
     std::vector<int> indices(cloud->size());
     std::iota(indices.begin(), indices.end(), 0);
 
-    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int k) {
-        const auto& point_time = cloud->field_view<TimestampTag>()[k];
-        int i_f = binary_search(point_time);
+    if (cloud->timestamp(0) < buffer.front().timestamp()) {
+        spdlog::error(
+            "cloud timestamp is earlier than buffer timestamp, cloud ts {:.3f}, buffer ts {:.3f}",
+            cloud->timestamp(0),
+            buffer.front().timestamp());
+    } else if (cloud->timestamp(cloud->size() - 1) > buffer.back().timestamp()) {
+        spdlog::error(
+            "cloud timestamp is later than buffer timestamp, cloud ts {:.3f}, buffer ts {:.3f}",
+            cloud->timestamp(cloud->size() - 1),
+            buffer.back().timestamp());
+    }
 
-        auto X0 = buffer[i_f].Predict(point_time);
+    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int k) {
+        const auto& point_time = cloud->timestamp(k);
+
+        // 返回数组中第一个大于或等于被查数的迭代器
+        auto it = std::lower_bound(buffer.begin(), buffer.end(), point_time, [](const State& state_item, double target_time) {
+            return state_item.timestamp() < target_time;
+        });
+
+        if (it == buffer.end()) {
+            spdlog::error("Lower bound search failed for time {:.3f}", point_time);
+            return;
+        }
+
+        const State& reference_state = (it->timestamp() == point_time) ? *it : *std::prev(it);
+
+        auto X0 = reference_state.Predict(point_time);
         if (!X0) {
             spdlog::error("Failed to predict point at time {:.3f}", point_time);
         }
@@ -319,6 +336,15 @@ void Odometry::GetLidarState(States& buffer)
     buffer.clear();
     if (!lidar_state_buffer_.empty()) {
         buffer.swap(lidar_state_buffer_);
+    }
+}
+
+void Odometry::GetDeskewedCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
+{
+    std::unique_lock<std::mutex> lock(state_mutex_);
+    cloud_buffer.clear();
+    if (!deskewed_cloud_buffer_.empty()) {
+        cloud_buffer.swap(deskewed_cloud_buffer_);
     }
 }
 
@@ -348,7 +374,8 @@ void Odometry::RunOdometry()
                 continue;
             }
             ProcessImuData(sync_data);
-            // auto deskewed_cloud = Deskew(sync_data.lidar_data, state_, imu_state_buffer_);
+            auto deskewed_cloud = Deskew(sync_data.lidar_data, state_, imu_state_buffer_);
+            deskewed_cloud_buffer_.emplace_back(deskewed_cloud);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

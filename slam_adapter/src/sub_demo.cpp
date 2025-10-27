@@ -1,4 +1,3 @@
-#include <opencv2/imgcodecs.hpp>
 #include <slam_common/flatbuffers_pub_sub.hpp>
 #include <slam_common/foxglove_messages.hpp>
 #include <slam_common/crash_logger.hpp>
@@ -7,6 +6,7 @@
 #include <slam_core/odometry.hpp>
 
 #include "slam_adapter/config_loader.hpp"
+#include "slam_adapter/sensor_publish.hpp"
 #include "slam_adapter/sensor_preprocess.hpp"
 
 using namespace ms_slam::slam_common;
@@ -40,12 +40,13 @@ int main()
     auto node =
         std::make_shared<iox2::Node<iox2::ServiceType::Ipc>>(iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("successful node creation"));
 
-    std::cout << "Creating generic publishers and subscribers..." << std::endl;
+    spdlog::info("Creating generic publishers and subscribers...");
 
     LoadConfigFromFile("../config/test.yaml");
     LogConfig();
 
     auto odom = std::make_unique<Odometry>();
+    auto processed_image_pub = std::make_shared<FBSPublisher<FoxgloveCompressedImage>>(node, "/camera/image_processed");
 
     std::atomic<int> pc_received_count{0};
     auto pc_callback = [&pc_received_count, &odom](const FoxglovePointCloud& pc_wrapper) {
@@ -74,7 +75,7 @@ int main()
     spdlog::info("Starting pointcloud threaded_subscriber...");
 
     std::atomic<int> received_count{0};
-    auto img_callback = [&received_count, &odom](const FoxgloveCompressedImage& img_wrapper) {
+    auto img_callback = [&received_count, &odom, processed_image_pub](const FoxgloveCompressedImage& img_wrapper) {
         received_count++;
 
         spdlog::stopwatch ws;
@@ -86,6 +87,14 @@ int main()
         }
 
         odom->AddImageData(image);
+
+        if (processed_image_pub) {
+            flatbuffers::FlatBufferBuilder image_builder(512 * 1024);
+            const std::string frame_id = img->frame_id() ? img->frame_id()->str() : "camera";
+            if (BuildFoxgloveCompressedImage(image, frame_id, "jpeg", 90, image_builder)) {
+                processed_image_pub->publish_from_builder(image_builder);
+            }
+        }
 
         // spdlog::info(
         //     "✓ Received Image #{}: timestamp={:.3f}, {} bytes, mat size: {}x{}",
@@ -148,55 +157,63 @@ int main()
     flatbuffers::FlatBufferBuilder fbb(1024 * 1024);
 
     auto tf_pub = std::make_shared<FBSPublisher<FoxgloveFrameTransforms>>(node, "/tf");
-    std::vector<flatbuffers::Offset<foxglove::FrameTransform>> transform_offsets;
-    flatbuffers::FlatBufferBuilder tf_fbb(1024 * 1024);
+    auto scene_pub = std::make_shared<FBSPublisher<FoxgloveSceneUpdate>>(node, "/marker");
+
+    std::vector<PointCloudType::Ptr> deskewed_clouds;
+    auto deskewed_cloud_pub = std::make_shared<FBSPublisher<FoxglovePointCloud>>(node, "/deskewed_cloud");
 
     while (true) {
         // Get latest states from the odometry
         odom->GetLidarState(lidar_states_buffer);
 
-        transform_offsets.reserve(lidar_states_buffer.size());
-        tf_fbb.Clear();
+        std::vector<FrameTransformData> transform_data;
+        transform_data.reserve(lidar_states_buffer.size() * 2);
+
         for (const auto& state : lidar_states_buffer) {
-            fbb.Clear();
+            if (!BuildFoxglovePoseInFrame(state, "odom", fbb)) {
+                spdlog::warn("BuildFoxglovePoseInFrame failed");
+                continue;
+            }
+            odom_pub->publish_from_builder(fbb);
 
-            const double timestamp_sec = state.timestamp();
-            const std::uint32_t sec = static_cast<std::uint32_t>(timestamp_sec);
-            const std::uint32_t nsec = static_cast<std::uint32_t>(std::round((timestamp_sec - sec) * 1e9));
-            foxglove::Time timestamp(sec, nsec);
-
-            const std::string frame_source = "odom";
-            auto frame_id = fbb.CreateString(frame_source);
+            if (BuildFoxgloveSceneUpdateFromState(state, "odom", "odom_covariance", fbb)) {
+                scene_pub->publish_from_builder(fbb);
+            }
 
             const auto& position = state.p();
             const auto& quat_state = state.quat();
 
-            auto pos_vec = foxglove::CreateVector3(fbb, position.x(), position.y(), position.z());
-            auto quat = foxglove::CreateQuaternion(fbb, quat_state.x(), quat_state.y(), quat_state.z(), quat_state.w());
-            auto pose = foxglove::CreatePose(fbb, pos_vec, quat);
-            auto pose_in_frame = foxglove::CreatePoseInFrame(fbb, &timestamp, frame_id, pose);
-            fbb.Finish(pose_in_frame);
-            odom_pub->publish_from_builder(fbb);
+            transform_data.emplace_back(FrameTransformData{
+                .timestamp = state.timestamp(),
+                .parent_frame = "odom",
+                .child_frame = "base_link",
+                .translation = position,
+                .rotation = quat_state});
 
-            auto parent = tf_fbb.CreateString("odom");
-            auto child = tf_fbb.CreateString("base_link");
-            auto translation = foxglove::CreateVector3(tf_fbb, position.x(), position.y(), position.z());
-            auto rotation = foxglove::CreateQuaternion(tf_fbb, quat_state.x(), quat_state.y(), quat_state.z(), quat_state.w());
-
-            transform_offsets.emplace_back(foxglove::CreateFrameTransform(tf_fbb, &timestamp, parent, child, translation, rotation));
-
-            // static tf
-            auto T_imu_lidar_parent = tf_fbb.CreateString("base_link");
-            auto T_imu_lidar_child = tf_fbb.CreateString("livox_frame");
-            auto T_imu_lidar_translation = foxglove::CreateVector3(tf_fbb, -0.011, -0.02329, 0.04412);
-            auto T_imu_lidar_rotation = foxglove::CreateQuaternion(tf_fbb, 0, 0, 0, 1);
-            transform_offsets.emplace_back(foxglove::CreateFrameTransform(tf_fbb, &timestamp, T_imu_lidar_parent, T_imu_lidar_child, T_imu_lidar_translation, T_imu_lidar_rotation));
+            transform_data.emplace_back(FrameTransformData{
+                .timestamp = state.timestamp(),
+                .parent_frame = "base_link",
+                .child_frame = "livox_frame",
+                .translation = Eigen::Vector3d(-0.011, -0.02329, 0.04412),
+                .rotation = Eigen::Quaterniond::Identity()});
         }
-        auto transforms_vector = tf_fbb.CreateVector(transform_offsets);
-        auto frame_transforms = foxglove::CreateFrameTransforms(tf_fbb, transforms_vector);
-        tf_fbb.Finish(frame_transforms);
-        tf_pub->publish_from_builder(tf_fbb);
-        transform_offsets.clear();
+
+        if (!transform_data.empty()) {
+            if (BuildFoxgloveFrameTransforms(transform_data, fbb)) {
+                tf_pub->publish_from_builder(fbb);
+            }
+        }
+
+        // Deskewed cloud
+        odom->GetDeskewedCloud(deskewed_clouds);
+        for (const auto& cloud : deskewed_clouds) {
+            if (!cloud) {
+                continue;
+            }
+            if (BuildFoxglovePointCloud(*cloud, "livox_frame", fbb)) {
+                deskewed_cloud_pub->publish_from_builder(fbb);
+            }
+        }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }

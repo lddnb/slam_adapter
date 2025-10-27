@@ -18,6 +18,7 @@ find_package(slam_common REQUIRED)
 find_package(slam_core REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(mcap REQUIRED)
+find_package(PCL 1.14 REQUIRED COMPONENTS common filters)
 
 # ===================================================================
 # Unit Testing with Catch2
