@@ -116,6 +116,14 @@ RUN cd /tmp && git clone https://github.com/jeremy-rifkin/cpptrace.git && \
     cmake .. -DCMAKE_BUILD_TYPE=Release -DCPPTRACE_UNWIND_WITH_LIBUNWIND=ON && \
     make -j && \
     make install
+# easy_profiler
+RUN cd /tmp && git clone https://github.com/yse/easy_profiler.git && \
+    cd easy_profiler && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make -j && \
+    make install
 
 # manif
 RUN cd /tmp && git clone https://github.com/artivis/manif.git && \
@@ -133,6 +141,7 @@ RUN cd /tmp && git clone https://github.com/artivis/manif.git && \
 #     make -j && \
 #     make install
 
+# foxglove-sdk
 RUN cd /tmp && git clone https://github.com/foxglove/foxglove-sdk && \
     cd foxglove-sdk/cpp
 

@@ -42,9 +42,7 @@ class CallbackDispatcher
      * @param priority 调度优先级
      * @return 注册标识符
      */
-    uint64_t register_poller(std::function<bool()> poll_func,
-                             const std::string& name = "unnamed",
-                             int priority = 0);
+    uint64_t register_poller(std::function<bool()> poll_func, const std::string& name = "unnamed", int priority = 0);
 
     /**
      * @brief 注册 subscriber 对象
@@ -54,10 +52,8 @@ class CallbackDispatcher
      * @param priority 调度优先级
      * @return 注册标识符
      */
-    template<typename T>
-    uint64_t register_subscriber(std::shared_ptr<T> subscriber,
-                                 const std::string& name = "subscriber",
-                                 int priority = 0)
+    template <typename T>
+    uint64_t register_subscriber(std::shared_ptr<T> subscriber, const std::string& name = "subscriber", int priority = 0)
     {
         auto poll_func = [subscriber, name]() -> bool {
             auto sample = subscriber->receive_once();
@@ -75,14 +71,10 @@ class CallbackDispatcher
      * @param priority 调度优先级
      * @return 注册标识符
      */
-    template<typename ServerType>
-    uint64_t register_server(std::shared_ptr<ServerType> server,
-                             const std::string& name = "rpc_server",
-                             int priority = 0)
+    template <typename ServerType>
+    uint64_t register_server(std::shared_ptr<ServerType> server, const std::string& name = "rpc_server", int priority = 0)
     {
-        auto poll_func = [server, name]() -> bool {
-            return server->receive_and_respond();
-        };
+        auto poll_func = [server, name]() -> bool { return server->receive_and_respond(); };
 
         return register_poller(poll_func, name, priority);
     }
@@ -119,10 +111,10 @@ class CallbackDispatcher
      * @brief 回调统计信息结构
      */
     struct Stats {
-        std::string name;                 ///< 回调名称
-        int priority;                     ///< 调度优先级
-        uint64_t total_calls;             ///< 总调用次数
-        std::chrono::microseconds avg_duration; ///< 平均处理耗时
+        std::string name;                        ///< 回调名称
+        int priority;                            ///< 调度优先级
+        uint64_t total_calls;                    ///< 总调用次数
+        std::chrono::microseconds avg_duration;  ///< 平均处理耗时
     };
 
     /**

@@ -55,6 +55,10 @@ BagTool:
     synchronize_time: true
     default_queue_depth: 10
 
+  time_window:
+    start_seconds: 0.0
+    duration_seconds: 0.0
+
   record:
     enable: false
     output_dir: /home/ubuntu/slam_adapter/slam_recorder/output

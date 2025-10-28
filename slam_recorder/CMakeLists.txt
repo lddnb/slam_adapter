@@ -40,14 +40,3 @@ target_link_libraries(foxglove_bridge PRIVATE
     yaml-cpp
     mcap
 )
-
-add_executable(foxglove_scene_update_demo
-    src/foxglove_scene_update_demo.cpp
-)
-target_link_libraries(foxglove_scene_update_demo PRIVATE
-    slam_common::slam_common
-    foxglove_cpp_static
-    libfoxglove.a
-    yaml-cpp
-    mcap
-)

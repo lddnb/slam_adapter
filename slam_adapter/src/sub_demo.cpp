@@ -1,8 +1,12 @@
+#include <atomic>
+#include <csignal>
+
+#include <easy/profiler.h>
+#include <spdlog/stopwatch.h>
+#include <slam_common/callback_dispatcher.hpp>
+#include <slam_common/crash_logger.hpp>
 #include <slam_common/flatbuffers_pub_sub.hpp>
 #include <slam_common/foxglove_messages.hpp>
-#include <slam_common/crash_logger.hpp>
-#include <slam_common/callback_dispatcher.hpp>
-#include <spdlog/stopwatch.h>
 #include <slam_core/odometry.hpp>
 
 #include "slam_adapter/config_loader.hpp"
@@ -13,8 +17,30 @@ using namespace ms_slam::slam_common;
 using namespace ms_slam::slam_core;
 using namespace ms_slam::slam_adapter;
 
+namespace
+{
+
+std::atomic<bool> shouldExit{false};
+constexpr char kProfileDumpPath[] = "/home/ubuntu/data/test_profile.prof";
+
+/**
+ * @brief 处理SIGINT信号并设置退出标记
+ * @param signal 捕获到的信号编号
+ */
+void HandleSignal(int signal)
+{
+    (void)signal;
+    shouldExit.store(true);
+}
+
+}  // namespace
+
 int main()
 {
+    EASY_THREAD_SCOPE("AdapterThread");
+    EASY_PROFILER_ENABLE;
+    std::signal(SIGINT, HandleSignal);
+
     ms_slam::slam_common::LoggerConfig config;
     config.log_file_path = "sub.log";
     auto dup_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(10));
@@ -50,6 +76,7 @@ int main()
 
     std::atomic<int> pc_received_count{0};
     auto pc_callback = [&pc_received_count, &odom](const FoxglovePointCloud& pc_wrapper) {
+        EASY_BLOCK("pc_cb", profiler::colors::Green);
         pc_received_count++;
 
         // Get native Foxglove PointCloud pointer (zero-copy)
@@ -76,6 +103,7 @@ int main()
 
     std::atomic<int> received_count{0};
     auto img_callback = [&received_count, &odom, processed_image_pub](const FoxgloveCompressedImage& img_wrapper) {
+        EASY_BLOCK("img_cb", profiler::colors::Coral);
         received_count++;
 
         spdlog::stopwatch ws;
@@ -116,6 +144,7 @@ int main()
 
     std::atomic<int> imu_received_count{0};
     auto imu_callback = [&imu_received_count, &odom](const FoxgloveImu& imu_wrapper) {
+        EASY_BLOCK("imu_cb", profiler::colors::Brown);
         imu_received_count++;
 
         const foxglove::Imu* imu = imu_wrapper.get();
@@ -162,7 +191,8 @@ int main()
     std::vector<PointCloudType::Ptr> deskewed_clouds;
     auto deskewed_cloud_pub = std::make_shared<FBSPublisher<FoxglovePointCloud>>(node, "/deskewed_cloud");
 
-    while (true) {
+    while (!shouldExit.load()) {
+        EASY_BLOCK("Adaprer Publish", profiler::colors::Orange);
         // Get latest states from the odometry
         odom->GetLidarState(lidar_states_buffer);
 
@@ -214,12 +244,23 @@ int main()
                 deskewed_cloud_pub->publish_from_builder(fbb);
             }
         }
+        EASY_END_BLOCK;
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    spdlog::info("接收到退出信号，正在收尾");
+
     dispatcher.stop();
     dispatcher.print_statistics();
+    odom->Stop();
+
+    const auto dumped_blocks = profiler::dumpBlocksToFile(kProfileDumpPath);
+    if (dumped_blocks == 0) {
+        spdlog::error("导出Profiler数据失败: {}", kProfileDumpPath);
+    } else {
+        spdlog::info("导出Profiler数据成功: {} 块, 路径 {}", dumped_blocks, kProfileDumpPath);
+    }
 
     return 0;
 }

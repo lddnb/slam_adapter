@@ -10,6 +10,7 @@
 
 #include <spdlog/spdlog.h>
 #include <yaml-cpp/yaml.h>
+
 #include <slam_common/crash_logger.hpp>
 
 using namespace ms_slam::slam_recorder;
@@ -22,12 +23,12 @@ static std::unique_ptr<FoxgloveWebSocketBridge> g_bridge;
  * @brief 处理 SIGINT 信号
  * @param signal 信号编号
  */
-void signal_handler(int signal)
+void SignalHandler(int signal)
 {
     if (signal == SIGINT) {
         spdlog::info("Caught SIGINT (Ctrl+C), shutting down...");
         if (g_bridge) {
-            g_bridge->stop();
+            g_bridge->Stop();
         }
     }
 }
@@ -62,7 +63,7 @@ int main(int argc, char** argv)
     spdlog::info("========================================");
 
     // 注册信号处理
-    std::signal(SIGINT, signal_handler);
+    std::signal(SIGINT, SignalHandler);
 
     try {
         // 默认配置文件路径
@@ -117,7 +118,7 @@ int main(int argc, char** argv)
 
         // 启动桥接
         spdlog::info("Starting bridge...");
-        g_bridge->start();
+        g_bridge->Start();
 
         spdlog::info("");
         spdlog::info("✓ Bridge is now running!");
@@ -127,7 +128,7 @@ int main(int argc, char** argv)
             spdlog::info("  WebSocket: DISABLED");
         }
         if (config.recorder.enable) {
-            spdlog::info("  Recorder: {}", g_bridge->is_recording() ? "RECORDING" : "Standby");
+            spdlog::info("  Recorder: {}", g_bridge->IsRecording() ? "RECORDING" : "Standby");
         } else {
             spdlog::info("  Recorder: DISABLED");
         }
@@ -142,20 +143,21 @@ int main(int argc, char** argv)
         spdlog::info("Press Ctrl+C to stop...");
 
         // 主循环：定期输出统计信息
-        while (g_bridge->is_running()) {
+        while (g_bridge->IsRunning()) {
             std::this_thread::sleep_for(std::chrono::seconds(5));
 
-            auto stats = g_bridge->get_statistics();
-            
+            auto stats = g_bridge->GetStatistics();
+
             uint64_t total_forwarded = stats.total_forwarded();
             uint64_t total_recorded = stats.total_recorded();
             uint64_t total_errors = stats.total_errors();
 
             if (total_forwarded > 0 || total_recorded > 0 || total_errors > 0) {
-                spdlog::info("Statistics: WS[Fwd:{}] REC[Rec:{}] ERR[{}]",
-                             config.websocket.enable ? total_forwarded : 0,
-                             (config.recorder.enable && g_bridge->is_recording()) ? total_recorded : 0,
-                             total_errors);
+                spdlog::info(
+                    "Statistics: WS[Fwd:{}] REC[Rec:{}] ERR[{}]",
+                    config.websocket.enable ? total_forwarded : 0,
+                    (config.recorder.enable && g_bridge->IsRecording()) ? total_recorded : 0,
+                    total_errors);
             }
         }
 

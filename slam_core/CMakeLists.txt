@@ -12,6 +12,7 @@ find_package(Eigen3 3.4 REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(manif REQUIRED)
+find_package(easy_profiler REQUIRED)
 
 # ============================================================================
 # SLAM Core Library (Header-only for now)
@@ -41,7 +42,9 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
     spdlog::spdlog
     ${OpenCV_LIBS}
     tbb
+    easy_profiler
 )
+target_compile_definitions(${PROJECT_NAME} PUBLIC BUILD_WITH_EASY_PROFILER)
 
 # ============================================================================
 # Installation

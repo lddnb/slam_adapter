@@ -31,3 +31,4 @@ target_link_libraries(sub_demo PRIVATE
     mcap
     yaml-cpp
 )
+target_compile_definitions(sub_demo PRIVATE DISABLE_EASY_PROFILER)

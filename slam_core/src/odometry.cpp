@@ -5,6 +5,8 @@
 #include <limits>
 
 #include <spdlog/spdlog.h>
+#include <easy/profiler.h>
+#include <easy/arbitrary_value.h>
 #include "slam_core/config.hpp"
 
 namespace ms_slam::slam_core
@@ -12,19 +14,32 @@ namespace ms_slam::slam_core
 
 Odometry::Odometry()
 {
+    EASY_FUNCTION(profiler::colors::Amber100);
     running_ = true;
     visual_enable_ = true;
     initialized_ = false;
     last_timestamp_imu_ = 0.0;
     odometry_thread_ = std::make_unique<std::thread>(&Odometry::RunOdometry, this);
+    spdlog::info("Odometry thread initialized");
 }
 
 Odometry::~Odometry()
 {
-    running_ = false;
-    if (odometry_thread_) {
+    EASY_FUNCTION();
+    Stop();
+}
+
+void Odometry::Stop()
+{
+    EASY_FUNCTION();
+    if (!running_.exchange(false)) {
+        return;
+    }
+    if (odometry_thread_ && odometry_thread_->joinable()) {
         odometry_thread_->join();
     }
+    odometry_thread_.reset();
+    spdlog::info("Odometry thread stopped");
 }
 
 // TODO: 设置缓冲区
@@ -56,6 +71,7 @@ void Odometry::AddImageData(const Image& image_data)
 
 std::vector<SyncData> Odometry::SyncPackages()
 {
+    EASY_FUNCTION(profiler::colors::Cyan);
     std::vector<SyncData> sync_data_list;
     constexpr double kImageSyncTolerance = 0.02;  // 20 ms 容忍度
 
@@ -166,10 +182,12 @@ std::vector<SyncData> Odometry::SyncPackages()
 
 void Odometry::Initialize(const SyncData& sync_data)
 {
+    EASY_FUNCTION(profiler::colors::LightBlue300);
     static int N(0);
     static Eigen::Vector3d gyro_avg(0., 0., 0.);
     static Eigen::Vector3d accel_avg(0., 0., 0.);
 
+    EASY_VALUE("init_imu_count", static_cast<int>(sync_data.imu_data.size()));
     for (const auto& imu_data : sync_data.imu_data) {
         if (N == 0) {
             gyro_avg += imu_data.angular_velocity();
@@ -209,16 +227,20 @@ void Odometry::Initialize(const SyncData& sync_data)
             state_.b_a().x(), state_.b_a().y(), state_.b_a().z(),
             state_.timestamp());
         // clang-format on
+        EASY_VALUE("all_init_imu_count", N);
     }
 }
 
 void Odometry::ProcessImuData(const SyncData& sync_data)
 {
+    EASY_FUNCTION(profiler::colors::Pink300);
     IMU last_imu(Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), 0.0);
     Eigen::Vector3d gyro = Eigen::Vector3d::Zero();
     Eigen::Vector3d acc = Eigen::Vector3d::Zero();
     double dt = 0.0;
+    EASY_VALUE("imu_segment_count", static_cast<int>(sync_data.imu_data.size()));
     for (const auto& imu : sync_data.imu_data) {
+        EASY_BLOCK("IntegrateImu", profiler::colors::Purple500);
         if (last_imu.timestamp() == 0.0) {
             last_imu = imu;
             continue;
@@ -275,6 +297,7 @@ void Odometry::ProcessImuData(const SyncData& sync_data)
  */
 PointCloudType::Ptr Odometry::Deskew(const PointCloudType::ConstPtr& cloud, const State& state, const States& buffer) const
 {
+    EASY_FUNCTION(profiler::colors::Teal300);
     PointCloudType::Ptr deskewed_cloud = std::make_shared<PointCloudType>(*cloud);
 
     const auto& config = Config::GetInstance();
@@ -298,6 +321,7 @@ PointCloudType::Ptr Odometry::Deskew(const PointCloudType::ConstPtr& cloud, cons
             buffer.back().timestamp());
     }
 
+    EASY_BLOCK("DeskewPoints", profiler::colors::BlueGrey500);
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int k) {
         const auto& point_time = cloud->timestamp(k);
 
@@ -350,8 +374,10 @@ void Odometry::GetDeskewedCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
 
 void Odometry::RunOdometry()
 {
+    EASY_THREAD_SCOPE("OdometryThread");
     while (running_) {
         std::vector<SyncData> sync_data_list = SyncPackages();
+        EASY_VALUE("sync_data_count", static_cast<int>(sync_data_list.size()))
         if (!sync_data_list.empty()) {
             spdlog::info(
                 "Sync data size: {}, PC start ts: {:.3f}, PC end ts: {:.3f}, IMU start ts: {:.3f}, IMU end ts: {:.3f}",
@@ -368,6 +394,7 @@ void Odometry::RunOdometry()
         }
 
         for (const auto& sync_data : sync_data_list) {
+            EASY_BLOCK("ProcessSyncData", profiler::colors::Lime500);
             if (!initialized_) {
                 spdlog::warn("Odometry is initializing, sync data PC ts {:.3f}", sync_data.lidar_beg_time);
                 Initialize(sync_data);

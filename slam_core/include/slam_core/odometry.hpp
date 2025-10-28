@@ -52,6 +52,8 @@ class Odometry
 
     void GetDeskewedCloud(std::vector<PointCloudType::Ptr>& cloud_buffer);
 
+    void Stop();
+
   private:
     std::deque<IMU> imu_buffer_;                         ///< imu缓存
     std::deque<PointCloudType::ConstPtr> lidar_buffer_;  ///< lidar缓存

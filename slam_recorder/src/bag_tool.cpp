@@ -1,12 +1,16 @@
 #include "slam_recorder/bag_tool.hpp"
-#include "slam_recorder/ros1_msg.hpp"
+
+#include <poll.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cctype>
-#include <filesystem>
+#include <cmath>
 #include <ctime>
+#include <filesystem>
 #include <iomanip>
 #include <memory>
 #include <optional>
@@ -16,9 +20,6 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-#include <poll.h>
-#include <termios.h>
-#include <unistd.h>
 
 #include <flatbuffers/flatbuffers.h>
 #include <mcap/reader.hpp>
@@ -26,16 +27,12 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 #include <yaml-cpp/yaml.h>
-
-#include <fbs/CompressedImage_generated.h>
-#include <fbs/Imu_generated.h>
-#include <fbs/PointCloud_generated.h>
-#include <fbs/PoseInFrame_generated.h>
-#include <fbs/PosesInFrame_generated.h>
-#include <fbs/FrameTransforms_generated.h>
 #include <iox2/iceoryx2.hpp>
+
 #include <slam_common/flatbuffers_pub_sub.hpp>
 #include <slam_common/foxglove_messages.hpp>
+
+#include "slam_recorder/ros1_msg.hpp"
 
 namespace ms_slam::slam_recorder
 {
@@ -45,14 +42,20 @@ namespace
 
 using ms_slam::slam_common::FBSPublisher;
 using ms_slam::slam_common::FoxgloveCompressedImage;
+using ms_slam::slam_common::FoxgloveFrameTransforms;
 using ms_slam::slam_common::FoxgloveImu;
 using ms_slam::slam_common::FoxglovePointCloud;
 using ms_slam::slam_common::FoxglovePoseInFrame;
 using ms_slam::slam_common::FoxglovePosesInFrame;
-using ms_slam::slam_common::FoxgloveFrameTransforms;
 
+/**
+ * @brief 内部使用的消息类型分类
+ */
 enum class MessageKind { PointCloud, CompressedImage, Imu, PoseInFrame, PosesInFrame, FrameTransforms, Unsupported };
 
+/**
+ * @brief 消息描述信息，用于快速判断数据来源类型
+ */
 struct MessageDescriptor {
     MessageKind kind{MessageKind::Unsupported};
     bool is_ros{false};
@@ -60,15 +63,26 @@ struct MessageDescriptor {
     bool is_livox{false};
 };
 
-std::string to_lower(std::string value)
+/**
+ * @brief 将输入字符串转换为小写，用于配置解析
+ * @param value 待转换的原始字符串
+ * @return 转换为小写后的字符串
+ */
+std::string ToLower(std::string value)
 {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return value;
 }
 
-InputType parse_input_type(const std::string& value)
+/**
+ * @brief 将配置字符串解析为 InputType 枚举
+ * @param value 配置中的类型字符串
+ * @return 对应的 InputType 值
+ * @note 不支持的字符串会抛出 std::runtime_error 异常
+ */
+InputType ParseInputType(const std::string& value)
 {
-    const auto lowered = to_lower(value);
+    const auto lowered = ToLower(value);
     if (lowered == "ros1_mcap" || lowered == "ros1-mcap") {
         return InputType::Ros1Mcap;
     }
@@ -81,7 +95,12 @@ InputType parse_input_type(const std::string& value)
     throw std::runtime_error("unsupported input.type value: " + value);
 }
 
-MessageDescriptor describe_message(const mcap::MessageView& view)
+/**
+ * @brief 根据 MCAP 消息元数据识别消息类型
+ * @param view MCAP 消息视图
+ * @return 描述消息特征的 MessageDescriptor
+ */
+MessageDescriptor DescribeMessage(const mcap::MessageView& view)
 {
     MessageDescriptor descriptor;
     const std::string schema_name = view.schema ? view.schema->name : "";
@@ -159,7 +178,13 @@ MessageDescriptor describe_message(const mcap::MessageView& view)
     return descriptor;
 }
 
-TopicSettings resolve_topic(const ToolConfig& config, const std::string& topic)
+/**
+ * @brief 基于全局配置解析单个话题的实际配置
+ * @param config 工具全局配置
+ * @param topic 话题名称
+ * @return 合并后的 TopicSettings
+ */
+TopicSettings ResolveTopic(const ToolConfig& config, const std::string& topic)
 {
     TopicSettings resolved;
     resolved.playback = config.playback_enabled && config.default_playback;
@@ -180,6 +205,9 @@ TopicSettings resolve_topic(const ToolConfig& config, const std::string& topic)
     return resolved;
 }
 
+/**
+ * @brief 缓存 MCAP Schema ID，减少重复注册
+ */
 struct SchemaCache {
     std::optional<mcap::SchemaId> pointcloud;
     std::optional<mcap::SchemaId> compressed_image;
@@ -189,6 +217,9 @@ struct SchemaCache {
     std::optional<mcap::SchemaId> frame_transforms;
 };
 
+/**
+ * @brief 录制上下文信息，封装 writer 与 channel 管理
+ */
 struct RecorderContext {
     bool enabled{false};
     std::unique_ptr<mcap::McapWriter> writer;
@@ -198,26 +229,48 @@ struct RecorderContext {
     uint16_t next_channel_id{1};
 };
 
+/**
+ * @brief 回放发布器基类，提供统一的 raw publish 接口
+ */
 struct PlaybackPublisherBase {
     virtual ~PlaybackPublisherBase() = default;
-    virtual bool publish(const std::byte* data, size_t size) = 0;
+    virtual bool Publish(const std::byte* data, size_t size) = 0;
 };
 
+/**
+ * @brief 模板化的回放发布器，实现针对不同消息类型的 raw publish
+ * @tparam MessageType FlatBuffer 消息类型
+ */
 template <typename MessageType>
 class PlaybackPublisher final : public PlaybackPublisherBase
 {
   public:
+    /**
+     * @brief 构造函数
+     * @param node iceoryx2 节点
+     * @param service_name 服务名称
+     * @param queue_depth 队列深度
+     */
     PlaybackPublisher(std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node, const std::string& service_name, uint32_t queue_depth)
     : publisher_(std::move(node), service_name, slam_common::PubSubConfig{.subscriber_max_buffer_size = queue_depth})
     {
     }
 
-    bool publish(const std::byte* data, size_t size) override { return publisher_.publish_raw(reinterpret_cast<const uint8_t*>(data), size); }
+    /**
+     * @brief 发布原始 FlatBuffer 数据
+     * @param data 数据指针
+     * @param size 数据长度
+     * @return 发布成功返回 true
+     */
+    bool Publish(const std::byte* data, size_t size) override { return publisher_.publish_raw(reinterpret_cast<const uint8_t*>(data), size); }
 
   private:
     FBSPublisher<MessageType> publisher_;
 };
 
+/**
+ * @brief 回放上下文，包含调度、节点及发布器缓存
+ */
 struct PlaybackContext {
     bool enabled{false};
     bool sync_time{true};
@@ -229,6 +282,9 @@ struct PlaybackContext {
     std::chrono::steady_clock::time_point start_wall_time{};
 };
 
+/**
+ * @brief 键盘控制状态，用于处理终端交互
+ */
 struct KeyboardControl {
     std::atomic<bool> paused{true};
     std::atomic<bool> stop{false};
@@ -238,6 +294,9 @@ struct KeyboardControl {
     };
 };
 
+/**
+ * @brief 消息统计信息，便于最终输出回放与过滤数据
+ */
 struct MessageStats {
     size_t pointcloud{0};
     size_t compressed_image{0};
@@ -247,9 +306,16 @@ struct MessageStats {
     size_t tf{0};
     size_t filtered{0};
     size_t skipped{0};
+    size_t window_skipped{0};
 };
 
-mcap::SchemaId ensure_schema(RecorderContext& recorder, MessageKind kind)
+/**
+ * @brief 确保对应类型的 Schema 已注册至 MCAP writer
+ * @param recorder 录制上下文
+ * @param kind 消息类型
+ * @return Schema ID
+ */
+mcap::SchemaId EnsureSchema(RecorderContext& recorder, MessageKind kind)
 {
     auto add_schema = [&](auto& cached, auto&& schema_factory) -> mcap::SchemaId {
         if (!cached.has_value()) {
@@ -318,14 +384,21 @@ mcap::SchemaId ensure_schema(RecorderContext& recorder, MessageKind kind)
     }
 }
 
-uint16_t ensure_channel(RecorderContext& recorder, const std::string& topic, MessageKind kind)
+/**
+ * @brief 确保特定话题的 channel 存在，否则创建
+ * @param recorder 录制上下文
+ * @param topic 话题名称
+ * @param kind 消息类型
+ * @return channel ID
+ */
+uint16_t EnsureChannel(RecorderContext& recorder, const std::string& topic, MessageKind kind)
 {
     auto it = recorder.channel_ids.find(topic);
     if (it != recorder.channel_ids.end()) {
         return it->second;
     }
 
-    const mcap::SchemaId schema_id = ensure_schema(recorder, kind);
+    const mcap::SchemaId schema_id = EnsureSchema(recorder, kind);
     mcap::Channel channel(topic, "flatbuffer", schema_id, {});
     if (!recorder.writer) {
         throw std::runtime_error("recorder writer is not initialized");
@@ -339,13 +412,23 @@ uint16_t ensure_channel(RecorderContext& recorder, const std::string& topic, Mes
     return channel_id;
 }
 
-bool write_record(RecorderContext& recorder, const std::string& topic, MessageKind kind, uint64_t timestamp_ns, const std::byte* data, size_t size)
+/**
+ * @brief 写入单条 MCAP 消息
+ * @param recorder 录制上下文
+ * @param topic 话题名称
+ * @param kind 消息类型
+ * @param timestamp_ns 时间戳（纳秒）
+ * @param data 消息数据指针
+ * @param size 数据大小
+ * @return 成功写入返回 true
+ */
+bool WriteRecord(RecorderContext& recorder, const std::string& topic, MessageKind kind, uint64_t timestamp_ns, const std::byte* data, size_t size)
 {
     if (!recorder.enabled || !recorder.writer) {
         return true;
     }
 
-    const uint16_t channel_id = ensure_channel(recorder, topic, kind);
+    const uint16_t channel_id = EnsureChannel(recorder, topic, kind);
     const uint32_t sequence = recorder.sequence_numbers[topic]++;
 
     mcap::Message msg;
@@ -364,7 +447,14 @@ bool write_record(RecorderContext& recorder, const std::string& topic, MessageKi
     return true;
 }
 
-PlaybackPublisherBase* ensure_publisher(PlaybackContext& ctx, const TopicSettings& topic_settings, MessageKind kind)
+/**
+ * @brief 创建或查找播放发布器
+ * @param ctx 回放上下文
+ * @param topic_settings 话题配置
+ * @param kind 消息类型
+ * @return 发布器指针
+ */
+PlaybackPublisherBase* EnsurePublisher(PlaybackContext& ctx, const TopicSettings& topic_settings, MessageKind kind)
 {
     auto it = ctx.publishers.find(topic_settings.publish_service);
     if (it != ctx.publishers.end()) {
@@ -404,7 +494,12 @@ PlaybackPublisherBase* ensure_publisher(PlaybackContext& ctx, const TopicSetting
     return raw_ptr;
 }
 
-void playback_sleep(PlaybackContext& ctx, uint64_t timestamp_ns)
+/**
+ * @brief 根据回放速率控制节奏
+ * @param ctx 回放上下文
+ * @param timestamp_ns 消息时间戳
+ */
+void PlaybackSleep(PlaybackContext& ctx, uint64_t timestamp_ns)
 {
     if (!ctx.enabled || !ctx.sync_time) {
         return;
@@ -425,10 +520,16 @@ void playback_sleep(PlaybackContext& ctx, uint64_t timestamp_ns)
     }
 }
 
-bool convert_pointcloud(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+/**
+ * @brief 将 ROS PointCloud2 转换为 Foxglove PointCloud 消息
+ * @param view MCAP 消息视图
+ * @param fbb FlatBufferBuilder 实例
+ * @return 转换成功返回 true
+ */
+bool ConvertPointCloud(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
 {
     ROS1PointCloud2 pc2;
-    if (!pc2.parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
+    if (!pc2.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
         spdlog::error("Failed to parse sensor_msgs/PointCloud2 at topic {}", view.channel->topic);
         return false;
     }
@@ -470,6 +571,7 @@ bool convert_pointcloud(const mcap::MessageView& view, flatbuffers::FlatBufferBu
                 numeric_type = foxglove::NumericType_FLOAT32;
                 break;
         }
+        // 将 ROS PointField 元信息映射成 Foxglove 的 PackedElementField 描述
         fields.emplace_back(foxglove::CreatePackedElementField(fbb, fbb.CreateString(field.name), field.offset, numeric_type));
     }
 
@@ -481,10 +583,16 @@ bool convert_pointcloud(const mcap::MessageView& view, flatbuffers::FlatBufferBu
     return true;
 }
 
-bool convert_livox_pointcloud(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+/**
+ * @brief 将 Livox 自定义点云转换为 Foxglove PointCloud
+ * @param view MCAP 消息视图
+ * @param fbb FlatBufferBuilder 实例
+ * @return 转换成功返回 true
+ */
+bool ConvertLivoxPointCloud(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
 {
     ROS1LivoxCustomMsg livox_msg;
-    if (!livox_msg.parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
+    if (!livox_msg.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
         spdlog::error("Failed to parse Livox CustomMsg at topic {}", view.channel->topic);
         return false;
     }
@@ -499,6 +607,7 @@ bool convert_livox_pointcloud(const mcap::MessageView& view, flatbuffers::FlatBu
     };
 
     for (const auto& point : livox_msg.points) {
+        // Livox 点云字段布局固定，直接串联各标量字段生成连续存储
         append_scalar(point.x);
         append_scalar(point.y);
         append_scalar(point.z);
@@ -530,10 +639,16 @@ bool convert_livox_pointcloud(const mcap::MessageView& view, flatbuffers::FlatBu
     return true;
 }
 
-bool convert_image(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+/**
+ * @brief 转换压缩图像消息
+ * @param view MCAP 消息视图
+ * @param fbb FlatBufferBuilder 实例
+ * @return 转换成功返回 true
+ */
+bool ConvertImage(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
 {
     ROS1CompressedImage image;
-    if (!image.parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
+    if (!image.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
         spdlog::error("Failed to parse sensor_msgs/CompressedImage at topic {}", view.channel->topic);
         return false;
     }
@@ -549,10 +664,16 @@ bool convert_image(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder
     return true;
 }
 
-bool convert_imu(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+/**
+ * @brief 转换 IMU 消息
+ * @param view MCAP 消息视图
+ * @param fbb FlatBufferBuilder 实例
+ * @return 转换成功返回 true
+ */
+bool ConvertImu(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
 {
     ROS1Imu imu;
-    if (!imu.parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
+    if (!imu.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
         spdlog::error("Failed to parse sensor_msgs/Imu at topic {}", view.channel->topic);
         return false;
     }
@@ -568,10 +689,16 @@ bool convert_imu(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& 
     return true;
 }
 
-bool convert_path(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+/**
+ * @brief 转换 Path 消息
+ * @param view MCAP 消息视图
+ * @param fbb FlatBufferBuilder 实例
+ * @return 转换成功返回 true
+ */
+bool ConvertPath(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
 {
     ROS1Path path;
-    if (!path.parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
+    if (!path.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
         spdlog::error("Failed to parse nav_msgs/Path at topic {}", view.channel->topic);
         return false;
     }
@@ -595,10 +722,16 @@ bool convert_path(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder&
     return true;
 }
 
-bool convert_odometry(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+/**
+ * @brief 转换 Odometry 消息
+ * @param view MCAP 消息视图
+ * @param fbb FlatBufferBuilder 实例
+ * @return 转换成功返回 true
+ */
+bool ConvertOdometry(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
 {
     ROS1Odometry odom;
-    if (!odom.parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
+    if (!odom.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
         spdlog::error("Failed to parse nav_msgs/Odometry at topic {}", view.channel->topic);
         return false;
     }
@@ -617,10 +750,16 @@ bool convert_odometry(const mcap::MessageView& view, flatbuffers::FlatBufferBuil
     return true;
 }
 
-bool convert_tf_message(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+/**
+ * @brief 转换 TF 消息
+ * @param view MCAP 消息视图
+ * @param fbb FlatBufferBuilder 实例
+ * @return 转换成功返回 true
+ */
+bool ConvertTfMessage(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
 {
     ROS1TFMessage tf;
-    if (!tf.parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
+    if (!tf.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
         spdlog::error("Failed to parse tf2_msgs/TFMessage at topic {}", view.channel->topic);
         return false;
     }
@@ -654,29 +793,40 @@ bool convert_tf_message(const mcap::MessageView& view, flatbuffers::FlatBufferBu
     return true;
 }
 
-
-bool convert_ros_message(const mcap::MessageView& view, const MessageDescriptor& descriptor, flatbuffers::FlatBufferBuilder& fbb)
+/**
+ * @brief 统一处理 ROS 类型消息的转换
+ * @param view MCAP 消息视图
+ * @param descriptor 消息描述信息
+ * @param fbb FlatBufferBuilder 实例
+ * @return 转换成功返回 true
+ */
+bool ConvertRosMessage(const mcap::MessageView& view, const MessageDescriptor& descriptor, flatbuffers::FlatBufferBuilder& fbb)
 {
     switch (descriptor.kind) {
         case MessageKind::PointCloud:
-            return descriptor.is_livox ? convert_livox_pointcloud(view, fbb) : convert_pointcloud(view, fbb);
+            return descriptor.is_livox ? ConvertLivoxPointCloud(view, fbb) : ConvertPointCloud(view, fbb);
         case MessageKind::CompressedImage:
-            return convert_image(view, fbb);
+            return ConvertImage(view, fbb);
         case MessageKind::Imu:
-            return convert_imu(view, fbb);
+            return ConvertImu(view, fbb);
         case MessageKind::PoseInFrame:
-            return convert_odometry(view, fbb);
+            return ConvertOdometry(view, fbb);
         case MessageKind::PosesInFrame:
-            return convert_path(view, fbb);
+            return ConvertPath(view, fbb);
         case MessageKind::FrameTransforms:
-            return convert_tf_message(view, fbb);
+            return ConvertTfMessage(view, fbb);
         case MessageKind::Unsupported:
         default:
             return false;
     }
 }
 
-std::string build_output_filename(const ToolConfig& config)
+/**
+ * @brief 构建录制输出文件名
+ * @param config 工具配置
+ * @return 文件路径
+ */
+std::string BuildOutputFilename(const ToolConfig& config)
 {
     using namespace std::chrono;
     const auto now = system_clock::now();
@@ -687,7 +837,12 @@ std::string build_output_filename(const ToolConfig& config)
     return oss.str();
 }
 
-RecorderContext create_recorder(const ToolConfig& config)
+/**
+ * @brief 创建录制上下文
+ * @param config 工具配置
+ * @return 填充后的录制上下文
+ */
+RecorderContext CreateRecorder(const ToolConfig& config)
 {
     RecorderContext recorder;
     if (!config.record_enabled) {
@@ -695,7 +850,7 @@ RecorderContext create_recorder(const ToolConfig& config)
     }
 
     std::filesystem::create_directories(config.record_output_dir);
-    const std::string output_file = build_output_filename(config);
+    const std::string output_file = BuildOutputFilename(config);
     if (!config.record_overwrite && std::filesystem::exists(output_file)) {
         throw std::runtime_error("output file already exists: " + output_file);
     }
@@ -723,7 +878,11 @@ RecorderContext create_recorder(const ToolConfig& config)
     return recorder;
 }
 
-void finalize_recorder(RecorderContext& recorder)
+/**
+ * @brief 结束录制并关闭 writer
+ * @param recorder 录制上下文
+ */
+void FinalizeRecorder(RecorderContext& recorder)
 {
     if (recorder.enabled && recorder.writer) {
         recorder.writer->close();
@@ -733,7 +892,12 @@ void finalize_recorder(RecorderContext& recorder)
     }
 }
 
-PlaybackContext create_playback_context(const ToolConfig& config)
+/**
+ * @brief 创建回放上下文
+ * @param config 工具配置
+ * @return 填充后的回放上下文
+ */
+PlaybackContext CreatePlaybackContext(const ToolConfig& config)
 {
     PlaybackContext ctx;
     ctx.enabled = config.playback_enabled;
@@ -749,7 +913,11 @@ PlaybackContext create_playback_context(const ToolConfig& config)
     return ctx;
 }
 
-void start_keyboard_control(KeyboardControl& control)
+/**
+ * @brief 启动键盘控制线程，实现暂停/恢复交互
+ * @param control 键盘控制句柄
+ */
+void StartKeyboardControl(KeyboardControl& control)
 {
     if (!isatty(STDIN_FILENO)) {
         spdlog::warn("Standard input is not a terminal; keyboard control disabled");
@@ -797,7 +965,11 @@ void start_keyboard_control(KeyboardControl& control)
     });
 }
 
-void stop_keyboard_control(KeyboardControl& control)
+/**
+ * @brief 停止键盘控制线程并恢复终端配置
+ * @param control 键盘控制句柄
+ */
+void StopKeyboardControl(KeyboardControl& control)
 {
     control.stop.store(true);
     if (control.worker.joinable()) {
@@ -809,7 +981,16 @@ void stop_keyboard_control(KeyboardControl& control)
     }
 }
 
-void publish_playback(
+/**
+ * @brief 将消息发布到回放服务
+ * @param ctx 回放上下文
+ * @param topic_settings 话题配置
+ * @param kind 消息类型
+ * @param timestamp_ns 消息时间戳
+ * @param data 消息数据
+ * @param size 数据长度
+ */
+void PublishPlayback(
     PlaybackContext& ctx,
     const TopicSettings& topic_settings,
     MessageKind kind,
@@ -821,24 +1002,32 @@ void publish_playback(
         return;
     }
 
-    playback_sleep(ctx, timestamp_ns);
-    auto* publisher = ensure_publisher(ctx, topic_settings, kind);
+    PlaybackSleep(ctx, timestamp_ns);
+    auto* publisher = EnsurePublisher(ctx, topic_settings, kind);
     if (!publisher) {
         return;
     }
 
-    if (!publisher->publish(data, size)) {
+    if (!publisher->Publish(data, size)) {
         spdlog::warn("Failed to publish message on {}", topic_settings.publish_service);
     }
 }
 
+/**
+ * @brief 运行期上下文，封装录制与回放状态
+ */
 struct ToolRuntime {
     ToolConfig config;
     RecorderContext recorder;
     PlaybackContext playback;
 };
 
-int run_tool_impl(const ToolConfig& config)
+/**
+ * @brief 执行 bag_tool 主流程
+ * @param config 工具配置
+ * @return 成功返回 0，失败返回非零
+ */
+int RunToolImpl(const ToolConfig& config)
 {
     if (config.input_type == InputType::Rosbag) {
         spdlog::error("rosbag inputs are not supported yet. Please convert to MCAP.");
@@ -853,6 +1042,20 @@ int run_tool_impl(const ToolConfig& config)
         config.playback_rate,
         config.playback_sync_time ? "on" : "off");
     spdlog::info("Recording: {}", config.record_enabled ? "enabled" : "disabled");
+    const double sanitized_start_seconds = std::max(0.0, config.processing_start_seconds);
+    const bool has_duration = config.processing_duration_seconds > 0.0;
+    if (sanitized_start_seconds > 0.0 && has_duration) {
+        spdlog::info("Processing window: start {:.3f}s, duration {:.3f}s", sanitized_start_seconds, config.processing_duration_seconds);
+    } else if (sanitized_start_seconds > 0.0) {
+        spdlog::info("Processing window: start {:.3f}s, until file end", sanitized_start_seconds);
+    } else if (has_duration) {
+        spdlog::info("Processing window: from beginning, duration {:.3f}s", config.processing_duration_seconds);
+    } else {
+        spdlog::info("Processing window: whole file");
+    }
+    constexpr double kNsecPerSec = 1'000'000'000.0;
+    const uint64_t start_offset_ns = static_cast<uint64_t>(std::llround(sanitized_start_seconds * kNsecPerSec));
+    const uint64_t duration_ns = has_duration ? static_cast<uint64_t>(std::llround(config.processing_duration_seconds * kNsecPerSec)) : 0U;
 
     mcap::McapReader reader;
     const auto status = reader.open(config.input_path);
@@ -874,11 +1077,12 @@ int run_tool_impl(const ToolConfig& config)
         spdlog::info("Estimated messages: unknown");
     }
 
-    ToolRuntime runtime{config, create_recorder(config), create_playback_context(config)};
+    ToolRuntime runtime{config, CreateRecorder(config), CreatePlaybackContext(config)};
     MessageStats stats;
     flatbuffers::FlatBufferBuilder fbb(1024 * 1024);
+    // 预分配 1MB 缓冲区，避免频繁扩容带来的重新分配开销
     KeyboardControl keyboard;
-    start_keyboard_control(keyboard);
+    StartKeyboardControl(keyboard);
     if (keyboard.paused.load()) {
         spdlog::info("Playback paused. Press space to start");
     }
@@ -887,6 +1091,9 @@ int run_tool_impl(const ToolConfig& config)
     uint64_t processed = 0;
     uint64_t next_progress = total_messages > 0 ? std::max<uint64_t>(1, total_messages / 20) : 1000;
     std::optional<std::chrono::steady_clock::time_point> pause_started;
+    std::optional<uint64_t> bag_start_time_ns;
+    std::optional<uint64_t> processing_start_time_ns;
+    std::optional<uint64_t> processing_end_time_ns;
     for (auto it = messages.begin(); it != messages.end(); ++it) {
         const auto& view = *it;
         const std::string topic = view.channel ? view.channel->topic : "";
@@ -909,27 +1116,50 @@ int run_tool_impl(const ToolConfig& config)
             pause_started.reset();
         }
 
-        const MessageDescriptor descriptor = describe_message(view);
+        const uint64_t timestamp_ns = view.message.logTime != 0 ? view.message.logTime : view.message.publishTime;
+        // 部分数据可能缺失 logTime，此时回落到 publishTime 保证时间戳连续
+        if (!bag_start_time_ns.has_value()) {
+            // 初始化bag首帧时间，并依据配置计算处理窗口边界
+            bag_start_time_ns = timestamp_ns;
+            processing_start_time_ns = bag_start_time_ns.value() + start_offset_ns;
+            if (!has_duration) {
+                processing_end_time_ns.reset();
+            } else {
+                processing_end_time_ns = processing_start_time_ns.value() + duration_ns;
+            }
+        }
+        if (processing_start_time_ns.has_value() && timestamp_ns < processing_start_time_ns.value()) {
+            // 落在配置窗口左侧的消息直接跳过
+            ++stats.window_skipped;
+            continue;
+        }
+        if (processing_end_time_ns.has_value() && timestamp_ns > processing_end_time_ns.value()) {
+            // 超出窗口终点后立即终止遍历，避免不必要的解码
+            spdlog::info("Processing window reached end timestamp, stopping");
+            break;
+        }
+
+        const MessageDescriptor descriptor = DescribeMessage(view);
         if (descriptor.kind == MessageKind::Unsupported) {
             ++stats.skipped;
             continue;
         }
 
-        const TopicSettings topic_settings = resolve_topic(config, topic);
+        const TopicSettings topic_settings = ResolveTopic(config, topic);
         if (!topic_settings.playback && !topic_settings.record) {
             ++stats.filtered;
             continue;
         }
 
-        const uint64_t timestamp_ns = view.message.logTime != 0 ? view.message.logTime : view.message.publishTime;
         const std::byte* payload = nullptr;
         size_t payload_size = 0;
 
+        // 按消息类型选择直接使用原始数据或先转换再回放
         if (descriptor.is_flatbuffer) {
             payload = view.message.data;
             payload_size = view.message.dataSize;
         } else if (descriptor.is_ros) {
-            if (!convert_ros_message(view, descriptor, fbb)) {
+            if (!ConvertRosMessage(view, descriptor, fbb)) {
                 ++stats.skipped;
                 continue;
             }
@@ -941,10 +1171,10 @@ int run_tool_impl(const ToolConfig& config)
         }
 
         if (topic_settings.record) {
-            write_record(runtime.recorder, topic, descriptor.kind, timestamp_ns, payload, payload_size);
+            WriteRecord(runtime.recorder, topic, descriptor.kind, timestamp_ns, payload, payload_size);
         }
 
-        publish_playback(runtime.playback, topic_settings, descriptor.kind, timestamp_ns, payload, payload_size);
+        PublishPlayback(runtime.playback, topic_settings, descriptor.kind, timestamp_ns, payload, payload_size);
 
         switch (descriptor.kind) {
             case MessageKind::PointCloud:
@@ -982,8 +1212,8 @@ int run_tool_impl(const ToolConfig& config)
     }
 
     reader.close();
-    finalize_recorder(runtime.recorder);
-    stop_keyboard_control(keyboard);
+    FinalizeRecorder(runtime.recorder);
+    StopKeyboardControl(keyboard);
 
     spdlog::info("PointCloud messages: {}", stats.pointcloud);
     spdlog::info("CompressedImage messages: {}", stats.compressed_image);
@@ -993,14 +1223,22 @@ int run_tool_impl(const ToolConfig& config)
     spdlog::info("FrameTransforms messages: {}", stats.tf);
     spdlog::info("Filtered messages: {}", stats.filtered);
     spdlog::info("Skipped messages: {}", stats.skipped);
+    spdlog::info("Time window skipped messages: {}", stats.window_skipped);
     spdlog::info("===== bag_tool finished =====");
     return 0;
 }
 
 }  // namespace
 
-ToolConfig load_bag_tool_config(const std::string& yaml_path)
+/**
+ * @brief 从 YAML 配置文件加载 bag_tool 设置
+ * @param yaml_path 配置文件绝对路径或相对路径
+ * @return 解析后的工具配置
+ * @note 解析失败时会抛出 std::runtime_error 异常
+ */
+ToolConfig LoadBagToolConfig(const std::string& yaml_path)
 {
+    spdlog::info("Loading bag_tool configuration from {}", yaml_path);
     YAML::Node root = YAML::LoadFile(yaml_path);
     auto bag_node = root["BagTool"];
     if (!bag_node) {
@@ -1014,14 +1252,21 @@ ToolConfig load_bag_tool_config(const std::string& yaml_path)
     }
     config.input_path = input_node["path"].as<std::string>();
     const std::string type_str = input_node["type"] ? input_node["type"].as<std::string>() : "ros1_mcap";
-    config.input_type = parse_input_type(type_str);
+    config.input_type = ParseInputType(type_str);
 
     const auto playback_node = bag_node["playback"];
     if (playback_node) {
+        // 回放配置允许缺省，优先使用配置文件中的覆盖值
         config.playback_enabled = playback_node["enable"].as<bool>(false);
         config.playback_rate = playback_node["rate"].as<double>(1.0);
         config.playback_sync_time = playback_node["synchronize_time"].as<bool>(true);
         config.playback_queue_depth = playback_node["default_queue_depth"].as<uint32_t>(10);
+    }
+
+    const auto window_node = bag_node["time_window"];
+    if (window_node) {
+        config.processing_start_seconds = window_node["start_seconds"].as<double>(config.processing_start_seconds);
+        config.processing_duration_seconds = window_node["duration_seconds"].as<double>(config.processing_duration_seconds);
     }
 
     const auto record_node = bag_node["record"];
@@ -1036,6 +1281,7 @@ ToolConfig load_bag_tool_config(const std::string& yaml_path)
 
     const auto topics_node = bag_node["topics"];
     if (topics_node) {
+        // 提供全局默认值后，再读取具体的话题设置
         config.default_playback = topics_node["default_playback_enabled"].as<bool>(true);
         config.default_record = topics_node["default_record_enabled"].as<bool>(true);
 
@@ -1060,13 +1306,24 @@ ToolConfig load_bag_tool_config(const std::string& yaml_path)
     return config;
 }
 
-int run_tool(const ToolConfig& config)
+/**
+ * @brief 对外暴露的工具入口
+ * @param config 工具配置
+ * @return 运行结果码
+ */
+int RunTool(const ToolConfig& config)
 {
-    return run_tool_impl(config);
+    return RunToolImpl(config);
 }
 
 }  // namespace ms_slam::slam_recorder
 
+/**
+ * @brief 程序主入口
+ * @param argc 参数数量
+ * @param argv 参数数组
+ * @return 进程退出码
+ */
 int main(int argc, char** argv)
 {
     try {
@@ -1078,8 +1335,8 @@ int main(int argc, char** argv)
         spdlog::set_default_logger(logger);
         spdlog::set_level(spdlog::level::info);
 
-        auto config = ms_slam::slam_recorder::load_bag_tool_config(config_path);
-        return ms_slam::slam_recorder::run_tool(config);
+        auto config = ms_slam::slam_recorder::LoadBagToolConfig(config_path);
+        return ms_slam::slam_recorder::RunTool(config);
     } catch (const std::exception& ex) {
         spdlog::critical("bag_tool failed: {}", ex.what());
         return 1;
