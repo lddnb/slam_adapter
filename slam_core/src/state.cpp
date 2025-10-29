@@ -7,7 +7,7 @@ namespace ms_slam::slam_core
 {
 State::State() : stamp(-1.0)
 {
-    auto& cfg = Config::GetInstance();
+    const auto& cfg = Config::GetInstance();
     Eigen::Vector3d zero_vec = Eigen::Vector3d(0., 0., 0.);
     X = BundleState(                                  // X                    Tanget
         manif::R3d(zero_vec),                         // p                     0
@@ -69,6 +69,51 @@ std::optional<Eigen::Isometry3d> State::Predict(double timestamp) const
     res.linear() = X_tmp.element<1>().quat().toRotationMatrix();
 
     return res;
+}
+
+void State::Update()
+{
+    // IESEKF UPDATE
+    const manif::Bundle X_predicted = X;
+    const ProcessMatrix P_predicted = P;
+
+    Eigen::Matrix<double, Eigen::Dynamic, DoFObs> H;
+    Eigen::Matrix<double, Eigen::Dynamic, 1>      z;
+    ProcessMatrix KH;
+
+    double R = 0.0005;
+
+    int i(0);
+
+    do {
+      h_model_(H, z); // Update H,z and set K to zeros
+
+      // update P
+      ProcessMatrix J;
+      Tangent dx = X.minus(X_predicted, J); // Xu-2021, [https://arxiv.org/abs/2107.06829] Eq. (35)
+
+      P = J.inverse() * P_predicted * J.inverse().transpose();
+
+      Eigen::Matrix<double, DoFObs, DoFObs> HTH = H.transpose() * H / R;
+      ProcessMatrix P_inv = P.inverse();
+      P_inv.block<DoFObs, DoFObs>(0, 0) += HTH;
+      P_inv = P_inv.inverse();
+
+      Tangent Kz = P_inv.block<DoF, DoFObs>(0, 0) * H.transpose() * z / R;
+
+      KH.setZero();
+      KH.block<DoF, DoFObs>(0, 0) = P_inv.block<DoF, DoFObs>(0, 0) * HTH;
+
+      dx = Kz + (KH - ProcessMatrix::Identity()) * J.inverse() * dx; 
+      X = X.plus(dx);
+
+      if ((dx.coeffs().array().abs() <= 0.0001).all())
+        break;
+
+    } while(i++ < 4);
+
+    // X = X;
+    P = (ProcessMatrix::Identity() - KH) * P;
 }
 
 State::Tangent State::f(const Eigen::Vector3d& ang_vel, const Eigen::Vector3d& lin_acc) const

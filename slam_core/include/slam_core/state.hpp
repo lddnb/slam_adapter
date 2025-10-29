@@ -30,18 +30,20 @@ class State
     using Tangent = typename BundleState::Tangent;
     static constexpr int DoF = BundleState::DoF;  // DoF whole state
     static constexpr int DoFNoise = 12;           // b_w, b_a, n_{b_w}, n_{b_a}
-    // TODO: DoFObs
-    static constexpr int DoFObs = manif::SGal3<double>::DoF;  // DoF obsevation equation
+    static constexpr int DoFObs = BundleInput::DoF;  // DoF obsevation equation
 
     using ProcessMatrix = Eigen::Matrix<double, DoF, DoF>;
     using MappingMatrix = Eigen::Matrix<double, DoF, DoFNoise>;
     using NoiseMatrix = Eigen::Matrix<double, DoFNoise, DoFNoise>;
+    using ObsH = Eigen::Matrix<double, Eigen::Dynamic, State::DoFObs>;
+    using ObsZ = Eigen::Matrix<double, Eigen::Dynamic, 1>;
 
     State();
     ~State() = default;
 
     void Predict(const BundleInput& imu, double dt, double timestamp);
     [[nodiscard]] std::optional<Eigen::Isometry3d> Predict(double timestamp) const;
+    void Update();
 
     [[nodiscard]] Tangent f(const Eigen::Vector3d& ang_vel, const Eigen::Vector3d& lin_acc) const;
     /**
@@ -62,6 +64,9 @@ class State
     [[nodiscard]] MappingMatrix df_dw(const BundleInput& imu) const;
 
     // clang-format off
+    inline Eigen::Map<const manif::R3d> ori_p()  const noexcept { return X.element<0>();}
+    inline Eigen::Map<const manif::SO3d> ori_R() const noexcept { return X.element<1>();}
+
     inline Eigen::Vector3d p()       const noexcept { return X.element<0>().coeffs();                  }
     inline Eigen::Matrix3d R()       const noexcept { return X.element<1>().quat().toRotationMatrix(); }
     inline Eigen::Quaterniond quat() const noexcept { return X.element<1>().quat();                    }
@@ -83,9 +88,11 @@ class State
         return T;
     }
 
-    inline ProcessMatrix Cov() const noexcept { return P; }
+    inline ProcessMatrix cov() const noexcept { return P; }
     inline double timestamp() const noexcept { return stamp; }
     void timestamp(double in) noexcept { stamp = in; }
+
+    void SetHModel(std::function<void(ObsH& H, ObsZ& z)> h_model) { h_model_ = h_model; }
 
   private:
     BundleState X;
@@ -96,6 +103,8 @@ class State
     Eigen::Vector3d acc;   // linear acceleration (IMU input)
 
     double stamp;
+
+    std::function<void(ObsH& H, ObsZ& z)> h_model_;
 };
 
 using States = std::deque<State>;

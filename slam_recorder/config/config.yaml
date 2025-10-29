@@ -24,6 +24,9 @@ Foxglove:
     - name: /deskewed_cloud
       schema: foxglove.PointCloud
       enabled: true
+    - name: /local_map
+      schema: foxglove.PointCloud
+      enabled: true
     - name: /camera/image_raw
       schema: foxglove.CompressedImage
       enabled: true

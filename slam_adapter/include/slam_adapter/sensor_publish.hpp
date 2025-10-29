@@ -206,7 +206,7 @@ inline bool BuildFoxgloveSceneUpdateFromState(
 
     Eigen::Vector3d axes{Eigen::Vector3d::Zero()};
     Eigen::Quaterniond orientation{Eigen::Quaterniond::Identity()};
-    const Eigen::Matrix3d position_cov = state.Cov().block<3, 3>(0, 0);
+    const Eigen::Matrix3d position_cov = state.cov().block<3, 3>(0, 0);
     if (!detail::ComputePositionCovarianceEllipsoid(position_cov, axes, orientation)) {
         return false;
     }

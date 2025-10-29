@@ -172,6 +172,7 @@ public:
         resize(initial_size);
     }
 
+    [[nodiscard]] Ptr clone() const { return std::make_shared<PointCloud>(*this); }
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
     [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
     [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }

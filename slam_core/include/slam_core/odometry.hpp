@@ -8,6 +8,7 @@
 #include "slam_core/point_cloud.hpp"
 #include "slam_core/image.hpp"
 #include "slam_core/state.hpp"
+#include "slam_core/Octree.hpp"
 
 namespace ms_slam::slam_core
 {
@@ -48,9 +49,13 @@ class Odometry
 
     void RunOdometry();
 
+    void ObsModel(State::ObsH& H, State::ObsZ& z);
+
     void GetLidarState(States& buffer);
 
     void GetDeskewedCloud(std::vector<PointCloudType::Ptr>& cloud_buffer);
+
+    void GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map);
 
     void Stop();
 
@@ -64,19 +69,25 @@ class Odometry
     bool visual_enable_;  ///< 可视化开关
 
     std::unique_ptr<std::thread> odometry_thread_;  ///< 里程计线程
+    std::unique_ptr<Octree> local_map_;             ///< 局部地图
 
     double last_timestamp_imu_;
 
     std::atomic<bool> running_;  ///< 运行状态
 
-    State state_;          ///< 当前里程计状态
-    States imu_state_buffer_;  ///< imu时刻状态缓存
+    State state_;                ///< 当前里程计状态
+    States imu_state_buffer_;    ///< imu时刻状态缓存
     States lidar_state_buffer_;  ///< lidar时刻状态缓存
-    bool initialized_;     ///< 是否初始化
+    bool initialized_;           ///< 是否初始化
 
     Eigen::Vector3d mean_acc_;  ///< 平均加速度
-    std::mutex state_mutex_;   ///< 状态互斥锁
+    std::mutex state_mutex_;    ///< 状态互斥锁
 
     std::vector<PointCloudType::Ptr> deskewed_cloud_buffer_;  ///< 同步数据列表
+
+    PointCloudType::Ptr deskewed_cloud_;
+    PointCloudType::Ptr downsampled_cloud_;
+
+    Eigen::Isometry3d T_i_l;
 };
 }  // namespace ms_slam::slam_core

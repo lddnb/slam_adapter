@@ -4,13 +4,68 @@
 #include <cmath>
 #include <limits>
 
+#include <Eigen/Dense>
 #include <spdlog/spdlog.h>
 #include <easy/profiler.h>
 #include <easy/arbitrary_value.h>
 #include "slam_core/config.hpp"
+#include "slam_core/filter.hpp"
 
 namespace ms_slam::slam_core
 {
+
+struct Match {
+  Eigen::Vector3d p;
+  Eigen::Vector4d n; // global normal vector
+
+  Match() = default;
+  Match(Eigen::Vector3d& p_, Eigen::Vector4d& n_) : p(p_), n(n_) {};
+
+  inline static double dist2plane(const Eigen::Vector4d& normal,
+                                  const Eigen::Vector3d& point) {
+
+    return normal.head<3>().dot(point) + normal(3);
+  }
+};
+
+typedef std::vector<Match> Matches;
+
+inline bool EstimatePlane(Eigen::Vector4d& pabcd,
+                           const std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>& pts,
+                           const double& thresh) {
+
+  int N = pts.size();
+  if (N < 3)
+    return false;
+
+  Eigen::Matrix<double, Eigen::Dynamic, 3> neighbors(N, 3);
+  for (size_t i = 0; i < N; i++) {
+    neighbors.row(i) = pts[i].cast<double>();
+  }
+
+  Eigen::Vector3d centroid = neighbors.colwise().mean(); 
+  neighbors.rowwise() -= centroid.transpose();
+
+  Eigen::Matrix3d cov = (neighbors.transpose() * neighbors) / N;
+
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigensolver(cov);
+  if (eigensolver.info() != Eigen::Success)
+    return false;
+
+  Eigen::Vector3d normal = eigensolver.eigenvectors().col(0);
+  double d = -normal.dot(centroid);
+
+  pabcd.head<3>() = normal;
+  pabcd(3) = d;
+
+  for (auto& p : pts) {
+    double distance = normal.dot(p.cast<double>()) + d;
+    if (std::abs(distance) > thresh)
+      return false;
+  }
+
+  return true;
+}
 
 Odometry::Odometry()
 {
@@ -19,7 +74,21 @@ Odometry::Odometry()
     visual_enable_ = true;
     initialized_ = false;
     last_timestamp_imu_ = 0.0;
+    local_map_ = std::make_unique<Octree>();
+    local_map_->SetBucketSize(2);
+    local_map_->SetDownsample(true);
+    local_map_->SetMinExtent(0.2);
+    deskewed_cloud_ = std::make_shared<PointCloudType>();
+    downsampled_cloud_ = std::make_shared<PointCloudType>();
     odometry_thread_ = std::make_unique<std::thread>(&Odometry::RunOdometry, this);
+    state_ = State();
+    state_.SetHModel(std::bind(&Odometry::ObsModel, this, std::placeholders::_1, std::placeholders::_2));
+
+    const auto& cfg = Config::GetInstance();
+    T_i_l = Eigen::Isometry3d::Identity();
+    T_i_l.linear() = cfg.mapping_params.extrinR;
+    T_i_l.translation() = cfg.mapping_params.extrinT;
+    
     spdlog::info("Odometry thread initialized");
 }
 
@@ -187,7 +256,6 @@ void Odometry::Initialize(const SyncData& sync_data)
     static Eigen::Vector3d gyro_avg(0., 0., 0.);
     static Eigen::Vector3d accel_avg(0., 0., 0.);
 
-    EASY_VALUE("init_imu_count", static_cast<int>(sync_data.imu_data.size()));
     for (const auto& imu_data : sync_data.imu_data) {
         if (N == 0) {
             gyro_avg += imu_data.angular_velocity();
@@ -227,8 +295,8 @@ void Odometry::Initialize(const SyncData& sync_data)
             state_.b_a().x(), state_.b_a().y(), state_.b_a().z(),
             state_.timestamp());
         // clang-format on
-        EASY_VALUE("all_init_imu_count", N);
     }
+    EASY_VALUE("init_imu_count", N, EASY_UNIQUE_VIN);
 }
 
 void Odometry::ProcessImuData(const SyncData& sync_data)
@@ -238,7 +306,7 @@ void Odometry::ProcessImuData(const SyncData& sync_data)
     Eigen::Vector3d gyro = Eigen::Vector3d::Zero();
     Eigen::Vector3d acc = Eigen::Vector3d::Zero();
     double dt = 0.0;
-    EASY_VALUE("imu_segment_count", static_cast<int>(sync_data.imu_data.size()));
+    EASY_VALUE("imu_segment_count", static_cast<int>(sync_data.imu_data.size()), EASY_UNIQUE_VIN);
     for (const auto& imu : sync_data.imu_data) {
         EASY_BLOCK("IntegrateImu", profiler::colors::Purple500);
         if (last_imu.timestamp() == 0.0) {
@@ -372,12 +440,105 @@ void Odometry::GetDeskewedCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
     }
 }
 
+void Odometry::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
+{
+    EASY_FUNCTION();
+    std::unique_lock<std::mutex> lock(state_mutex_);
+    local_map = local_map_->ToPointCloud<PointXYZDescriptor>();
+}
+
+void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
+{
+    EASY_FUNCTION(profiler::colors::Green500);
+    if (local_map_->Size() == 0)
+      return;
+
+    Matches first_matches;
+    int query_iters = 4;
+
+    int N = downsampled_cloud_->size();
+
+    std::vector<bool> chosen(N, false);
+    Matches matches(N);
+
+    if (query_iters-- > 0) {
+        std::vector<int> indices(N);
+        std::iota(indices.begin(), indices.end(), 0);
+
+        std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
+            Eigen::Vector3f pt = downsampled_cloud_->position(i);
+            Eigen::Vector3d p = pt.cast<double>();
+            Eigen::Vector3d g = state_.isometry3d() * T_i_l * p;  // global coords
+
+            std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> neighbors;
+            std::vector<float> pointSearchSqDis;
+            local_map_->KnnSearch(g.cast<float>(), 12, neighbors, pointSearchSqDis);
+
+            if (neighbors.size() < 12 or pointSearchSqDis.back() > 1.0) return;
+
+            Eigen::Vector4d p_abcd = Eigen::Vector4d::Zero();
+            if (not EstimatePlane(p_abcd, neighbors, 0.1)) return;
+
+            chosen[i] = true;
+            matches[i] = Match(p, p_abcd);
+        });  // end for_each
+
+        first_matches.clear();
+
+        for (int i = 0; i < N; i++) {
+            if (chosen[i]) first_matches.push_back(matches[i]);
+        }
+    }
+
+    H = Eigen::MatrixXd::Zero(first_matches.size(), State::DoFObs);
+    z = Eigen::MatrixXd::Zero(first_matches.size(), 1);
+
+    std::vector<int> indices(first_matches.size());
+    std::iota(indices.begin(), indices.end(), 0);
+
+    // For each match, calculate its derivative and distance
+    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
+        Match m = first_matches[i];
+
+        
+        Eigen::Matrix3d J;  // Jacobian of R act.
+        Eigen::Vector3d g = state_.ori_R().act(T_i_l * m.p, J); 
+        Eigen::Vector3d J_R = m.n.head(3).transpose() * J; // Jacobian of rot
+
+        J.setIdentity();  // Jacobian of t act.
+        Eigen::Vector3d v = state_.ori_p().act(m.p, J);
+        Eigen::Vector3d J_t = m.n.head(3).transpose() * J; // Jacobian of pos
+
+        H.block<1, State::DoFObs>(i, 0) << m.n.head(3).transpose(), (manif::skew(T_i_l * m.p) * state_.R() * m.n.head(3)).transpose();
+        z(i) = -Match::dist2plane(m.n, g);
+    });  // end for_each
+}
+
+/**
+ * @brief 将按 xyz 排列的浮点 span 重解释为 Eigen::Vector3f 视图
+ * @param data 连续 xyz 浮点数据
+ * @return 若满足对齐和长度约束则返回有效 span，否则返回空 span
+ */
+std::span<Eigen::Vector3f> MakeVec3Span(std::span<float> data)
+{
+    if (data.size() % 3 != 0) {
+        spdlog::error("MakeVec3Span expects data.size() % 3 == 0, got {}", data.size());
+        return {};
+    }
+    const auto addr = reinterpret_cast<std::uintptr_t>(data.data());
+    if (addr % alignof(Eigen::Vector3f) != 0U) {
+        spdlog::error("MakeVec3Span expects {}-byte alignment, got address {:#x}",
+                      alignof(Eigen::Vector3f), addr);
+        return {};
+    }
+    return {reinterpret_cast<Eigen::Vector3f*>(data.data()), data.size() / 3};
+}
+
 void Odometry::RunOdometry()
 {
     EASY_THREAD_SCOPE("OdometryThread");
     while (running_) {
         std::vector<SyncData> sync_data_list = SyncPackages();
-        EASY_VALUE("sync_data_count", static_cast<int>(sync_data_list.size()))
         if (!sync_data_list.empty()) {
             spdlog::info(
                 "Sync data size: {}, PC start ts: {:.3f}, PC end ts: {:.3f}, IMU start ts: {:.3f}, IMU end ts: {:.3f}",
@@ -401,8 +562,20 @@ void Odometry::RunOdometry()
                 continue;
             }
             ProcessImuData(sync_data);
-            auto deskewed_cloud = Deskew(sync_data.lidar_data, state_, imu_state_buffer_);
-            deskewed_cloud_buffer_.emplace_back(deskewed_cloud);
+            deskewed_cloud_ = Deskew(sync_data.lidar_data, state_, imu_state_buffer_);
+            deskewed_cloud_buffer_.emplace_back(deskewed_cloud_->clone());
+
+            downsampled_cloud_ = VoxelGridSamplingPstl<PointType>(deskewed_cloud_, 0.2);
+
+            // state_.Update();
+
+            downsampled_cloud_->transform(state_.isometry3d() * T_i_l);
+
+            auto points = downsampled_cloud_->positions();
+            static_assert(sizeof(Eigen::Vector3f) == 3 * sizeof(float), "Eigen::Vector3f must be tightly packed");
+            static_assert(alignof(Eigen::Vector3f) <= alignof(float), "Alignment of Vector3f should not exceed float");
+            std::span<Eigen::Vector3f> points_tmp = MakeVec3Span(points);
+            local_map_->Update(points_tmp);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

@@ -2,6 +2,7 @@
 #include <csignal>
 
 #include <easy/profiler.h>
+#include <easy/arbitrary_value.h>
 #include <spdlog/stopwatch.h>
 #include <slam_common/callback_dispatcher.hpp>
 #include <slam_common/crash_logger.hpp>
@@ -191,6 +192,9 @@ int main()
     std::vector<PointCloudType::Ptr> deskewed_clouds;
     auto deskewed_cloud_pub = std::make_shared<FBSPublisher<FoxglovePointCloud>>(node, "/deskewed_cloud");
 
+    PointCloud<PointXYZDescriptor>::Ptr local_map;
+    auto local_map_pub = std::make_shared<FBSPublisher<FoxglovePointCloud>>(node, "/local_map");
+
     while (!shouldExit.load()) {
         EASY_BLOCK("Adaprer Publish", profiler::colors::Orange);
         // Get latest states from the odometry
@@ -244,6 +248,12 @@ int main()
                 deskewed_cloud_pub->publish_from_builder(fbb);
             }
         }
+
+        odom->GetLocalMap(local_map);
+        if (local_map && BuildFoxglovePointCloud(*local_map, "livox_frame", fbb)) {
+            local_map_pub->publish_from_builder(fbb);
+        }
+
         EASY_END_BLOCK;
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
