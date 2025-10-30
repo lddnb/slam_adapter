@@ -193,6 +193,7 @@ int main()
     auto deskewed_cloud_pub = std::make_shared<FBSPublisher<FoxglovePointCloud>>(node, "/deskewed_cloud");
 
     PointCloud<PointXYZDescriptor>::Ptr local_map;
+    local_map = std::make_shared<PointCloud<PointXYZDescriptor>>();
     auto local_map_pub = std::make_shared<FBSPublisher<FoxglovePointCloud>>(node, "/local_map");
 
     while (!shouldExit.load()) {

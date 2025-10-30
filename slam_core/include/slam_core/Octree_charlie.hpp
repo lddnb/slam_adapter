@@ -185,9 +185,9 @@ struct Octree {
 
     for (const auto& p : points) {
       PointT pt;
-      pt.x = p.x();
-      pt.y = p.y();
-      pt.z = p.z();
+      pt.x() = p.x();
+      pt.y() = p.y();
+      pt.z() = p.z();
       out.push_back(pt);
     }
 
@@ -216,25 +216,25 @@ struct Octree {
     size_t n(0);
     for (const auto& pt : pts) {
 
-      if (std::isnan(pt.x) or std::isnan(pt.y) or std::isnan(pt.z))
+      if (std::isnan(pt.x()) or std::isnan(pt.y()) or std::isnan(pt.z()))
         continue;
 
-      out[n] = Point(pt.x, pt.y, pt.z);
+      out[n] = Point(pt.x(), pt.y(), pt.z());
       n++;
 
       if (n == 0) {
-        min.x() = max.x() = pt.x;
-        min.y() = max.y() = pt.y;
-        min.z() = max.z() = pt.z;
+        min.x() = max.x() = pt.x();
+        min.y() = max.y() = pt.y();
+        min.z() = max.z() = pt.z();
 
       } else {
-        min.x() = pt.x < min.x() ? pt.x : min.x();
-        min.y() = pt.y < min.y() ? pt.y : min.y();
-        min.z() = pt.z < min.z() ? pt.z : min.z();
+        min.x() = pt.x() < min.x() ? pt.x() : min.x();
+        min.y() = pt.y() < min.y() ? pt.y() : min.y();
+        min.z() = pt.z() < min.z() ? pt.z() : min.z();
 
-        max.x() = pt.x > max.x() ? pt.x : max.x();
-        max.y() = pt.y > max.y() ? pt.y : max.y();
-        max.z() = pt.z > max.z() ? pt.z : max.z();
+        max.x() = pt.x() > max.x() ? pt.x() : max.x();
+        max.y() = pt.y() > max.y() ? pt.y() : max.y();
+        max.z() = pt.z() > max.z() ? pt.z() : max.z();
       }
     }
 
@@ -442,9 +442,9 @@ struct Octree {
     neighbors.reserve(points.size());
     for (const auto& p : points) {
       PointT pt;
-      pt.x = p.x();
-      pt.y = p.y();
-      pt.z = p.z();
+      pt.x() = p.x();
+      pt.y() = p.y();
+      pt.z() = p.z();
       neighbors.push_back(pt);
     }
   }
@@ -496,10 +496,9 @@ struct Octree {
   }
 
 
-  template <typename PointT>
-  void knn(const PointT& query, 
+  void knn(const Point& query, 
            int k, 
-           std::vector<PointT> &neighbors, 
+           Points &neighbors, 
            std::vector<float> &distances) {
     
     if (root_ == nullptr)
@@ -509,7 +508,7 @@ struct Octree {
     distances.clear();
       
     Heap heap(k);
-    Point q = Point(query.x, query.y, query.z);
+    Point q = Point(query.x(), query.y(), query.z());
     knn(root_, q, heap);
     
     std::vector<Heap::DistancePoint> points = heap.get_data();
@@ -518,10 +517,10 @@ struct Octree {
     distances.reserve(points.size());
 
     for (auto& p_dist : points) {
-      PointT pt;
-      pt.x = p_dist.point.x();
-      pt.y = p_dist.point.y();
-      pt.z = p_dist.point.z();
+      Point pt;
+      pt.x() = p_dist.point.x();
+      pt.y() = p_dist.point.y();
+      pt.z() = p_dist.point.z();
       neighbors.push_back(pt);
       distances.push_back(p_dist.dist);
     }

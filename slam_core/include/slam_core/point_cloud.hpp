@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <execution>
 #include <iterator>
 #include <ranges>
@@ -402,6 +403,34 @@ public:
     {
         const auto& pos = storage_by_tag<PositionTag>();
         return std::span<const scalar_type>(pos.data(), size_ * position_dimensions);
+    }
+
+    [[nodiscard]] std::span<Eigen::Vector3f> positions_vec3() noexcept
+    {
+        static_assert(std::is_same_v<scalar_type, float>, "positions_vec3 only supports float type point cloud");
+        static_assert(position_dimensions == 3, "positions_vec3 only supports 3D position");
+
+        auto& pos = storage_by_tag<PositionTag>();
+        if (pos.empty()) {
+            return {};
+        }
+        const std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(pos.data());
+        assert(addr % alignof(Eigen::Vector3f) == 0 && "positions data is not aligned with Eigen::Vector3f");
+        return std::span<Eigen::Vector3f>(reinterpret_cast<Eigen::Vector3f*>(pos.data()), size_);
+    }
+
+    [[nodiscard]] std::span<const Eigen::Vector3f> positions_vec3() const noexcept
+    {
+        static_assert(std::is_same_v<scalar_type, float>, "positions_vec3 only supports float type point cloud");
+        static_assert(position_dimensions == 3, "positions_vec3 only supports 3D position");
+
+        const auto& pos = storage_by_tag<PositionTag>();
+        if (pos.empty()) {
+            return {};
+        }
+        const std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(pos.data());
+        assert(addr % alignof(Eigen::Vector3f) == 0 && "positions data is not aligned with Eigen::Vector3f");
+        return std::span<const Eigen::Vector3f>(reinterpret_cast<const Eigen::Vector3f*>(pos.data()), size_);
     }
 
     [[nodiscard]] auto positions_matrix() noexcept
