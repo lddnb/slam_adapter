@@ -14,7 +14,7 @@ struct Match {
     Eigen::Vector4d n;  // global normal vector
 
     Match() = default;
-    Match(Eigen::Vector3d& p_, Eigen::Vector4d& n_) : p(p_), n(n_){};
+    Match(const Eigen::Vector3d& p_, const Eigen::Vector4d& n_) : p(p_), n(n_){};
 
     inline static double Dist2Plane(const Eigen::Vector4d& normal, const Eigen::Vector3d& point) { return normal.head<3>().dot(point) + normal(3); }
 };

@@ -1,6 +1,6 @@
 #include "slam_core/state.hpp"
 
-#include <spdlog/spdlog.h>
+#include <slam_core/logging_utils.hpp>
 #include "slam_core/config.hpp"
 
 namespace ms_slam::slam_core
@@ -85,7 +85,7 @@ void State::Update()
 
     int i(0);
 
-    do {
+    for (int i = 0; i < 4; ++i) {
       h_model_(H, z); // Update H,z and set K to zeros
 
       // update P
@@ -104,16 +104,23 @@ void State::Update()
       KH.setZero();
       KH.block<DoF, DoFObs>(0, 0) = P_inv.block<DoF, DoFObs>(0, 0) * HTH;
 
-      dx = Kz + (KH - ProcessMatrix::Identity()) * J.inverse() * dx; 
-      X = X.plus(dx);
+      dx = Kz + (KH - ProcessMatrix::Identity()) * J.inverse() * dx;
 
-      if ((dx.coeffs().array().abs() <= 0.0001).all())
+      if ((dx.coeffs().array().abs() <= 0.0001).all() || i == 3) {
+        ProcessMatrix L;
+        X = X.plus(dx, {}, L);
+        P = (ProcessMatrix::Identity() - KH) * P;
+        P = L * P * L.transpose();
+
+        // spdlog::info("L ori:\n {}", as_eigen(L.block<3, 3>(3, 3)));
+        // manif::SO3Tangentd w(dx.element<1>());
+        // Eigen::Matrix3d L_R = w.rjac();
+        // spdlog::info("L_R:\n {}", as_eigen(L_R));
         break;
-
-    } while(i++ < 4);
-
-    // X = X;
-    P = (ProcessMatrix::Identity() - KH) * P;
+      } else {
+        X = X.plus(dx);
+      }
+    }
 }
 
 State::Tangent State::f(const Eigen::Vector3d& ang_vel, const Eigen::Vector3d& lin_acc) const

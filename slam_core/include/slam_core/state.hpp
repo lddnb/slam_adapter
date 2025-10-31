@@ -68,7 +68,7 @@ class State
     inline Eigen::Map<const manif::SO3d> ori_R() const noexcept { return X.element<1>();}
 
     inline Eigen::Vector3d p()       const noexcept { return X.element<0>().coeffs();                  }
-    inline Eigen::Matrix3d R()       const noexcept { return X.element<1>().quat().toRotationMatrix(); }
+    inline Eigen::Matrix3d R()       const noexcept { return X.element<1>().rotation();                }
     inline Eigen::Quaterniond quat() const noexcept { return X.element<1>().quat();                    }
     inline Eigen::Vector3d v()       const noexcept { return X.element<2>().coeffs();                  }
     inline Eigen::Vector3d b_g()     const noexcept { return X.element<3>().coeffs();                  }

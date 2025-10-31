@@ -23,10 +23,17 @@ Odometry::Odometry()
     visual_enable_ = true;
     initialized_ = false;
     last_timestamp_imu_ = 0.0;
+#ifdef USE_OCTREE
     local_map_ = std::make_unique<Octree>();
     local_map_->SetBucketSize(2);
     local_map_->SetDownsample(true);
     local_map_->SetMinExtent(0.2);
+#elif defined(USE_OCTREE_CHARLIE)
+    local_map_ = std::make_unique<charlie::Octree>();
+    local_map_->setBucketSize(2);
+    local_map_->setDownsample(true);
+    local_map_->setMinExtent(0.2);
+#endif
     deskewed_cloud_ = std::make_shared<PointCloudType>();
     downsampled_cloud_ = std::make_shared<PointCloudType>();
     odometry_thread_ = std::make_unique<std::thread>(&Odometry::RunOdometry, this);
@@ -393,13 +400,21 @@ void Odometry::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
 {
     EASY_FUNCTION();
     std::unique_lock<std::mutex> lock(state_mutex_);
+#ifdef USE_OCTREE
     local_map = local_map_->ToPointCloud<PointXYZDescriptor>();
+#elif defined(USE_OCTREE_CHARLIE)
+    local_map->append(local_points_);
+#endif
 }
 
 void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
 {
     EASY_FUNCTION(profiler::colors::Green500);
+#ifdef USE_OCTREE
     if (local_map_->Size() == 0)
+#elif defined(USE_OCTREE_CHARLIE)
+    if (local_map_->size() == 0)
+#endif
       return;
 
     Matches first_matches;
@@ -413,16 +428,18 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
     std::iota(indices.begin(), indices.end(), 0);
 
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
-        Eigen::Vector3f pt = downsampled_cloud_->position(i);
-        Eigen::Vector3d p = pt.cast<double>();
-        Eigen::Vector3d g = state_.isometry3d() * T_i_l * p;  // global coords
+        const Eigen::Vector3d p = downsampled_cloud_->position(i).cast<double>();
+        const Eigen::Vector3d g = state_.isometry3d() * p;  // global coords
 
         std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> neighbors;
         std::vector<float> pointSearchSqDis;
-        local_map_->KnnSearch(g.cast<float>(), 12, neighbors, pointSearchSqDis);
+#ifdef USE_OCTREE
+        local_map_->KnnSearch(g.cast<float>(), 8, neighbors, pointSearchSqDis);
+#elif defined(USE_OCTREE_CHARLIE)
+        local_map_->knn(g.cast<float>(), 8, neighbors, pointSearchSqDis);
+#endif
 
-
-        if (neighbors.size() < 12 or pointSearchSqDis.back() > 1.0) return;
+        if (neighbors.size() < 8 or pointSearchSqDis.back() > 1.0) return;
 
         Eigen::Vector4d p_abcd = Eigen::Vector4d::Zero();
         if (not EstimatePlane(p_abcd, neighbors, 0.1)) return;
@@ -448,22 +465,99 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
 
     // For each match, calculate its derivative and distance
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
-        Match m = first_matches[i];
+        const Match m = first_matches[i];
 
         Eigen::Matrix3d J;  // Jacobian of R act.
-        const Eigen::Vector3d g = state_.ori_R().act(T_i_l * m.p, J); 
+        const Eigen::Vector3d g = state_.ori_R().act(m.p, J) + state_.p();
         const Eigen::Vector3d J_R = m.n.head(3).transpose() * J; // Jacobian of rot
 
         H.block<1, State::DoFObs>(i, 0) << m.n.head(3).transpose(), J_R.transpose();
 
-        Eigen::Vector3d manual_J_R =  manif::skew(T_i_l * m.p) * state_.R().transpose() * m.n.head(3);
-        LOG_EVERY_N(info, 1000, "H({}): {} {} {} {} {} {}", i, H(i, 0), H(i, 1), H(i, 2), H(i, 3), H(i, 4), H(i, 5));
-        LOG_EVERY_N(info, 1000, "manual_J_t: {} {} {} {}", i, m.n(0), m.n(1), m.n(2));
-        LOG_EVERY_N(info, 1000, "manual_J_R: {} {} {} {}", i, manual_J_R(0), manual_J_R(1), manual_J_R(2));
+        // Eigen::Vector3d manual_J_R =  manif::skew(m.p) * state_.R().transpose() * m.n.head(3);
+        // LOG_EVERY_N(info, 1000, "H({}): {} {} {} {} {} {}", i, H(i, 0), H(i, 1), H(i, 2), H(i, 3), H(i, 4), H(i, 5));
+        // LOG_EVERY_N(info, 1000, "manual_J_t: {} {} {} {}", i, m.n(0), m.n(1), m.n(2));
+        // LOG_EVERY_N(info, 1000, "manual_J_R: {} {} {} {}", i, manual_J_R(0), manual_J_R(1), manual_J_R(2));
 
         z(i) = -Match::Dist2Plane(m.n, g);
     });  // end for_each
 }
+
+// void Odometry::ICP()
+// {
+//     #ifdef USE_OCTREE
+//     if (local_map_->Size() == 0)
+// #elif defined(USE_OCTREE_CHARLIE)
+//     if (local_map_->size() == 0)
+// #endif
+//       return;
+//     using H_b_type = std::pair<Eigen::Matrix<double, 6, 6>, Eigen::Matrix<double, 6, 1>>;
+//     int iterations = 0;
+//     for (; iterations < 4; ++iterations) {
+//         auto source_points_transformed = downsampled_cloud_->transformed(state_.isometry3d());
+//         Eigen::Matrix<double, 6, 6> H = Eigen::Matrix<double, 6, 6>::Zero();
+//         Eigen::Matrix<double, 6, 1> b = Eigen::Matrix<double, 6, 1>::Zero();
+//         std::vector<Eigen::Matrix<double, 6, 6>> Hs(source_points_transformed.size(), Eigen::Matrix<double, 6, 6>::Zero());
+//         std::vector<Eigen::Matrix<double, 6, 1>> bs(source_points_transformed.size(), Eigen::Matrix<double, 6, 1>::Zero());
+
+//         std::vector<int> index(source_points_transformed.size());
+//         std::iota(index.begin(), index.end(), 0);
+
+//         // 并行执行近邻搜索和构建H、b
+//         std::for_each(std::execution::par, index.begin(), index.end(), [&](int idx) {
+//             Eigen::Vector3f curr_point(source_points_transformed.position(idx));
+
+//             std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> neighbors;
+//             std::vector<float> pointSearchSqDis;
+// #ifdef USE_OCTREE
+//             local_map_->KnnSearch(curr_point, 1, neighbors, pointSearchSqDis);
+// #elif defined(USE_OCTREE_CHARLIE)
+//             local_map_->knn(curr_point, 1, neighbors, pointSearchSqDis);
+// #endif
+
+//             if (neighbors.size() < 1 or pointSearchSqDis.back() > 1.0) return;
+
+//             Eigen::Vector3f target_point = neighbors[0];
+
+            
+//             Eigen::Vector3f source_point(downsampled_cloud_->position(idx));
+//             Eigen::Vector3d error = (curr_point - target_point).cast<double>();
+
+//             Eigen::Matrix<double, 3, 6> Jacobian = Eigen::Matrix<double, 3, 6>::Zero();
+//             Jacobian.leftCols(3) = Eigen::Matrix3d::Identity();
+//             Jacobian.rightCols(3) = -state_.R() * manif::skew(source_point).cast<double>();
+
+//             Hs[idx] = Jacobian.transpose() * Jacobian;
+//             bs[idx] = -Jacobian.transpose() * error;
+//         });
+
+//         // 并行规约求和
+//         auto result = std::transform_reduce(
+//             std::execution::par_unseq,
+//             index.begin(),
+//             index.end(),
+//             H_b_type(Eigen::Matrix<double, 6, 6>::Zero(), Eigen::Matrix<double, 6, 1>::Zero()),
+//             // 规约操作
+//             [](const auto& a, const auto& b) { return std::make_pair(a.first + b.first, a.second + b.second); },
+//             // 转换操作
+//             [&Hs, &bs](const int& idx) { return H_b_type(Hs[idx], bs[idx]); });
+
+//         H = result.first;
+//         b = result.second;
+
+//         if (H.determinant() == 0) {
+//             continue;
+//         }
+
+//         Eigen::Matrix<double, 6, 1> delta_x = H.inverse() * b;
+
+//         state_.X.element<0>() = state_.X.element<0>().plus(manif::R3Tangentd(delta_x.head(3)));
+//         state_.X.element<1>() = state_.X.element<1>().plus(manif::SO3Tangentd(delta_x.tail(3)));
+
+//         if (delta_x.norm() < 0.001) {
+//             break;
+//         }
+//     }
+// }
 
 void Odometry::RunOdometry()
 {
@@ -497,12 +591,20 @@ void Odometry::RunOdometry()
             deskewed_cloud_buffer_.emplace_back(deskewed_cloud_->clone());
 
             downsampled_cloud_ = VoxelGridSamplingPstl<PointType>(deskewed_cloud_, 0.2);
+            downsampled_cloud_->transform(T_i_l);
 
             state_.Update();
+            // ICP();
 
-            downsampled_cloud_->transform(state_.isometry3d() * T_i_l);
+            downsampled_cloud_->transform(state_.isometry3d());
 
+#ifdef USE_OCTREE
             local_map_->Update(downsampled_cloud_->positions_vec3());
+#elif defined(USE_OCTREE_CHARLIE)
+            auto ori_points = downsampled_cloud_->positions_vec3();
+            local_points_.assign(ori_points.begin(), ori_points.end());
+            local_map_->update<std::vector<Eigen::Vector3f>>(local_points_);
+#endif
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

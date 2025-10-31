@@ -5,8 +5,34 @@
 
 #pragma once
 
-#include <spdlog/spdlog.h>
 #include <atomic>
+#include <spdlog/spdlog.h>
+#include <Eigen/Core>
+
+template <class Derived>
+struct EigenWrap {
+    const Eigen::MatrixBase<Derived>& m;
+    Eigen::IOFormat fmt;
+};
+
+template <class Derived>
+EigenWrap<Derived> as_eigen(const Eigen::MatrixBase<Derived>& m,
+                            Eigen::IOFormat io = Eigen::IOFormat(
+                                Eigen::StreamPrecision, 0, ", ", "\n", "[", "]")) {
+    return {m, io};
+}
+
+template <class Derived>
+struct fmt::formatter<EigenWrap<Derived>> {
+    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+
+    template <class FormatContext>
+    auto format(const EigenWrap<Derived>& w, FormatContext& ctx) {
+        std::ostringstream oss;
+        oss << w.m.derived().format(w.fmt);
+        return fmt::format_to(ctx.out(), "{}", oss.str());
+    }
+};
 
 // --- 拼接宏，保证调用点唯一名 ---
 #define SPD_CAT_INNER(a, b) a##b

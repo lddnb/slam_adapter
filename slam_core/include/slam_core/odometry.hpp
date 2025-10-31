@@ -1,4 +1,7 @@
 #pragma once
+
+#define USE_OCTREE
+
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -8,7 +11,11 @@
 #include "slam_core/point_cloud.hpp"
 #include "slam_core/image.hpp"
 #include "slam_core/state.hpp"
+#ifdef USE_OCTREE
 #include "slam_core/Octree.hpp"
+#elif defined(USE_OCTREE_CHARLIE)
+#include "slam_core/Octree_charlie.hpp"
+#endif
 
 namespace ms_slam::slam_core
 {
@@ -59,6 +66,8 @@ class Odometry
 
     void Stop();
 
+    // void ICP();
+
   private:
     std::deque<IMU> imu_buffer_;                         ///< imu缓存
     std::deque<PointCloudType::ConstPtr> lidar_buffer_;  ///< lidar缓存
@@ -69,7 +78,13 @@ class Odometry
     bool visual_enable_;  ///< 可视化开关
 
     std::unique_ptr<std::thread> odometry_thread_;  ///< 里程计线程
-    std::unique_ptr<Octree> local_map_;             ///< 局部地图
+
+#ifdef USE_OCTREE
+    std::unique_ptr<Octree> local_map_;
+#elif defined(USE_OCTREE_CHARLIE)
+    std::unique_ptr<charlie::Octree> local_map_;             ///< 局部地图
+#endif
+    std::vector<Eigen::Vector3f> local_points_;
 
     double last_timestamp_imu_;
 
