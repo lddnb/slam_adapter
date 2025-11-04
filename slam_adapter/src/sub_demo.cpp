@@ -58,7 +58,7 @@ int main()
     spdlog::info("Starting SLAM test");
 
     if (!SLAM_CRASH_LOGGER_INIT(logger)) {
-        spdlog::error("❌ Failed to initialize crash logger!");
+        spdlog::error("Failed to initialize crash logger!");
         return 1;
     }
     spdlog::info("Crash logger initialized successfully");
@@ -71,6 +71,7 @@ int main()
 
     LoadConfigFromFile("../config/test.yaml");
     LogConfig();
+    const auto& config_inst = Config::GetInstance();
 
     auto odom = std::make_unique<Odometry>();
     auto processed_image_pub = std::make_shared<FBSPublisher<FoxgloveCompressedImage>>(node, "/camera/image_processed");
@@ -85,7 +86,7 @@ int main()
 
         auto cloud = std::make_shared<PointCloud<PointXYZITDescriptor>>();
         if (!ConvertLivoxPointCloudMessage(*pc, cloud)) {
-            spdlog::warn("⚠️ Failed to convert point cloud message");
+            spdlog::warn("Failed to convert point cloud message");
             return;
         }
 
@@ -99,7 +100,7 @@ int main()
         //     cloud->size());
     };
 
-    auto pc_subscriber = std::make_shared<FBSSubscriber<FoxglovePointCloud>>(node, "/lidar_points", pc_callback);
+    auto pc_subscriber = std::make_shared<FBSSubscriber<FoxglovePointCloud>>(node, config_inst.common_params.lid_topic, pc_callback);
     spdlog::info("Starting pointcloud threaded_subscriber...");
 
     std::atomic<int> received_count{0};
@@ -111,7 +112,7 @@ int main()
         const foxglove::CompressedImage* img = img_wrapper.get();
         Image image;
         if (!DecodeCompressedImageMessage(*img, image)) {
-            spdlog::warn("⚠️ Failed to decode compressed image");
+            spdlog::warn("Failed to decode compressed image");
             return;
         }
 
@@ -140,7 +141,7 @@ int main()
         // spdlog::info("  Saved to {}", filename);
     };
 
-    auto img_subscriber = std::make_shared<FBSSubscriber<FoxgloveCompressedImage>>(node, "/camera/image_raw", img_callback);
+    auto img_subscriber = std::make_shared<FBSSubscriber<FoxgloveCompressedImage>>(node, config_inst.common_params.img_topics[0], img_callback);
     spdlog::info("Starting image threaded_subscriber...");
 
     std::atomic<int> imu_received_count{0};
@@ -151,7 +152,7 @@ int main()
         const foxglove::Imu* imu = imu_wrapper.get();
         IMU cur_imu;
         if (!ConvertImuMessage(*imu, cur_imu, false)) {
-            spdlog::warn("⚠️ Failed to convert IMU message");
+            spdlog::warn("Failed to convert IMU message");
             return;
         }
 
@@ -172,7 +173,7 @@ int main()
     };
 
     auto imu_subscriber =
-        std::make_shared<FBSSubscriber<FoxgloveImu>>(node, "/lidar_imu", imu_callback, PubSubConfig{.subscriber_max_buffer_size = 100});
+        std::make_shared<FBSSubscriber<FoxgloveImu>>(node, config_inst.common_params.imu_topic, imu_callback, PubSubConfig{.subscriber_max_buffer_size = 100});
     spdlog::info("Starting imu threaded_subscriber...");
 
     CallbackDispatcher dispatcher;
@@ -195,6 +196,9 @@ int main()
     PointCloud<PointXYZDescriptor>::Ptr local_map;
     local_map = std::make_shared<PointCloud<PointXYZDescriptor>>();
     auto local_map_pub = std::make_shared<FBSPublisher<FoxglovePointCloud>>(node, "/local_map");
+
+    std::vector<State> states_buffer;
+    auto path_pub = std::make_shared<FBSPublisher<FoxglovePosesInFrame>>(node, "/path");
 
     while (!shouldExit.load()) {
         EASY_BLOCK("Adaprer Publish", profiler::colors::Orange);
@@ -231,6 +235,8 @@ int main()
                 .child_frame = "livox_frame",
                 .translation = Eigen::Vector3d(-0.011, -0.02329, 0.04412),
                 .rotation = Eigen::Quaterniond::Identity()});
+
+            states_buffer.emplace_back(state);
         }
 
         if (!transform_data.empty()) {
@@ -253,6 +259,10 @@ int main()
         odom->GetLocalMap(local_map);
         if (local_map && BuildFoxglovePointCloud(*local_map, "livox_frame", fbb)) {
             local_map_pub->publish_from_builder(fbb);
+        }
+
+        if (states_buffer.size() % 10 == 0 && BuildFoxglovePosesInFrame(states_buffer, "odom", fbb)) {
+            path_pub->publish_from_builder(fbb);
         }
 
         EASY_END_BLOCK;

@@ -19,8 +19,9 @@ namespace ms_slam::slam_core
 Odometry::Odometry()
 {
     EASY_FUNCTION(profiler::colors::Amber100);
+    const auto& cfg = Config::GetInstance();
     running_ = true;
-    visual_enable_ = true;
+    visual_enable_ = cfg.common_params.render_en;
     initialized_ = false;
     last_timestamp_imu_ = 0.0;
 #ifdef USE_OCTREE
@@ -33,6 +34,9 @@ Odometry::Odometry()
     local_map_->setBucketSize(2);
     local_map_->setDownsample(true);
     local_map_->setMinExtent(0.2);
+#elif defined(USE_IKDTREE)
+    local_map_ = std::make_unique<ikdtreeNS::KD_TREE<ikdtreeNS::ikdTree_PointType>>();
+    local_map_->set_downsample_param(0.5);
 #endif
     deskewed_cloud_ = std::make_shared<PointCloudType>();
     downsampled_cloud_ = std::make_shared<PointCloudType>();
@@ -40,7 +44,6 @@ Odometry::Odometry()
     state_ = State();
     state_.SetHModel(std::bind(&Odometry::ObsModel, this, std::placeholders::_1, std::placeholders::_2));
 
-    const auto& cfg = Config::GetInstance();
     T_i_l = Eigen::Isometry3d::Identity();
     T_i_l.linear() = cfg.mapping_params.extrinR;
     T_i_l.translation() = cfg.mapping_params.extrinT;
@@ -129,10 +132,6 @@ std::vector<SyncData> Odometry::SyncPackages()
         if (imu_buffer_.back().timestamp() < lidar_end_time) {
             break;
         }
-        // 清理已经无用且早于当前帧开始时间的 IMU 数据，但保留最后一个用于插值
-        while (imu_buffer_.size() > 1 && imu_buffer_[1].timestamp() <= lidar_beg_time) {
-            imu_buffer_.pop_front();
-        }
 
         SyncData sync_data;
         sync_data.lidar_data = lidar_cloud;
@@ -211,6 +210,7 @@ void Odometry::Initialize(const SyncData& sync_data)
     static int N(0);
     static Eigen::Vector3d gyro_avg(0., 0., 0.);
     static Eigen::Vector3d accel_avg(0., 0., 0.);
+    static double last_imu_stamp = 0.0;
 
     for (const auto& imu_data : sync_data.imu_data) {
         if (N == 0) {
@@ -218,10 +218,12 @@ void Odometry::Initialize(const SyncData& sync_data)
             accel_avg += imu_data.linear_acceleration();
             N++;
         } else {
+            if (imu_data.timestamp() <= last_imu_stamp) continue;
             N++;
             accel_avg += (imu_data.linear_acceleration() - accel_avg) / N;
             gyro_avg += (imu_data.angular_velocity() - gyro_avg) / N;
         }
+        last_imu_stamp = imu_data.timestamp();
     }
     if (N >= 100) {
         spdlog::info(
@@ -236,8 +238,7 @@ void Odometry::Initialize(const SyncData& sync_data)
         state_.g(-grav_vec);
         state_.b_g(gyro_avg);
         state_.b_a(accel_avg - grav_vec);
-        // 设置时间戳为最后一个小于lidar_end_time的IMU数据的时间
-        state_.timestamp(std::prev(sync_data.imu_data.end(), 2)->timestamp());
+        state_.timestamp(last_imu_stamp);
         imu_state_buffer_.emplace_back(state_);
         mean_acc_ = accel_avg;
         initialized_ = true;
@@ -404,6 +405,11 @@ void Odometry::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
     local_map = local_map_->ToPointCloud<PointXYZDescriptor>();
 #elif defined(USE_OCTREE_CHARLIE)
     local_map->append(local_points_);
+#elif defined(USE_IKDTREE)
+    std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>>().swap(local_map_->PCL_Storage);
+    local_map_->flatten(local_map_->Root_Node, local_map_->PCL_Storage, ikdtreeNS::NOT_RECORD);
+    local_map->clear();
+    local_map->append(local_map_->PCL_Storage);
 #endif
 }
 
@@ -412,7 +418,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
     EASY_FUNCTION(profiler::colors::Green500);
 #ifdef USE_OCTREE
     if (local_map_->Size() == 0)
-#elif defined(USE_OCTREE_CHARLIE)
+#elif defined(USE_OCTREE_CHARLIE) or defined(USE_IKDTREE)
     if (local_map_->size() == 0)
 #endif
       return;
@@ -437,6 +443,13 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
         local_map_->KnnSearch(g.cast<float>(), 8, neighbors, pointSearchSqDis);
 #elif defined(USE_OCTREE_CHARLIE)
         local_map_->knn(g.cast<float>(), 8, neighbors, pointSearchSqDis);
+#elif defined(USE_IKDTREE)
+        std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> cur_neighbors;
+        ikdtreeNS::ikdTree_PointType curr_point(g.x(), g.y(), g.z());
+        local_map_->Nearest_Search(curr_point, 8, cur_neighbors, pointSearchSqDis);
+        for (auto neighbor : cur_neighbors) {
+            neighbors.emplace_back(Eigen::Vector3f(neighbor.x, neighbor.y, neighbor.z));
+        }
 #endif
 
         if (neighbors.size() < 8 or pointSearchSqDis.back() > 1.0) return;
@@ -576,7 +589,7 @@ void Odometry::RunOdometry()
                 spdlog::info("Synchronized images ts: {:.3f}", sync_data_list.front().image_data.timestamp());
             }
         } else {
-            spdlog::info("No sync data available");
+            LOG_EVERY_N(info, 1000, "No sync data available");
         }
 
         for (const auto& sync_data : sync_data_list) {
@@ -590,8 +603,26 @@ void Odometry::RunOdometry()
             deskewed_cloud_ = Deskew(sync_data.lidar_data, state_, imu_state_buffer_);
             deskewed_cloud_buffer_.emplace_back(deskewed_cloud_->clone());
 
-            downsampled_cloud_ = VoxelGridSamplingPstl<PointType>(deskewed_cloud_, 0.2);
+            downsampled_cloud_ = VoxelGridSamplingPstl<PointType>(deskewed_cloud_, 0.5);
             downsampled_cloud_->transform(T_i_l);
+            
+#ifdef USE_IKDTREE
+            if(local_map_->Root_Node == nullptr)
+            {
+                if(downsampled_cloud_->size() > 5)
+                {
+                    downsampled_cloud_->transform(state_.isometry3d());
+                    std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> local_points;
+                    auto ori_points = downsampled_cloud_->positions_vec3();
+                    for (const auto point : ori_points) {
+                        ikdtreeNS::ikdTree_PointType cur_point(point.x(), point.y(), point.z());
+                        local_points.emplace_back(cur_point);
+                    }
+                    local_map_->Build(local_points);
+                }
+                continue;
+            }
+#endif
 
             state_.Update();
             // ICP();
@@ -604,6 +635,14 @@ void Odometry::RunOdometry()
             auto ori_points = downsampled_cloud_->positions_vec3();
             local_points_.assign(ori_points.begin(), ori_points.end());
             local_map_->update<std::vector<Eigen::Vector3f>>(local_points_);
+#elif defined(USE_IKDTREE)
+            auto ori_points = downsampled_cloud_->positions_vec3();
+            std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> local_points;
+            for (const auto point : ori_points) {
+                ikdtreeNS::ikdTree_PointType cur_point(point.x(), point.y(), point.z());
+                local_points.emplace_back(cur_point);
+            }
+            local_map_->Add_Points(local_points, true);
 #endif
         }
 

@@ -15,6 +15,8 @@
 #include "slam_core/Octree.hpp"
 #elif defined(USE_OCTREE_CHARLIE)
 #include "slam_core/Octree_charlie.hpp"
+#elif defined(USE_IKDTREE)
+#include "slam_core/ikd-Tree/ikd_Tree_impl.h"
 #endif
 
 namespace ms_slam::slam_core
@@ -83,8 +85,10 @@ class Odometry
     std::unique_ptr<Octree> local_map_;
 #elif defined(USE_OCTREE_CHARLIE)
     std::unique_ptr<charlie::Octree> local_map_;             ///< 局部地图
-#endif
     std::vector<Eigen::Vector3f> local_points_;
+#elif defined(USE_IKDTREE)
+    std::unique_ptr<ikdtreeNS::KD_TREE<ikdtreeNS::ikdTree_PointType>> local_map_;  ///< 局部地图
+#endif
 
     double last_timestamp_imu_;
 

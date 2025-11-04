@@ -209,7 +209,7 @@ public:
         auto cloud = std::make_shared<PointCloudT>();
         if (point_count_ == 0U || !root_)
         {
-            spdlog::warn("Octree::ToPointCloud exported empty cloud");
+            // spdlog::warn("Octree::ToPointCloud exported empty cloud");
             return cloud;
         }
 

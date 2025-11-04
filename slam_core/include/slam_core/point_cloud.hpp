@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <execution>
 #include <iterator>
+#include <numeric>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -25,17 +26,15 @@ namespace ms_slam::slam_core
 namespace detail
 {
 
-template<typename T>
+template <typename T>
 struct aligned_vector {
-    using type = std::conditional_t<std::is_floating_point_v<T>,
-        std::vector<T, Eigen::aligned_allocator<T>>,
-        std::vector<T>>;
+    using type = std::conditional_t<std::is_floating_point_v<T>, std::vector<T, Eigen::aligned_allocator<T>>, std::vector<T>>;
 };
 
-template<typename T>
+template <typename T>
 using aligned_vector_t = typename aligned_vector<T>::type;
 
-template<typename Descriptor, std::size_t... Indices>
+template <typename Descriptor, std::size_t... Indices>
 constexpr auto make_storage_tuple(std::index_sequence<Indices...>)
 {
     using field_tuple = typename Descriptor::field_tuple;
@@ -43,10 +42,10 @@ constexpr auto make_storage_tuple(std::index_sequence<Indices...>)
 }
 
 // Random access iterator over strided field data returning spans per point.
-template<typename Scalar, std::size_t Dimensions, bool IsConst>
+template <typename Scalar, std::size_t Dimensions, bool IsConst>
 class FieldViewIterator
 {
-public:
+  public:
     using element_pointer = std::conditional_t<IsConst, const Scalar*, Scalar*>;
     using difference_type = std::ptrdiff_t;
     using value_type = std::span<std::conditional_t<IsConst, const Scalar, Scalar>>;
@@ -59,71 +58,90 @@ public:
     reference operator*() const noexcept { return reference(ptr_, Dimensions); }
     reference operator[](difference_type n) const noexcept { return reference(ptr_ + n * Dimensions, Dimensions); }
 
-    FieldViewIterator& operator++() noexcept { ptr_ += Dimensions; return *this; }
-    FieldViewIterator operator++(int) noexcept { auto tmp(*this); ++(*this); return tmp; }
-    FieldViewIterator& operator--() noexcept { ptr_ -= Dimensions; return *this; }
-    FieldViewIterator operator--(int) noexcept { auto tmp(*this); --(*this); return tmp; }
+    FieldViewIterator& operator++() noexcept
+    {
+        ptr_ += Dimensions;
+        return *this;
+    }
+    FieldViewIterator operator++(int) noexcept
+    {
+        auto tmp(*this);
+        ++(*this);
+        return tmp;
+    }
+    FieldViewIterator& operator--() noexcept
+    {
+        ptr_ -= Dimensions;
+        return *this;
+    }
+    FieldViewIterator operator--(int) noexcept
+    {
+        auto tmp(*this);
+        --(*this);
+        return tmp;
+    }
 
-    FieldViewIterator& operator+=(difference_type n) noexcept { ptr_ += n * Dimensions; return *this; }
-    FieldViewIterator& operator-=(difference_type n) noexcept { ptr_ -= n * Dimensions; return *this; }
+    FieldViewIterator& operator+=(difference_type n) noexcept
+    {
+        ptr_ += n * Dimensions;
+        return *this;
+    }
+    FieldViewIterator& operator-=(difference_type n) noexcept
+    {
+        ptr_ -= n * Dimensions;
+        return *this;
+    }
 
-    friend FieldViewIterator operator+(FieldViewIterator it, difference_type n) noexcept { it += n; return it; }
-    friend FieldViewIterator operator+(difference_type n, FieldViewIterator it) noexcept { it += n; return it; }
-    friend FieldViewIterator operator-(FieldViewIterator it, difference_type n) noexcept { it -= n; return it; }
+    friend FieldViewIterator operator+(FieldViewIterator it, difference_type n) noexcept
+    {
+        it += n;
+        return it;
+    }
+    friend FieldViewIterator operator+(difference_type n, FieldViewIterator it) noexcept
+    {
+        it += n;
+        return it;
+    }
+    friend FieldViewIterator operator-(FieldViewIterator it, difference_type n) noexcept
+    {
+        it -= n;
+        return it;
+    }
 
     friend difference_type operator-(const FieldViewIterator& lhs, const FieldViewIterator& rhs) noexcept
     {
         return (lhs.ptr_ - rhs.ptr_) / static_cast<difference_type>(Dimensions);
     }
 
-    friend bool operator==(const FieldViewIterator& lhs, const FieldViewIterator& rhs) noexcept
-    {
-        return lhs.ptr_ == rhs.ptr_;
-    }
+    friend bool operator==(const FieldViewIterator& lhs, const FieldViewIterator& rhs) noexcept { return lhs.ptr_ == rhs.ptr_; }
 
-    friend bool operator!=(const FieldViewIterator& lhs, const FieldViewIterator& rhs) noexcept
-    {
-        return !(lhs == rhs);
-    }
+    friend bool operator!=(const FieldViewIterator& lhs, const FieldViewIterator& rhs) noexcept { return !(lhs == rhs); }
 
-    friend bool operator<(const FieldViewIterator& lhs, const FieldViewIterator& rhs) noexcept
-    {
-        return lhs.ptr_ < rhs.ptr_;
-    }
+    friend bool operator<(const FieldViewIterator& lhs, const FieldViewIterator& rhs) noexcept { return lhs.ptr_ < rhs.ptr_; }
 
-    friend bool operator>(const FieldViewIterator& lhs, const FieldViewIterator& rhs) noexcept
-    {
-        return rhs < lhs;
-    }
+    friend bool operator>(const FieldViewIterator& lhs, const FieldViewIterator& rhs) noexcept { return rhs < lhs; }
 
-    friend bool operator<=(const FieldViewIterator& lhs, const FieldViewIterator& rhs) noexcept
-    {
-        return !(rhs < lhs);
-    }
+    friend bool operator<=(const FieldViewIterator& lhs, const FieldViewIterator& rhs) noexcept { return !(rhs < lhs); }
 
-    friend bool operator>=(const FieldViewIterator& lhs, const FieldViewIterator& rhs) noexcept
-    {
-        return !(lhs < rhs);
-    }
+    friend bool operator>=(const FieldViewIterator& lhs, const FieldViewIterator& rhs) noexcept { return !(lhs < rhs); }
 
-private:
+  private:
     element_pointer ptr_{nullptr};
 };
 
 }  // namespace detail
 
-template<typename Descriptor>
+template <typename Descriptor>
 class PointCloud
 {
-public:
+  public:
     using Ptr = std::shared_ptr<PointCloud<Descriptor>>;
     using ConstPtr = std::shared_ptr<const PointCloud<Descriptor>>;
 
     using descriptor_type = Descriptor;
     using scalar_type = typename descriptor_type::scalar_type;
 
-    static_assert(has_field_v<PositionTag, descriptor_type>,
-        "PointCloud requires a PositionTag field");
+    static_assert(has_field_v<PositionTag, descriptor_type>, "PointCloud requires a PositionTag field");
 
     static constexpr std::size_t field_count = field_count_v<descriptor_type>;
 
@@ -132,46 +150,43 @@ public:
     static_assert(position_dimensions == 3, "Current implementation assumes 3D positions");
 
     using PositionScalar = typename PositionDescriptor::scalar_type;
-    static_assert(std::is_same_v<PositionScalar, scalar_type>,
-        "Position scalar must match descriptor scalar type");
+    static_assert(std::is_same_v<PositionScalar, scalar_type>, "Position scalar must match descriptor scalar type");
 
-    template<typename Tag>
+    template <typename Tag>
     using field_descriptor_typed = field_descriptor_t<Tag, descriptor_type>;
 
-    template<typename Tag>
+    template <typename Tag>
         requires has_field_v<Tag, descriptor_type>
     using FieldScalarT = typename field_descriptor_typed<Tag>::scalar_type;
 
-    template<typename Tag>
+    template <typename Tag>
         requires has_field_v<Tag, descriptor_type>
     using FieldMatrixMap = Eigen::Map<Eigen::Matrix<FieldScalarT<Tag>, field_descriptor_typed<Tag>::dimensions, Eigen::Dynamic, Eigen::ColMajor>>;
 
-    template<typename Tag>
+    template <typename Tag>
         requires has_field_v<Tag, descriptor_type>
-    using ConstFieldMatrixMap = Eigen::Map<const Eigen::Matrix<FieldScalarT<Tag>, field_descriptor_typed<Tag>::dimensions, Eigen::Dynamic, Eigen::ColMajor>>;
+    using ConstFieldMatrixMap =
+        Eigen::Map<const Eigen::Matrix<FieldScalarT<Tag>, field_descriptor_typed<Tag>::dimensions, Eigen::Dynamic, Eigen::ColMajor>>;
 
-    template<typename Tag>
+    template <typename Tag>
         requires has_field_v<Tag, descriptor_type>
     using FieldVectorMap = Eigen::Map<Eigen::Matrix<FieldScalarT<Tag>, Eigen::Dynamic, 1>>;
 
-    template<typename Tag>
+    template <typename Tag>
         requires has_field_v<Tag, descriptor_type>
     using ConstFieldVectorMap = Eigen::Map<const Eigen::Matrix<FieldScalarT<Tag>, Eigen::Dynamic, 1>>;
 
-    template<typename Tag>
-        requires (has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions != 0)
+    template <typename Tag>
+        requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions != 0)
     using FieldPointMap = Eigen::Map<Eigen::Matrix<FieldScalarT<Tag>, field_descriptor_typed<Tag>::dimensions, 1>>;
 
-    template<typename Tag>
-        requires (has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions != 0)
+    template <typename Tag>
+        requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions != 0)
     using ConstFieldPointMap = Eigen::Map<const Eigen::Matrix<FieldScalarT<Tag>, field_descriptor_typed<Tag>::dimensions, 1>>;
 
     PointCloud() = default;
 
-    explicit PointCloud(std::size_t initial_size)
-    {
-        resize(initial_size);
-    }
+    explicit PointCloud(std::size_t initial_size) { resize(initial_size); }
 
     [[nodiscard]] Ptr clone() const { return std::make_shared<PointCloud>(*this); }
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
@@ -219,16 +234,15 @@ public:
         ++size_;
     }
 
-    template<typename Derived>
+    template <typename Derived>
     void push_back(const Eigen::MatrixBase<Derived>& position)
     {
-        static_assert(Derived::RowsAtCompileTime == 3 && Derived::ColsAtCompileTime == 1,
-            "push_back expects a 3x1 vector");
+        static_assert(Derived::RowsAtCompileTime == 3 && Derived::ColsAtCompileTime == 1, "push_back expects a 3x1 vector");
         Eigen::Matrix<scalar_type, 3, 1> casted = position.template cast<scalar_type>();
         push_back(casted.x(), casted.y(), casted.z());
     }
 
-    template<typename PointT>
+    template <typename PointT>
     void push_back(const PointT& point)
     {
         ensure_capacity(size_ + 1);
@@ -243,7 +257,7 @@ public:
         size_ = index + 1;
     }
 
-    template<std::ranges::input_range Range>
+    template <std::ranges::input_range Range>
     void append(const Range& points)
     {
         if constexpr (std::ranges::sized_range<Range>) {
@@ -254,13 +268,13 @@ public:
         }
     }
 
-    template<typename PointT>
+    template <typename PointT>
     void append(std::initializer_list<PointT> points)
     {
         append(std::span(points.begin(), points.end()));
     }
 
-    template<std::ranges::input_range Range>
+    template <std::ranges::input_range Range>
         requires std::same_as<std::ranges::range_value_t<std::decay_t<Range>>, std::size_t>
     [[nodiscard]] PointCloud extract(Range&& indices_range) const
     {
@@ -285,12 +299,9 @@ public:
         return result;
     }
 
-    void erase(std::size_t index)
-    {
-        erase(std::array<std::size_t, 1>{index});
-    }
+    void erase(std::size_t index) { erase(std::array<std::size_t, 1>{index}); }
 
-    template<std::ranges::input_range Range>
+    template <std::ranges::input_range Range>
         requires std::same_as<std::ranges::range_value_t<std::decay_t<Range>>, std::size_t>
     void erase(Range&& indices_range)
     {
@@ -346,10 +357,10 @@ public:
         size_ = new_size;
     }
 
-    template<typename Tag>
+    template <typename Tag>
     static constexpr bool is_scalar_field_v = (field_descriptor_typed<Tag>::dimensions == 1);
 
-    template<typename Tag>
+    template <typename Tag>
     auto field_view() noexcept
     {
         static_assert(has_field_v<Tag, descriptor_type>, "Requested field is not part of the descriptor");
@@ -359,14 +370,11 @@ public:
             return std::span<typename FieldDesc::scalar_type>(vec.data(), size_);
         } else {
             using Iterator = detail::FieldViewIterator<typename FieldDesc::scalar_type, FieldDesc::dimensions, false>;
-            return std::ranges::subrange(
-                Iterator(vec.data()),
-                Iterator(vec.data() + size_ * FieldDesc::dimensions),
-                size_);
+            return std::ranges::subrange(Iterator(vec.data()), Iterator(vec.data() + size_ * FieldDesc::dimensions), size_);
         }
     }
 
-    template<typename Tag>
+    template <typename Tag>
     auto field_view() const noexcept
     {
         static_assert(has_field_v<Tag, descriptor_type>, "Requested field is not part of the descriptor");
@@ -376,22 +384,13 @@ public:
             return std::span<const typename FieldDesc::scalar_type>(vec.data(), size_);
         } else {
             using Iterator = detail::FieldViewIterator<typename FieldDesc::scalar_type, FieldDesc::dimensions, true>;
-            return std::ranges::subrange(
-                Iterator(vec.data()),
-                Iterator(vec.data() + size_ * FieldDesc::dimensions),
-                size_);
+            return std::ranges::subrange(Iterator(vec.data()), Iterator(vec.data() + size_ * FieldDesc::dimensions), size_);
         }
     }
 
-    [[nodiscard]] auto positions_view() noexcept
-    {
-        return field_view<PositionTag>();
-    }
+    [[nodiscard]] auto positions_view() noexcept { return field_view<PositionTag>(); }
 
-    [[nodiscard]] auto positions_view() const noexcept
-    {
-        return field_view<PositionTag>();
-    }
+    [[nodiscard]] auto positions_view() const noexcept { return field_view<PositionTag>(); }
 
     [[nodiscard]] std::span<scalar_type> positions() noexcept
     {
@@ -433,25 +432,13 @@ public:
         return std::span<const Eigen::Vector3f>(reinterpret_cast<const Eigen::Vector3f*>(pos.data()), size_);
     }
 
-    [[nodiscard]] auto positions_matrix() noexcept
-    {
-        return field_matrix<PositionTag>();
-    }
+    [[nodiscard]] auto positions_matrix() noexcept { return field_matrix<PositionTag>(); }
 
-    [[nodiscard]] auto positions_matrix() const noexcept
-    {
-        return field_matrix<PositionTag>();
-    }
+    [[nodiscard]] auto positions_matrix() const noexcept { return field_matrix<PositionTag>(); }
 
-    [[nodiscard]] auto position(std::size_t index) noexcept
-    {
-        return field_point<PositionTag>(index);
-    }
+    [[nodiscard]] auto position(std::size_t index) noexcept { return field_point<PositionTag>(index); }
 
-    [[nodiscard]] auto position(std::size_t index) const noexcept
-    {
-        return field_point<PositionTag>(index);
-    }
+    [[nodiscard]] auto position(std::size_t index) const noexcept { return field_point<PositionTag>(index); }
 
     [[nodiscard]] auto normal(std::size_t index) noexcept
         requires has_field_v<NormalTag, descriptor_type>
@@ -501,6 +488,38 @@ public:
         return field_value<TimestampTag>(index);
     }
 
+    void sort()
+        requires has_field_v<TimestampTag, descriptor_type>
+    {
+        const std::size_t point_count = size_;
+        if (point_count <= 1) {
+            return;
+        }
+
+        auto& timestamps = storage_by_tag<TimestampTag>();
+        if (std::is_sorted(timestamps.begin(), timestamps.begin() + static_cast<std::ptrdiff_t>(point_count))) {
+            return;
+        }
+
+        std::vector<std::size_t> order(point_count);
+        std::iota(order.begin(), order.end(), 0);
+
+        std::sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) { return timestamps[lhs] < timestamps[rhs]; });
+
+        bool unchanged = true;
+        for (std::size_t i = 0; i < point_count; ++i) {
+            if (order[i] != i) {
+                unchanged = false;
+                break;
+            }
+        }
+        if (unchanged) {
+            return;
+        }
+
+        reorder_fields(order);
+    }
+
     [[nodiscard]] auto& curvature(std::size_t index) noexcept
         requires has_field_v<CurvatureTag, descriptor_type>
     {
@@ -513,7 +532,7 @@ public:
         return field_value<CurvatureTag>(index);
     }
 
-    template<typename Tag>
+    template <typename Tag>
         requires has_field_v<Tag, descriptor_type> && (!std::is_same_v<Tag, PositionTag>)
     [[nodiscard]] auto field_block(std::size_t index) noexcept
     {
@@ -523,7 +542,7 @@ public:
         return std::span<typename FieldDesc::scalar_type>(vec.data() + index * FieldDesc::dimensions, FieldDesc::dimensions);
     }
 
-    template<typename Tag>
+    template <typename Tag>
         requires has_field_v<Tag, descriptor_type> && (!std::is_same_v<Tag, PositionTag>)
     [[nodiscard]] auto field_block(std::size_t index) const noexcept
     {
@@ -533,7 +552,7 @@ public:
         return std::span<const typename FieldDesc::scalar_type>(vec.data() + index * FieldDesc::dimensions, FieldDesc::dimensions);
     }
 
-    template<typename Tag>
+    template <typename Tag>
     [[nodiscard]] auto field_span() noexcept
     {
         static_assert(has_field_v<Tag, descriptor_type>, "Requested field is not part of the descriptor");
@@ -542,7 +561,7 @@ public:
         return std::span<typename FieldDesc::scalar_type>(vec.data(), size_ * FieldDesc::dimensions);
     }
 
-    template<typename Tag>
+    template <typename Tag>
     [[nodiscard]] auto field_span() const noexcept
     {
         static_assert(has_field_v<Tag, descriptor_type>, "Requested field is not part of the descriptor");
@@ -551,7 +570,7 @@ public:
         return std::span<const typename FieldDesc::scalar_type>(vec.data(), size_ * FieldDesc::dimensions);
     }
 
-    template<typename Tag>
+    template <typename Tag>
         requires has_field_v<Tag, descriptor_type>
     [[nodiscard]] FieldMatrixMap<Tag> field_matrix() noexcept
     {
@@ -561,17 +580,20 @@ public:
         return FieldMatrixMap<Tag>(vec.data(), static_cast<Eigen::Index>(field_descriptor_typed<Tag>::dimensions), static_cast<Eigen::Index>(size_));
     }
 
-    template<typename Tag>
+    template <typename Tag>
         requires has_field_v<Tag, descriptor_type>
     [[nodiscard]] ConstFieldMatrixMap<Tag> field_matrix() const noexcept
     {
         const auto& vec = storage_by_tag<Tag>();
         static_assert(field_descriptor_typed<Tag>::dimensions > 0, "Field dimensions must be greater than zero");
 
-        return ConstFieldMatrixMap<Tag>(vec.data(), static_cast<Eigen::Index>(field_descriptor_typed<Tag>::dimensions), static_cast<Eigen::Index>(size_));
+        return ConstFieldMatrixMap<Tag>(
+            vec.data(),
+            static_cast<Eigen::Index>(field_descriptor_typed<Tag>::dimensions),
+            static_cast<Eigen::Index>(size_));
     }
 
-    template<typename Tag>
+    template <typename Tag>
         requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions == 1)
     [[nodiscard]] FieldVectorMap<Tag> field_vector() noexcept
     {
@@ -579,7 +601,7 @@ public:
         return FieldVectorMap<Tag>(vec.data(), static_cast<Eigen::Index>(size_));
     }
 
-    template<typename Tag>
+    template <typename Tag>
         requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions == 1)
     [[nodiscard]] ConstFieldVectorMap<Tag> field_vector() const noexcept
     {
@@ -587,7 +609,7 @@ public:
         return ConstFieldVectorMap<Tag>(vec.data(), static_cast<Eigen::Index>(size_));
     }
 
-    template<typename Tag>
+    template <typename Tag>
         requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions > 1)
     [[nodiscard]] FieldPointMap<Tag> field_point(std::size_t index) noexcept
     {
@@ -596,7 +618,7 @@ public:
         return FieldPointMap<Tag>(vec.data() + index * field_descriptor_typed<Tag>::dimensions);
     }
 
-    template<typename Tag>
+    template <typename Tag>
         requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions > 1)
     [[nodiscard]] ConstFieldPointMap<Tag> field_point(std::size_t index) const noexcept
     {
@@ -605,7 +627,7 @@ public:
         return ConstFieldPointMap<Tag>(vec.data() + index * field_descriptor_typed<Tag>::dimensions);
     }
 
-    template<typename Tag>
+    template <typename Tag>
         requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions == 1)
     [[nodiscard]] FieldScalarT<Tag>& field_value(std::size_t index) noexcept
     {
@@ -614,7 +636,7 @@ public:
         return vec[index];
     }
 
-    template<typename Tag>
+    template <typename Tag>
         requires(has_field_v<Tag, descriptor_type> && field_descriptor_typed<Tag>::dimensions == 1)
     [[nodiscard]] const FieldScalarT<Tag>& field_value(std::size_t index) const noexcept
     {
@@ -623,24 +645,33 @@ public:
         return vec[index];
     }
 
-    template<typename TransformType>
-        requires requires(const TransformType& t) { t.linear(); t.translation(); }
+    template <typename TransformType>
+        requires requires(const TransformType& t) {
+            t.linear();
+            t.translation();
+        }
     PointCloud& transform(const TransformType& transform) noexcept
     {
         apply_transform(transform.linear(), transform.translation());
         return *this;
     }
 
-    template<typename TransformType>
-        requires requires(const TransformType& t) { t.linear(); t.translation(); }
+    template <typename TransformType>
+        requires requires(const TransformType& t) {
+            t.linear();
+            t.translation();
+        }
     PointCloud& transform_parallel(const TransformType& transform) noexcept
     {
         apply_transform_parallel(transform.linear(), transform.translation());
         return *this;
     }
 
-    template<typename TransformType>
-        requires requires(const TransformType& t) { t.linear(); t.translation(); }
+    template <typename TransformType>
+        requires requires(const TransformType& t) {
+            t.linear();
+            t.translation();
+        }
     [[nodiscard]] PointCloud transformed(const TransformType& transform) const
     {
         PointCloud copy(*this);
@@ -648,8 +679,11 @@ public:
         return copy;
     }
 
-    template<typename TransformType>
-        requires requires(const TransformType& t) { t.linear(); t.translation(); }
+    template <typename TransformType>
+        requires requires(const TransformType& t) {
+            t.linear();
+            t.translation();
+        }
     [[nodiscard]] PointCloud transformed_parallel(const TransformType& transform) const
     {
         PointCloud copy(*this);
@@ -657,7 +691,7 @@ public:
         return copy;
     }
 
-    template<typename Matrix4>
+    template <typename Matrix4>
     PointCloud& transform_matrix(const Matrix4& homogeneous) noexcept
     {
         assert(homogeneous.rows() == 4 && homogeneous.cols() == 4);
@@ -667,14 +701,14 @@ public:
         return *this;
     }
 
-    template<typename Matrix3, typename Vector3>
+    template <typename Matrix3, typename Vector3>
     PointCloud& transform_linear(const Matrix3& R, const Vector3& t) noexcept
     {
         apply_transform(R, t);
         return *this;
     }
 
-    template<typename UnaryFn>
+    template <typename UnaryFn>
     void for_each_position(UnaryFn&& fn)
     {
         auto data = storage_by_tag<PositionTag>().data();
@@ -684,14 +718,14 @@ public:
         }
     }
 
-private:
+  private:
     using storage_tuple_t = decltype(detail::make_storage_tuple<descriptor_type>(std::make_index_sequence<field_count>{}));
 
     storage_tuple_t storage_{};
     std::size_t size_{0};
     std::size_t capacity_{0};
 
-    template<typename Tag>
+    template <typename Tag>
     auto& storage_by_tag() noexcept
     {
         constexpr std::size_t idx = field_index_v<Tag, descriptor_type>;
@@ -699,7 +733,7 @@ private:
         return std::get<idx>(storage_);
     }
 
-    template<typename Tag>
+    template <typename Tag>
     const auto& storage_by_tag() const noexcept
     {
         constexpr std::size_t idx = field_index_v<Tag, descriptor_type>;
@@ -707,13 +741,55 @@ private:
         return std::get<idx>(storage_);
     }
 
+    void reorder_fields(const std::vector<std::size_t>& order)
+    {
+        assert(order.size() == size_);
+        reorder_fields_impl(order, std::make_index_sequence<field_count>{});
+    }
+
+    template <std::size_t... Indices>
+    void reorder_fields_impl(const std::vector<std::size_t>& order, std::index_sequence<Indices...>)
+    {
+        (reorder_single_field<Indices>(order), ...);
+    }
+
+    template <std::size_t Index>
+    void reorder_single_field(const std::vector<std::size_t>& order)
+    {
+        using Field = std::tuple_element_t<Index, typename descriptor_type::field_tuple>;
+        constexpr std::size_t dims = Field::dimensions;
+        if constexpr (dims == 0) {
+            return;
+        }
+
+        auto& vec = std::get<Index>(storage_);
+        if (vec.empty()) {
+            return;
+        }
+
+        const std::size_t total_size = vec.size();
+        using VectorType = std::decay_t<decltype(vec)>;
+        VectorType temp(total_size);
+        auto* dst_ptr = temp.data();
+        const auto* src_ptr = vec.data();
+
+        for (std::size_t dst_index = 0; dst_index < size_; ++dst_index) {
+            const std::size_t src_index = order[dst_index];
+            // 将源字段块复制到排序后的位置
+            std::copy_n(src_ptr + src_index * dims, dims, dst_ptr + dst_index * dims);
+        }
+
+        vec.swap(temp);
+    }
+
     void compact_fields(std::size_t original_size, std::size_t new_size, const std::vector<std::size_t>& sorted_indices)
     {
         compact_fields_impl(original_size, new_size, sorted_indices, std::make_index_sequence<field_count>{});
     }
 
-    template<std::size_t... FieldIndices>
-    void compact_fields_impl(std::size_t original_size,
+    template <std::size_t... FieldIndices>
+    void compact_fields_impl(
+        std::size_t original_size,
         std::size_t new_size,
         const std::vector<std::size_t>& sorted_indices,
         std::index_sequence<FieldIndices...>)
@@ -721,7 +797,7 @@ private:
         (compact_single_field<FieldIndices>(original_size, new_size, sorted_indices), ...);
     }
 
-    template<std::size_t FieldIndex>
+    template <std::size_t FieldIndex>
     void compact_single_field(std::size_t original_size, std::size_t new_size, const std::vector<std::size_t>& sorted_indices)
     {
         auto& vec = std::get<FieldIndex>(storage_);
@@ -762,13 +838,13 @@ private:
         copy_fields_by_indices_impl(other, indices, std::make_index_sequence<field_count>{});
     }
 
-    template<std::size_t... FieldIndices>
+    template <std::size_t... FieldIndices>
     void copy_fields_by_indices_impl(PointCloud& other, const std::vector<std::size_t>& indices, std::index_sequence<FieldIndices...>) const
     {
         (copy_single_field_by_tag<typename std::tuple_element_t<FieldIndices, typename descriptor_type::field_tuple>::tag>(other, indices), ...);
     }
 
-    template<typename Tag>
+    template <typename Tag>
     void copy_single_field_by_tag(PointCloud& other, const std::vector<std::size_t>& indices) const
     {
         using FieldDesc = field_descriptor_typed<Tag>;
@@ -784,7 +860,7 @@ private:
         }
     }
 
-    template<typename Matrix3, typename Vector3>
+    template <typename Matrix3, typename Vector3>
     void apply_transform(const Matrix3& rotation, const Vector3& translation)
     {
         if (size_ == 0) {
@@ -833,7 +909,7 @@ private:
         }
     }
 
-    template<typename Matrix3, typename Vector3>
+    template <typename Matrix3, typename Vector3>
     void apply_transform_parallel(const Matrix3& rotation, const Vector3& translation)
     {
         const Eigen::Matrix<scalar_type, 3, 3> R = rotation.template cast<scalar_type>();
@@ -905,40 +981,31 @@ private:
         reserve(new_capacity);
     }
 
-    template<std::size_t... Indices>
+    template <std::size_t... Indices>
     void reserve_fields_impl(std::size_t new_capacity, std::index_sequence<Indices...>)
     {
         (std::get<Indices>(storage_).reserve(new_capacity * field_dimensions_by_index<Indices>()), ...);
     }
 
-    void reserve_fields(std::size_t new_capacity)
-    {
-        reserve_fields_impl(new_capacity, std::make_index_sequence<field_count>{});
-    }
+    void reserve_fields(std::size_t new_capacity) { reserve_fields_impl(new_capacity, std::make_index_sequence<field_count>{}); }
 
-    template<std::size_t... Indices>
+    template <std::size_t... Indices>
     void resize_fields_impl(std::size_t new_size, std::index_sequence<Indices...>)
     {
         (std::get<Indices>(storage_).resize(new_size * field_dimensions_by_index<Indices>()), ...);
     }
 
-    void resize_fields(std::size_t new_size)
-    {
-        resize_fields_impl(new_size, std::make_index_sequence<field_count>{});
-    }
+    void resize_fields(std::size_t new_size) { resize_fields_impl(new_size, std::make_index_sequence<field_count>{}); }
 
-    void expand_optional_fields(std::size_t new_size)
-    {
-        expand_optional_fields_impl(new_size, std::make_index_sequence<field_count>{});
-    }
+    void expand_optional_fields(std::size_t new_size) { expand_optional_fields_impl(new_size, std::make_index_sequence<field_count>{}); }
 
-    template<std::size_t... Indices>
+    template <std::size_t... Indices>
     void expand_optional_fields_impl(std::size_t new_size, std::index_sequence<Indices...>)
     {
         (expand_single_field<Indices>(new_size), ...);
     }
 
-    template<std::size_t Index>
+    template <std::size_t Index>
     void expand_single_field(std::size_t new_size)
     {
         using Field = std::tuple_element_t<Index, typename descriptor_type::field_tuple>;
@@ -949,14 +1016,14 @@ private:
         }
     }
 
-    template<std::size_t Index>
+    template <std::size_t Index>
     static constexpr std::size_t field_dimensions_by_index()
     {
         using Field = std::tuple_element_t<Index, typename descriptor_type::field_tuple>;
         return Field::dimensions;
     }
 
-    template<typename PointT>
+    template <typename PointT>
     void assign_position(const PointT& point, std::size_t index)
     {
         auto& pos = storage_by_tag<PositionTag>();
@@ -968,47 +1035,54 @@ private:
 
         if constexpr (requires { point.template get<PositionTag>(); }) {
             const auto value = point.template get<PositionTag>();
-            set_xyz(static_cast<scalar_type>(value[0]),
-                    static_cast<scalar_type>(value[1]),
-                    static_cast<scalar_type>(value[2]));
+            set_xyz(static_cast<scalar_type>(value[0]), static_cast<scalar_type>(value[1]), static_cast<scalar_type>(value[2]));
         } else if constexpr (requires { point.position; }) {
-            set_xyz(static_cast<scalar_type>(point.position[0]),
-                    static_cast<scalar_type>(point.position[1]),
-                    static_cast<scalar_type>(point.position[2]));
-        } else if constexpr (requires { point.x; point.y; point.z; }) {
-            set_xyz(static_cast<scalar_type>(point.x),
-                    static_cast<scalar_type>(point.y),
-                    static_cast<scalar_type>(point.z));
-        } else if constexpr (requires { point[0]; point[1]; point[2]; }) {
-            set_xyz(static_cast<scalar_type>(point[0]),
-                    static_cast<scalar_type>(point[1]),
-                    static_cast<scalar_type>(point[2]));
-        } else if constexpr (requires { point(0); point(1); point(2); }) {
-            set_xyz(static_cast<scalar_type>(point(0)),
-                    static_cast<scalar_type>(point(1)),
-                    static_cast<scalar_type>(point(2)));
-        } else if constexpr (requires { point.x(); point.y(); point.z(); }) {
-            set_xyz(static_cast<scalar_type>(point.x()),
-                    static_cast<scalar_type>(point.y()),
-                    static_cast<scalar_type>(point.z()));
+            set_xyz(
+                static_cast<scalar_type>(point.position[0]),
+                static_cast<scalar_type>(point.position[1]),
+                static_cast<scalar_type>(point.position[2]));
+        } else if constexpr (requires {
+                                 point.x;
+                                 point.y;
+                                 point.z;
+                             }) {
+            set_xyz(static_cast<scalar_type>(point.x), static_cast<scalar_type>(point.y), static_cast<scalar_type>(point.z));
+        } else if constexpr (requires {
+                                 point[0];
+                                 point[1];
+                                 point[2];
+                             }) {
+            set_xyz(static_cast<scalar_type>(point[0]), static_cast<scalar_type>(point[1]), static_cast<scalar_type>(point[2]));
+        } else if constexpr (requires {
+                                 point(0);
+                                 point(1);
+                                 point(2);
+                             }) {
+            set_xyz(static_cast<scalar_type>(point(0)), static_cast<scalar_type>(point(1)), static_cast<scalar_type>(point(2)));
+        } else if constexpr (requires {
+                                 point.x();
+                                 point.y();
+                                 point.z();
+                             }) {
+            set_xyz(static_cast<scalar_type>(point.x()), static_cast<scalar_type>(point.y()), static_cast<scalar_type>(point.z()));
         } else {
             static_assert(detail::dependent_false<PointT>::value, "Point type does not provide position data");
         }
     }
 
-    template<typename PointT>
+    template <typename PointT>
     void copy_optional_fields(const PointT& point, std::size_t index)
     {
         copy_optional_fields_impl(point, index, std::make_index_sequence<field_count>{});
     }
 
-    template<typename PointT, std::size_t... Indices>
+    template <typename PointT, std::size_t... Indices>
     void copy_optional_fields_impl(const PointT& point, std::size_t index, std::index_sequence<Indices...>)
     {
         (copy_single_field<Indices>(point, index), ...);
     }
 
-    template<std::size_t Index, typename PointT>
+    template <std::size_t Index, typename PointT>
     void copy_single_field(const PointT& point, std::size_t index)
     {
         using Field = std::tuple_element_t<Index, typename descriptor_type::field_tuple>;
@@ -1051,18 +1125,15 @@ private:
         }
     }
 
-    void release_fields() noexcept
-    {
-        release_fields_impl(std::make_index_sequence<field_count>{});
-    }
+    void release_fields() noexcept { release_fields_impl(std::make_index_sequence<field_count>{}); }
 
-    template<std::size_t... Indices>
+    template <std::size_t... Indices>
     void release_fields_impl(std::index_sequence<Indices...>) noexcept
     {
         (release_single_field<Indices>(), ...);
     }
 
-    template<std::size_t Index>
+    template <std::size_t Index>
     void release_single_field() noexcept
     {
         auto& vec = std::get<Index>(storage_);

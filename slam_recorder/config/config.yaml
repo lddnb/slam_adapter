@@ -18,7 +18,10 @@ Foxglove:
 
   # 处理的 topics
   topics:
-    - name: /lidar_points
+    - name: /livox/lidar
+      schema: foxglove.PointCloud
+      enabled: true
+    - name: /cloud_registered
       schema: foxglove.PointCloud
       enabled: true
     - name: /deskewed_cloud
@@ -30,7 +33,7 @@ Foxglove:
     - name: /camera/image_raw
       schema: foxglove.CompressedImage
       enabled: true
-    - name: /lidar_imu
+    - name: /livox/imu
       schema: foxglove.Imu
       enabled: true
     - name: /path
@@ -78,7 +81,7 @@ BagTool:
         schema: livox_ros_driver2/CustomMsg
         playback_enabled: true
         record_enabled: true
-        publish_service: /lidar_points
+        publish_service: /livox/lidar
         queue_depth: 10
       - name: /camera/image_raw/compressed
         schema: sensor_msgs/CompressedImage
@@ -90,7 +93,7 @@ BagTool:
         schema: sensor_msgs/Imu
         playback_enabled: true
         record_enabled: true
-        publish_service: /lidar_imu
+        publish_service: /livox/imu
         queue_depth: 100
       - name: /path
         schema: nav_msgs/Path

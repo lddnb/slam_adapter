@@ -152,6 +152,44 @@ inline bool BuildFoxglovePoseInFrame(const slam_core::State& state, std::string_
 }
 
 /**
+ * @brief 将状态序列转换为Foxglove PosesInFrame消息
+ * @param states 状态序列
+ * @param frame_id 坐标系名称
+ * @param builder FlatBuffer构造器
+ * @return 成功返回true
+ */
+inline bool BuildFoxglovePosesInFrame(const std::vector<slam_core::State>& states, std::string_view frame_id, flatbuffers::FlatBufferBuilder& builder)
+{
+    builder.Clear();
+
+    if (states.empty()) {
+        // spdlog::warn("BuildFoxglovePosesInFrame: empty state sequence");
+        return false;
+    }
+
+    std::vector<flatbuffers::Offset<foxglove::Pose>> pose_offsets;
+    pose_offsets.reserve(states.size());
+
+    for (const auto& state : states) {
+        const Eigen::Vector3d position = state.p();
+        const Eigen::Quaterniond orientation = state.quat().normalized();
+
+        const auto position_offset = foxglove::CreateVector3(builder, position.x(), position.y(), position.z());
+        const auto orientation_offset = foxglove::CreateQuaternion(builder, orientation.x(), orientation.y(), orientation.z(), orientation.w());
+        pose_offsets.emplace_back(foxglove::CreatePose(builder, position_offset, orientation_offset));
+    }
+
+    const auto poses_vector = builder.CreateVector(pose_offsets);
+    const foxglove::Time timestamp = detail::MakeFoxgloveTime(states.back().timestamp());
+    const auto frame_id_offset = builder.CreateString(frame_id.data(), frame_id.size());
+
+    // 使用最新状态的时间戳作为路径消息的时间标记
+    const auto poses_in_frame_offset = foxglove::CreatePosesInFrame(builder, &timestamp, frame_id_offset, poses_vector);
+    foxglove::FinishPosesInFrameBuffer(builder, poses_in_frame_offset);
+    return true;
+}
+
+/**
  * @brief 构建Foxglove FrameTransforms消息
  * @param transforms 变换列表
  * @param builder FlatBuffer构造器
