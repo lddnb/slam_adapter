@@ -1,6 +1,6 @@
 #pragma once
 
-#define USE_OCTREE
+#define USE_IKDTREE
 
 #include <deque>
 #include <mutex>
@@ -62,7 +62,7 @@ class Odometry
 
     void GetLidarState(States& buffer);
 
-    void GetDeskewedCloud(std::vector<PointCloudType::Ptr>& cloud_buffer);
+    void GetMapCloud(std::vector<PointCloudType::Ptr>& cloud_buffer);
 
     void GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map);
 
@@ -84,10 +84,10 @@ class Odometry
 #ifdef USE_OCTREE
     std::unique_ptr<Octree> local_map_;
 #elif defined(USE_OCTREE_CHARLIE)
-    std::unique_ptr<charlie::Octree> local_map_;             ///< 局部地图
+    std::unique_ptr<charlie::Octree> local_map_;  ///< 局部地图
     std::vector<Eigen::Vector3f> local_points_;
 #elif defined(USE_IKDTREE)
-    std::unique_ptr<ikdtreeNS::KD_TREE<ikdtreeNS::ikdTree_PointType>> local_map_;  ///< 局部地图
+    std::unique_ptr<ikdtreeNS::KD_TREE<ikdtreeNS::ikdTree_PointType> > local_map_;  ///< 局部地图
 #endif
 
     double last_timestamp_imu_;
@@ -102,7 +102,7 @@ class Odometry
     Eigen::Vector3d mean_acc_;  ///< 平均加速度
     std::mutex state_mutex_;    ///< 状态互斥锁
 
-    std::vector<PointCloudType::Ptr> deskewed_cloud_buffer_;  ///< 同步数据列表
+    std::vector<PointCloudType::Ptr> map_cloud_buffer_;  ///< 同步数据列表
 
     PointCloudType::Ptr deskewed_cloud_;
     PointCloudType::Ptr downsampled_cloud_;

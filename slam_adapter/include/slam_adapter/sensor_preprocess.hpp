@@ -166,7 +166,7 @@ inline bool ConvertImuMessage(const foxglove::Imu& message, slam_core::IMU& imu_
     if (g_unit) {
         linear_acceleration_vec = Eigen::Vector3d(linear_acceleration->x(), linear_acceleration->y(), linear_acceleration->z());
     } else {
-        linear_acceleration_vec = Eigen::Vector3d(linear_acceleration->x() * 9.81, linear_acceleration->y() * 9.81, linear_acceleration->z() * 9.81);
+        linear_acceleration_vec = Eigen::Vector3d(linear_acceleration->x(), linear_acceleration->y(), linear_acceleration->z());
     }
 
     imu_out = slam_core::IMU(angular_velocity_vec, linear_acceleration_vec, timestamp);

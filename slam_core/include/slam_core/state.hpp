@@ -28,8 +28,8 @@ class State
         >;
 
     using Tangent = typename BundleState::Tangent;
-    static constexpr int DoF = BundleState::DoF;  // DoF whole state
-    static constexpr int DoFNoise = 12;           // b_w, b_a, n_{b_w}, n_{b_a}
+    static constexpr int DoF = BundleState::DoF;     // DoF whole state
+    static constexpr int DoFNoise = 12;              // b_w, b_a, n_{b_w}, n_{b_a}
     static constexpr int DoFObs = BundleInput::DoF;  // DoF obsevation equation
 
     using ProcessMatrix = Eigen::Matrix<double, DoF, DoF>;
@@ -45,12 +45,17 @@ class State
     [[nodiscard]] std::optional<Eigen::Isometry3d> Predict(double timestamp) const;
     void Update();
 
+    /**
+     * @brief 计算离散时间预测所需的李代数增量
+     * @param ang_vel 当前角速度测量（单位：rad/s）
+     * @param lin_acc 当前线加速度测量（单位：m/s^2）
+     * @return BundleState 对应的李代数增量
+     */
     [[nodiscard]] Tangent f(const Eigen::Vector3d& ang_vel, const Eigen::Vector3d& lin_acc) const;
     /**
      * @brief ∂f(x ⊕ δx, u, 0) / ∂δx|_{δx = 0}
      *
      * @param imu
-     * @param dt
      * @return ProcessMatrix
      */
     [[nodiscard]] ProcessMatrix df_dx(const BundleInput& imu) const;
@@ -58,7 +63,6 @@ class State
      * @brief ∂f(x, u, w) / ∂w|_{w = 0}
      *
      * @param imu
-     * @param dt
      * @return MappingMatrix
      */
     [[nodiscard]] MappingMatrix df_dw(const BundleInput& imu) const;

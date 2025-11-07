@@ -1,7 +1,9 @@
 #include "slam_core/odometry.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <execution>
 #include <limits>
 
 #include <Eigen/Dense>
@@ -47,7 +49,7 @@ Odometry::Odometry()
     T_i_l = Eigen::Isometry3d::Identity();
     T_i_l.linear() = cfg.mapping_params.extrinR;
     T_i_l.translation() = cfg.mapping_params.extrinT;
-    
+
     spdlog::info("Odometry thread initialized");
 }
 
@@ -196,7 +198,6 @@ std::vector<SyncData> Odometry::SyncPackages()
         if (imu_consumed > 2) {
             imu_buffer_.erase(imu_buffer_.begin(), imu_buffer_.begin() + static_cast<std::ptrdiff_t>(imu_consumed - 2));
         }
-
         lidar_buffer_.pop_front();
         sync_data_list.emplace_back(std::move(sync_data));
     }
@@ -226,15 +227,7 @@ void Odometry::Initialize(const SyncData& sync_data)
         last_imu_stamp = imu_data.timestamp();
     }
     if (N >= 100) {
-        spdlog::info(
-            "Final imu gyro = [{:.3f}, {:.3f}, {:.3f}], accel = [{:.3f}, {:.3f}, {:.3f}]",
-            gyro_avg.x(),
-            gyro_avg.y(),
-            gyro_avg.z(),
-            accel_avg.x(),
-            accel_avg.y(),
-            accel_avg.z());
-        Eigen::Vector3d grav_vec = accel_avg.normalized() * 9.81;
+        Eigen::Vector3d grav_vec = accel_avg.normalized() * 9.809;
         state_.g(-grav_vec);
         state_.b_g(gyro_avg);
         state_.b_a(accel_avg - grav_vec);
@@ -245,13 +238,14 @@ void Odometry::Initialize(const SyncData& sync_data)
 
         // clang-format off
         spdlog::info(
-            "Initialize with {} IMU:g = [{:.3f}, {:.3f}, {:.3f}], b_g = [{:.3f}, {:.3f}, {:.3f}], b_a = [{:.3f}, {:.3f}, {:.3f}], timestamp = {:.3f}",
+            "Initialize with {} IMU:g = [{:.6f}, {:.6f}, {:.6f}], mean_acc_ = {:.6f},  b_g = [{:.6f}, {:.6f}, {:.6f}], b_a = [{:.6f}, {:.6f}, {:.6f}], timestamp = {:.3f}",
             N,
-            state_.g().x(), state_.g().y(), state_.g().z(),
+            state_.g().x(), state_.g().y(), state_.g().z(), accel_avg.norm(),
             state_.b_g().x(), state_.b_g().y(), state_.b_g().z(),
             state_.b_a().x(), state_.b_a().y(), state_.b_a().z(),
             state_.timestamp());
         // clang-format on
+        spdlog::info("init cov: {}", as_eigen(state_.cov().block<6,6>(0, 0)));
     }
     EASY_VALUE("init_imu_count", N, EASY_UNIQUE_VIN);
 }
@@ -263,24 +257,21 @@ void Odometry::ProcessImuData(const SyncData& sync_data)
     Eigen::Vector3d gyro = Eigen::Vector3d::Zero();
     Eigen::Vector3d acc = Eigen::Vector3d::Zero();
     double dt = 0.0;
+    State::BundleInput input;
     EASY_VALUE("imu_segment_count", static_cast<int>(sync_data.imu_data.size()), EASY_UNIQUE_VIN);
     for (const auto& imu : sync_data.imu_data) {
         EASY_BLOCK("IntegrateImu", profiler::colors::Purple500);
-        if (last_imu.timestamp() == 0.0) {
+        dt = imu.timestamp() - state_.timestamp();
+        if (last_imu.timestamp() == 0.0 || dt <= 0.0) {
             last_imu = imu;
             continue;
         } else if (imu.timestamp() < sync_data.lidar_end_time) {
-            dt = imu.timestamp() - state_.timestamp();
-            if (dt <= 0.0) {
-                spdlog::error("Invalid IMU data timestamp, imu ts {:.3f}, state ts {:.3f}, dt {:.3f}", imu.timestamp(), state_.timestamp(), dt);
-                continue;
-            }
             gyro = 0.5 * (last_imu.angular_velocity() + imu.angular_velocity());
             acc = 0.5 * (last_imu.linear_acceleration() + imu.linear_acceleration());
             // 校正比例因子
             acc = acc / mean_acc_.norm() * 9.81;
 
-            const State::BundleInput input = {gyro, acc};
+            input = State::BundleInput{gyro, acc};
             state_.Predict(input, dt, imu.timestamp());
 
             last_imu = imu;
@@ -290,16 +281,28 @@ void Odometry::ProcessImuData(const SyncData& sync_data)
                 spdlog::error("Invalid IMU data timestamp, dt {:.3f}", dt);
                 continue;
             }
-            double dt_1 = imu.timestamp() - sync_data.lidar_end_time;
-            double dt_2 = sync_data.lidar_end_time - last_imu.timestamp();
-            double w1 = dt_1 / (dt_1 + dt_2);
-            double w2 = dt_2 / (dt_1 + dt_2);
-            gyro = w1 * last_imu.angular_velocity() + w2 * imu.angular_velocity();
-            acc = w1 * last_imu.linear_acceleration() + w2 * imu.linear_acceleration();
-            acc = acc / mean_acc_.norm() * 9.81;
+            // double dt_1 = imu.timestamp() - sync_data.lidar_end_time;
+            // double dt_2 = sync_data.lidar_end_time - last_imu.timestamp();
+            // double w1 = dt_1 / (dt_1 + dt_2);
+            // double w2 = dt_2 / (dt_1 + dt_2);
+            // gyro = w1 * last_imu.angular_velocity() + w2 * imu.angular_velocity();
+            // acc = w1 * last_imu.linear_acceleration() + w2 * imu.linear_acceleration();
+            // acc = acc / mean_acc_.norm() * 9.81;
 
-            const State::BundleInput input = {gyro, acc};
+            // const State::BundleInput input = {gyro, acc};
             state_.Predict(input, dt, sync_data.lidar_end_time);
+            spdlog::info(
+                "[state] predict pc ts: {:.3f}, pos: {:.6f} {:.6f} {:.6f}, quat: {:.6f} {:.6f} {:.6f} {:.6f}",
+                state_.timestamp(),
+                state_.p().x(),
+                state_.p().y(),
+                state_.p().z(),
+                state_.quat().x(),
+                state_.quat().y(),
+                state_.quat().z(),
+                state_.quat().w());
+
+            spdlog::info("predict cov: {}", as_eigen(state_.cov().block<6,6>(0, 0)));
             {
                 std::unique_lock<std::mutex> lock(state_mutex_);
                 lidar_state_buffer_.emplace_back(state_);
@@ -324,11 +327,6 @@ PointCloudType::Ptr Odometry::Deskew(const PointCloudType::ConstPtr& cloud, cons
 {
     EASY_FUNCTION(profiler::colors::Teal300);
     PointCloudType::Ptr deskewed_cloud = std::make_shared<PointCloudType>(*cloud);
-
-    const auto& config = Config::GetInstance();
-    Eigen::Isometry3d T_i_l = Eigen::Isometry3d::Identity();
-    T_i_l.linear() = config.mapping_params.extrinR;
-    T_i_l.translation() = config.mapping_params.extrinT;
     Eigen::Isometry3f TN = (state.isometry3d() * T_i_l).cast<float>();
 
     std::vector<int> indices(cloud->size());
@@ -388,12 +386,12 @@ void Odometry::GetLidarState(States& buffer)
     }
 }
 
-void Odometry::GetDeskewedCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
+void Odometry::GetMapCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
 {
     std::unique_lock<std::mutex> lock(state_mutex_);
     cloud_buffer.clear();
-    if (!deskewed_cloud_buffer_.empty()) {
-        cloud_buffer.swap(deskewed_cloud_buffer_);
+    if (!map_cloud_buffer_.empty()) {
+        cloud_buffer.swap(map_cloud_buffer_);
     }
 }
 
@@ -421,7 +419,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
 #elif defined(USE_OCTREE_CHARLIE) or defined(USE_IKDTREE)
     if (local_map_->size() == 0)
 #endif
-      return;
+        return;
 
     Matches first_matches;
 
@@ -435,7 +433,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
 
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
         const Eigen::Vector3d p = downsampled_cloud_->position(i).cast<double>();
-        const Eigen::Vector3d g = state_.isometry3d() * p;  // global coords
+        const Eigen::Vector3d g = state_.isometry3d() * T_i_l * p;  // global coords
 
         std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> neighbors;
         std::vector<float> pointSearchSqDis;
@@ -446,13 +444,13 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
 #elif defined(USE_IKDTREE)
         std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> cur_neighbors;
         ikdtreeNS::ikdTree_PointType curr_point(g.x(), g.y(), g.z());
-        local_map_->Nearest_Search(curr_point, 8, cur_neighbors, pointSearchSqDis);
+        local_map_->Nearest_Search(curr_point, 5, cur_neighbors, pointSearchSqDis);
         for (auto neighbor : cur_neighbors) {
             neighbors.emplace_back(Eigen::Vector3f(neighbor.x, neighbor.y, neighbor.z));
         }
 #endif
 
-        if (neighbors.size() < 8 or pointSearchSqDis.back() > 1.0) return;
+        if (neighbors.size() < 5 or pointSearchSqDis.back() > 5.0) return;
 
         Eigen::Vector4d p_abcd = Eigen::Vector4d::Zero();
         if (not EstimatePlane(p_abcd, neighbors, 0.1)) return;
@@ -466,9 +464,8 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
     for (int i = 0; i < N; i++) {
         if (chosen[i]) first_matches.emplace_back(matches[i]);
     }
-    
 
-    spdlog::info("First matches size: {}", first_matches.size());
+    spdlog::info("osb matches size: {}", first_matches.size());
 
     H = Eigen::MatrixXd::Zero(first_matches.size(), State::DoFObs);
     z = Eigen::MatrixXd::Zero(first_matches.size(), 1);
@@ -477,12 +474,13 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
     std::iota(indices.begin(), indices.end(), 0);
 
     // For each match, calculate its derivative and distance
+    std::atomic<double> residual_sum = 0.0;
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
         const Match m = first_matches[i];
 
         Eigen::Matrix3d J;  // Jacobian of R act.
-        const Eigen::Vector3d g = state_.ori_R().act(m.p, J) + state_.p();
-        const Eigen::Vector3d J_R = m.n.head(3).transpose() * J; // Jacobian of rot
+        const Eigen::Vector3d g = state_.ori_R().act(T_i_l * m.p, J) + state_.p();
+        const Eigen::Vector3d J_R = m.n.head(3).transpose() * J;  // Jacobian of rot
 
         H.block<1, State::DoFObs>(i, 0) << m.n.head(3).transpose(), J_R.transpose();
 
@@ -492,7 +490,10 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
         // LOG_EVERY_N(info, 1000, "manual_J_R: {} {} {} {}", i, manual_J_R(0), manual_J_R(1), manual_J_R(2));
 
         z(i) = -Match::Dist2Plane(m.n, g);
+        residual_sum.fetch_add(fabs(z(i)), std::memory_order_relaxed);
+        
     });  // end for_each
+    spdlog::info("Residual sum: {:.6f}", residual_sum.load());
 }
 
 // void Odometry::ICP()
@@ -531,7 +532,6 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
 
 //             Eigen::Vector3f target_point = neighbors[0];
 
-            
 //             Eigen::Vector3f source_point(downsampled_cloud_->position(idx));
 //             Eigen::Vector3d error = (curr_point - target_point).cast<double>();
 
@@ -599,19 +599,18 @@ void Odometry::RunOdometry()
                 Initialize(sync_data);
                 continue;
             }
+            spdlog::info("[Lidar] stamp: {:.3f}, size: {}", sync_data.lidar_beg_time, sync_data.lidar_data->size());
             ProcessImuData(sync_data);
             deskewed_cloud_ = Deskew(sync_data.lidar_data, state_, imu_state_buffer_);
             deskewed_cloud_buffer_.emplace_back(deskewed_cloud_->clone());
 
             downsampled_cloud_ = VoxelGridSamplingPstl<PointType>(deskewed_cloud_, 0.5);
-            downsampled_cloud_->transform(T_i_l);
-            
+            spdlog::info("[Lidar] downsize {}", downsampled_cloud_->size());
+
 #ifdef USE_IKDTREE
-            if(local_map_->Root_Node == nullptr)
-            {
-                if(downsampled_cloud_->size() > 5)
-                {
-                    downsampled_cloud_->transform(state_.isometry3d());
+            if (local_map_->Root_Node == nullptr) {
+                if (downsampled_cloud_->size() > 5) {
+                    downsampled_cloud_->transform(state_.isometry3d() * T_i_l);
                     std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> local_points;
                     auto ori_points = downsampled_cloud_->positions_vec3();
                     for (const auto point : ori_points) {
@@ -619,6 +618,7 @@ void Odometry::RunOdometry()
                         local_points.emplace_back(cur_point);
                     }
                     local_map_->Build(local_points);
+                    spdlog::info("build local map with {} points", local_points.size());
                 }
                 continue;
             }
@@ -626,8 +626,20 @@ void Odometry::RunOdometry()
 
             state_.Update();
             // ICP();
+            spdlog::info(
+                "[state] update pos: {:.6f} {:.6f} {:.6f}, quat: {:.6f} {:.6f} {:.6f} {:.6f}",
+                state_.p().x(),
+                state_.p().y(),
+                state_.p().z(),
+                state_.quat().x(),
+                state_.quat().y(),
+                state_.quat().z(),
+                state_.quat().w());
+            spdlog::info("update cov: {}", as_eigen(state_.cov().block<6,6>(0, 0)));
 
-            downsampled_cloud_->transform(state_.isometry3d());
+            downsampled_cloud_->transform(state_.isometry3d() * T_i_l);
+            deskewed_cloud_->transform(state_.isometry3d() * T_i_l);
+            map_cloud_buffer_.emplace_back(deskewed_cloud_->clone());
 
 #ifdef USE_OCTREE
             local_map_->Update(downsampled_cloud_->positions_vec3());
@@ -643,6 +655,7 @@ void Odometry::RunOdometry()
                 local_points.emplace_back(cur_point);
             }
             local_map_->Add_Points(local_points, true);
+            spdlog::info("local map add {} points", local_points.size());
 #endif
         }
 

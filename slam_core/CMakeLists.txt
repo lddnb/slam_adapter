@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(slam_core LANGUAGES CXX)
+project(slam_core LANGUAGES C CXX)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)

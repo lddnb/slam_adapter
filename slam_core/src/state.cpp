@@ -66,7 +66,7 @@ std::optional<Eigen::Isometry3d> State::Predict(double timestamp) const
     BundleState X_tmp = X.plus(f(gyro, acc) * dt);
     Eigen::Isometry3d res = Eigen::Isometry3d::Identity();
     res.translation() = X_tmp.element<0>().coeffs();
-    res.linear() = X_tmp.element<1>().quat().toRotationMatrix();
+    res.linear() = X_tmp.element<1>().rotation();
 
     return res;
 }
@@ -81,9 +81,7 @@ void State::Update()
     Eigen::Matrix<double, Eigen::Dynamic, 1>      z;
     ProcessMatrix KH;
 
-    double R = 0.0005;
-
-    int i(0);
+    double R = 0.001;
 
     for (int i = 0; i < 4; ++i) {
       h_model_(H, z); // Update H,z and set K to zeros
@@ -93,9 +91,9 @@ void State::Update()
       Tangent dx = X.minus(X_predicted, J); // Xu-2021, [https://arxiv.org/abs/2107.06829] Eq. (35)
 
       P = J.inverse() * P_predicted * J.inverse().transpose();
-
-      Eigen::Matrix<double, DoFObs, DoFObs> HTH = H.transpose() * H / R;
-      ProcessMatrix P_inv = P.inverse();
+      ProcessMatrix P_inv = (P / R).inverse();
+      Eigen::Matrix<double, DoFObs, DoFObs> HTH = H.transpose() * H;
+      
       P_inv.block<DoFObs, DoFObs>(0, 0) += HTH;
       P_inv = P_inv.inverse();
 
@@ -138,7 +136,6 @@ State::Tangent State::f(const Eigen::Vector3d& ang_vel, const Eigen::Vector3d& l
 State::ProcessMatrix State::df_dx(const BundleInput& imu) const
 {
     ProcessMatrix out = ProcessMatrix::Zero();
-    const Eigen::Vector3d& in_gyro = imu.element<0>().coeffs();
     const Eigen::Vector3d& in_acc = imu.element<1>().coeffs();
 
     // position
@@ -148,7 +145,7 @@ State::ProcessMatrix State::df_dx(const BundleInput& imu) const
     out.block<3, 3>(3, 9) = -Eigen::Matrix3d::Identity();  // w.r.t b_g
 
     // velocity
-    out.block<3, 3>(6, 3) = -R() * manif::skew(acc - b_a());  // w.r.t R
+    out.block<3, 3>(6, 3) = -R() * manif::skew(in_acc - b_a());  // w.r.t R
     out.block<3, 3>(6, 12) = -R();                            // w.r.t b_a
     out.block<3, 3>(6, 15) = Eigen::Matrix3d::Identity();     // w.r.t g
 

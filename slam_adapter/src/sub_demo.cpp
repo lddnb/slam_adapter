@@ -191,7 +191,7 @@ int main()
     auto scene_pub = std::make_shared<FBSPublisher<FoxgloveSceneUpdate>>(node, "/marker");
 
     std::vector<PointCloudType::Ptr> deskewed_clouds;
-    auto deskewed_cloud_pub = std::make_shared<FBSPublisher<FoxglovePointCloud>>(node, "/deskewed_cloud");
+    auto map_cloud_pub = std::make_shared<FBSPublisher<FoxglovePointCloud>>(node, "/cloud_registered");
 
     PointCloud<PointXYZDescriptor>::Ptr local_map;
     local_map = std::make_shared<PointCloud<PointXYZDescriptor>>();
@@ -246,18 +246,18 @@ int main()
         }
 
         // Deskewed cloud
-        odom->GetDeskewedCloud(deskewed_clouds);
+        odom->GetMapCloud(deskewed_clouds);
         for (const auto& cloud : deskewed_clouds) {
             if (!cloud) {
                 continue;
             }
-            if (BuildFoxglovePointCloud(*cloud, "livox_frame", fbb)) {
-                deskewed_cloud_pub->publish_from_builder(fbb);
+            if (BuildFoxglovePointCloud(*cloud, "odom", fbb)) {
+                map_cloud_pub->publish_from_builder(fbb);
             }
         }
 
         odom->GetLocalMap(local_map);
-        if (local_map && BuildFoxglovePointCloud(*local_map, "livox_frame", fbb)) {
+        if (local_map && BuildFoxglovePointCloud(*local_map, "odom", fbb)) {
             local_map_pub->publish_from_builder(fbb);
         }
 

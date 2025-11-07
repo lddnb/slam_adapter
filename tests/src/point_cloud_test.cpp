@@ -301,6 +301,33 @@ TEST_CASE("PointCloud TimestampAccess", "[PointCloud]")
     REQUIRE(const_cloud.timestamp(0) == 456ULL);
 }
 
+TEST_CASE("PointCloud SortByTimestamp", "[PointCloud]")
+{
+    // 构造乱序时间戳的点云数据
+    PointCloud<PointXYZITDescriptor> cloud;
+    cloud.push_back(PointXYZIT{1.0f, 1.0f, 1.0f, 10.0f, 3.0});
+    cloud.push_back(PointXYZIT{2.0f, 2.0f, 2.0f, 20.0f, 1.0});
+    cloud.push_back(PointXYZIT{3.0f, 3.0f, 3.0f, 30.0f, 2.0});
+
+    cloud.sort();
+
+    // 排序后验证所有字段同步重排
+    REQUIRE(cloud.timestamp(0) == Approx(1.0));
+    REQUIRE(cloud.position(0).x() == Approx(2.0f));
+    REQUIRE(cloud.intensity(0) == Approx(20.0f));
+
+    REQUIRE(cloud.timestamp(1) == Approx(2.0));
+    REQUIRE(cloud.position(1).x() == Approx(3.0f));
+    REQUIRE(cloud.intensity(1) == Approx(30.0f));
+
+    REQUIRE(cloud.timestamp(2) == Approx(3.0));
+    REQUIRE(cloud.position(2).x() == Approx(1.0f));
+    REQUIRE(cloud.intensity(2) == Approx(10.0f));
+
+    cloud.sort();
+    REQUIRE(cloud.timestamp(0) == Approx(1.0));
+}
+
 struct CustomPoint {
     Eigen::Vector3f position;
     float intensity;
