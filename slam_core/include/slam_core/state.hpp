@@ -31,12 +31,13 @@ class State
     static constexpr int DoF = BundleState::DoF;     // DoF whole state
     static constexpr int DoFNoise = 12;              // b_w, b_a, n_{b_w}, n_{b_a}
     static constexpr int DoFObs = BundleInput::DoF;  // DoF obsevation equation
+    static constexpr int DoFRes = 1;                 // DoF residual equation
 
     using ProcessMatrix = Eigen::Matrix<double, DoF, DoF>;
     using MappingMatrix = Eigen::Matrix<double, DoF, DoFNoise>;
     using NoiseMatrix = Eigen::Matrix<double, DoFNoise, DoFNoise>;
-    using ObsH = Eigen::Matrix<double, Eigen::Dynamic, State::DoFObs>;
-    using ObsZ = Eigen::Matrix<double, Eigen::Dynamic, 1>;
+    using ObsH = Eigen::Matrix<double, Eigen::Dynamic, DoFObs>;
+    using ObsZ = Eigen::Matrix<double, Eigen::Dynamic, DoFRes>;
 
     State();
     ~State() = default;

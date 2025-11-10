@@ -18,7 +18,13 @@ State::State() : stamp(-1.0)
         manif::R3d(cfg.mapping_params.gravity));      // g                     15
 
     P.setIdentity();
-    P *= 1e-3f;
+    // bg
+    P.block<3, 3>(9, 9).diagonal() << 0.0001, 0.0001, 0.0001;
+    // ba
+    P.block<3, 3>(12, 12).diagonal() << 0.001, 0.001, 0.001;
+    // g
+    P.block<3, 3>(15, 15).diagonal() << 0.00001, 0.00001, 0.00001;
+    // P *= 1e-3f;
 
     gyro.setZero();
     acc.setZero();
@@ -78,7 +84,7 @@ void State::Update()
     const ProcessMatrix P_predicted = P;
 
     Eigen::Matrix<double, Eigen::Dynamic, DoFObs> H;
-    Eigen::Matrix<double, Eigen::Dynamic, 1>      z;
+    Eigen::Matrix<double, Eigen::Dynamic, DoFRes> z;
     ProcessMatrix KH;
 
     double R = 0.001;
@@ -97,7 +103,7 @@ void State::Update()
       P_inv.block<DoFObs, DoFObs>(0, 0) += HTH;
       P_inv = P_inv.inverse();
 
-      Tangent Kz = P_inv.block<DoF, DoFObs>(0, 0) * H.transpose() * z / R;
+      Tangent Kz = P_inv.block<DoF, DoFObs>(0, 0) * H.transpose() * z;
 
       KH.setZero();
       KH.block<DoF, DoFObs>(0, 0) = P_inv.block<DoF, DoFObs>(0, 0) * HTH;

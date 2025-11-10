@@ -1,12 +1,15 @@
 #pragma once
 
-#define USE_IKDTREE
+#define USE_OCTREE
 
 #include <deque>
 #include <mutex>
 #include <thread>
 #include <atomic>
 
+#ifdef USE_PCL
+#include "slam_core/PCL.hpp"
+#endif
 #include "slam_core/imu.hpp"
 #include "slam_core/point_cloud.hpp"
 #include "slam_core/image.hpp"
@@ -26,6 +29,9 @@ using PointCloudType = PointCloud<PointType>;
 
 struct SyncData {
     PointCloudType::ConstPtr lidar_data;
+#ifdef USE_PCL
+    PointCloudT::ConstPtr pcl_lidar_data;
+#endif
     double lidar_beg_time;
     double lidar_end_time;
     Image image_data;
@@ -70,6 +76,14 @@ class Odometry
 
     // void ICP();
 
+#ifdef USE_PCL
+    void PCLAddLidarData(const PointCloudT::ConstPtr& lidar_data);
+
+    [[nodiscard]] PointCloudT::Ptr PCLDeskew(const PointCloudT::ConstPtr& cloud, const State& state, const States& buffer) const;
+
+    void GetPCLMapCloud(std::vector<PointCloudT::Ptr>& cloud_buffer);
+#endif
+
   private:
     std::deque<IMU> imu_buffer_;                         ///< imu缓存
     std::deque<PointCloudType::ConstPtr> lidar_buffer_;  ///< lidar缓存
@@ -99,7 +113,7 @@ class Odometry
     States lidar_state_buffer_;  ///< lidar时刻状态缓存
     bool initialized_;           ///< 是否初始化
 
-    Eigen::Vector3d mean_acc_;  ///< 平均加速度
+    double imu_scale_factor_;  ///< 平均加速度
     std::mutex state_mutex_;    ///< 状态互斥锁
 
     std::vector<PointCloudType::Ptr> map_cloud_buffer_;  ///< 同步数据列表
@@ -108,5 +122,12 @@ class Odometry
     PointCloudType::Ptr downsampled_cloud_;
 
     Eigen::Isometry3d T_i_l;
+
+#ifdef USE_PCL
+    std::deque<PointCloudT::ConstPtr> pcl_lidar_buffer_;
+    PointCloudT::Ptr pcl_deskewed_cloud_;
+    PointCloudT::Ptr pcl_downsampled_cloud_;
+    std::vector<PointCloudT::Ptr> pcl_map_cloud_buffer_;
+#endif
 };
 }  // namespace ms_slam::slam_core

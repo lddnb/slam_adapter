@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <memory>
 #include <vector>
 
@@ -14,6 +15,9 @@
 #include <slam_core/imu.hpp>
 #include <slam_core/point_cloud.hpp>
 #include <slam_core/point_types.hpp>
+#ifdef USE_PCL
+#include <slam_core/PCL.hpp>
+#endif
 
 namespace ms_slam::slam_adapter
 {
@@ -70,7 +74,8 @@ inline bool ConvertHesaiPointCloudMessage(
 
 inline bool ConvertLivoxPointCloudMessage(
     const foxglove::PointCloud& message,
-    const std::shared_ptr<slam_core::PointCloud<slam_core::PointXYZITDescriptor>>& cloud)
+    const std::shared_ptr<slam_core::PointCloud<slam_core::PointXYZITDescriptor>>& cloud,
+    const double blind_dist = 0.5)
 {
     if (!cloud) {
         return false;
@@ -79,7 +84,7 @@ inline bool ConvertLivoxPointCloudMessage(
     const auto data_buffer = message.data();
     const std::uint32_t stride = message.point_stride();
     const auto* stamp = message.timestamp();
-    if (!data_buffer || stride == 0 ||!stamp) {
+    if (!data_buffer || stride == 0 || !stamp) {
         cloud->clear();
         return false;
     }
@@ -119,15 +124,85 @@ inline bool ConvertLivoxPointCloudMessage(
         const uint8_t line = *reinterpret_cast<const uint8_t*>(data + line_offset);
         const double offset_time = static_cast<double>(*reinterpret_cast<const uint32_t*>(data + timestamp_offset)) / 1e9;
 
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) || !std::isfinite(intensity) ||
+            (x * x + y * y + z * z < blind_dist * blind_dist)) {
+            continue;
+        }
+
         cloud->push_back(slam_core::PointXYZIT(x, y, z, intensity, timestamp + offset_time));
     }
+    cloud->sort();
 
     return true;
 }
 
-inline bool DecodeCompressedImageMessage(
-    const foxglove::CompressedImage& message,
-    slam_core::Image& image_out)
+#ifdef USE_PCL
+struct LivoxPointRaw {
+    float x;
+    float y;
+    float z;
+    uint8_t reflectivity;
+    uint8_t tag;
+    uint8_t line;
+    uint8_t padding;
+    uint32_t offset_time;
+} __attribute__((packed));
+static_assert(sizeof(LivoxPointRaw) == 20, "Unexpected Livox point size");
+
+inline bool ConvertLivoxPointCloudMessagePCL(const foxglove::PointCloud& msg, PointCloudT& cloud)
+{
+    const auto* data = msg.data();
+    const uint32_t stride = msg.point_stride();
+    if (!data || stride == 0) {
+        return false;
+    }
+
+    const std::size_t point_count = data->size() / stride;
+    cloud.clear();
+    cloud.reserve(point_count);
+    cloud.header.frame_id = msg.frame_id() ? msg.frame_id()->str() : "";
+    cloud.width = static_cast<uint32_t>(point_count);
+    cloud.height = 1;
+    cloud.is_dense = false;
+
+    const std::uint8_t* raw_ptr = data->Data();
+    const double timestamp = msg.timestamp()->sec() + msg.timestamp()->nsec() * 1e-9;
+    for (std::size_t i = 0; i < point_count; ++i) {
+        LivoxPointRaw point{};
+        std::memcpy(&point, raw_ptr + i * stride, sizeof(LivoxPointRaw));
+        PointT pt{};
+        pt.x = point.x;
+        pt.y = point.y;
+        pt.z = point.z;
+        pt.intensity = static_cast<float>(point.reflectivity);
+        pt.timestamp = timestamp + static_cast<double>(point.offset_time) * 1e-9;
+
+        cloud.push_back(pt);
+    }
+
+    cloud.width = static_cast<uint32_t>(cloud.size());
+    cloud.height = 1;
+
+    std::vector<int> indices;
+    pcl::removeNaNFromPointCloud(cloud, cloud, indices);
+
+    if (!cloud.points.empty()) {
+        auto minmax = std::minmax_element(cloud.points.begin(), cloud.points.end(), [](const PointT& p1, const PointT& p2) {
+            return p1.timestamp > p2.timestamp;
+        });
+        if (minmax.first != cloud.points.begin()) {
+            std::iter_swap(minmax.first, cloud.points.begin());
+        }
+        if (minmax.second != cloud.points.end() - 1) {
+            std::iter_swap(minmax.second, cloud.points.end() - 1);
+        }
+    }
+
+    return !cloud.points.empty();
+}
+#endif
+
+inline bool DecodeCompressedImageMessage(const foxglove::CompressedImage& message, slam_core::Image& image_out)
 {
     const auto* raw = message.data();
     const auto* stamp = message.timestamp();

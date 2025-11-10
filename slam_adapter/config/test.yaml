@@ -1,5 +1,5 @@
 common:
-    render_en: true
+    render_en: false
     dense_pc:  false  # publish dense pointcloud
     fisheye_en: true
     apriltag_en: false
@@ -29,6 +29,7 @@ preprocess:
     scan_line: 4
     timestamp_unit: 1           # the unit of time/t field in the PointCloud2 rostopic: 0-second, 1-milisecond, 2-microsecond, 3-nanosecond.
     blind: 0.3
+    point_filter_num: 3
 
 mapping:
     start_in_aggressive_motion: false # if true, a preknown gravity should be provided in following gravity_init

@@ -45,7 +45,7 @@ struct LoggerConfig {
     size_t max_files = 5;
 
     /// 自定义日志格式
-    std::string log_pattern = "[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] [%g:%#] %v";
+    std::string log_pattern = "[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] [%s:%#] %v";
 };
 
 /**

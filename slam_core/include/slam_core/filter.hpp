@@ -13,16 +13,31 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <utility>
 #include <vector>
 
 #include <spdlog/spdlog.h>
 #include <Eigen/Core>
+#include <Eigen/Geometry>
 
 #include "slam_core/point_cloud.hpp"
 
 namespace ms_slam::slam_core
 {
+
+/**
+ * @brief 点云滤波器参数集合
+ */
+struct LidarFilterOptions
+{
+    bool distance_active{false};              ///< 是否启用距离滤波
+    double min_distance{0.0};                 ///< 最近允许距离（米）
+    bool rate_active{false};                  ///< 是否启用速率采样
+    std::size_t sampling_stride{1};           ///< 点云保留步长
+    bool fov_active{false};                   ///< 是否启用视场裁剪
+    double half_angle_rad{3.141592653589793}; ///< 允许的视场半角（弧度）
+};
 
 /**
  * @brief 计算三维坐标的快速向下取整结果
@@ -207,6 +222,85 @@ void write_voxel_average(PointCloud<Descriptor>& cloud, std::size_t index, const
 }
 
 }  // namespace detail
+
+/**
+ * @brief 结合距离、速率与视场约束的点云滤波
+ * @tparam Descriptor 点云描述符类型
+ * @param cloud 输入点云
+ * @param options 滤波器配置
+ * @return 过滤后的点云
+ */
+template <typename Descriptor>
+typename PointCloud<Descriptor>::Ptr
+ApplyLidarFilters(const typename PointCloud<Descriptor>::ConstPtr& cloud, const LidarFilterOptions& options)
+{
+    using Cloud = PointCloud<Descriptor>;
+    if (!cloud) {
+        spdlog::error("ApplyLidarFilters received null cloud pointer.");
+        return std::make_shared<Cloud>();
+    }
+    if (cloud->empty()) {
+        return std::make_shared<Cloud>();
+    }
+
+    const bool distance_enabled = options.distance_active && options.min_distance > 0.0;
+    const float min_distance_sq =
+        distance_enabled ? static_cast<float>(options.min_distance * options.min_distance) : 0.0F;
+
+    const std::size_t stride = options.sampling_stride == 0 ? 1 : options.sampling_stride;
+    const bool rate_enabled = options.rate_active && stride > 1;
+
+    const bool fov_enabled = options.fov_active && options.half_angle_rad > 0.0;
+    const float half_angle = static_cast<float>(options.half_angle_rad);
+
+    const std::size_t point_count = cloud->size();
+    std::vector<std::size_t> indices(point_count);
+    std::iota(indices.begin(), indices.end(), 0);
+
+    std::vector<std::size_t> kept_indices(point_count);
+    std::atomic_size_t kept_count{0};
+
+    // 并行遍历所有点并评估滤波条件
+    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](std::size_t idx) {
+        bool pass = true;
+        const auto position = cloud->position(idx);
+        Eigen::Vector3f lidar_point = position.template cast<float>();
+
+        if (distance_enabled) {
+            const float norm_sq = lidar_point.squaredNorm();
+            if (norm_sq <= min_distance_sq) {
+                pass = false;
+            }
+        }
+
+        if (pass && rate_enabled) {
+            if (idx % stride != 0) {
+                pass = false;
+            }
+        }
+
+        if (pass && fov_enabled) {
+            const float azimuth = std::atan2(lidar_point.y(), lidar_point.x());
+            if (std::fabs(azimuth) >= half_angle) {
+                pass = false;
+            }
+        }
+
+        if (pass) {
+            const std::size_t slot = kept_count.fetch_add(1, std::memory_order_relaxed);
+            kept_indices[slot] = idx;
+        }
+    });
+
+    const std::size_t valid_count = kept_count.load(std::memory_order_relaxed);
+    if (valid_count == 0) {
+        return std::make_shared<Cloud>();
+    }
+    kept_indices.resize(valid_count);
+
+    auto filtered = std::make_shared<Cloud>(cloud->extract(kept_indices));
+    return filtered;
+}
 
 /**
  * @brief 使用 OpenMP 对点云执行体素降采样

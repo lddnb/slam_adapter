@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(slam_adapter LANGUAGES CXX)
+project(slam_adapter LANGUAGES C CXX)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
@@ -20,6 +20,11 @@ find_package(slam_core REQUIRED)
 find_package(slam_common REQUIRED)
 find_package(mcap REQUIRED)
 find_package(yaml-cpp REQUIRED)
+
+get_target_property(_defs slam_core::slam_core INTERFACE_COMPILE_DEFINITIONS)
+if("USE_PCL" IN_LIST _defs)
+find_package(PCL REQUIRED COMPONENTS common filters io)
+endif()
 
 add_executable(sub_demo src/sub_demo.cpp)
 target_include_directories(sub_demo PRIVATE

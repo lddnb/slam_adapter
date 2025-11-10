@@ -72,20 +72,30 @@ int main()
     LoadConfigFromFile("../config/test.yaml");
     LogConfig();
     const auto& config_inst = Config::GetInstance();
+    const double blind_dist = config_inst.common_params.blind;
 
     auto odom = std::make_unique<Odometry>();
     auto processed_image_pub = std::make_shared<FBSPublisher<FoxgloveCompressedImage>>(node, "/camera/image_processed");
 
     std::atomic<int> pc_received_count{0};
-    auto pc_callback = [&pc_received_count, &odom](const FoxglovePointCloud& pc_wrapper) {
+    auto pc_callback = [&pc_received_count, &odom, blind_dist](const FoxglovePointCloud& pc_wrapper) {
         EASY_BLOCK("pc_cb", profiler::colors::Green);
         pc_received_count++;
 
         // Get native Foxglove PointCloud pointer (zero-copy)
         const foxglove::PointCloud* pc = pc_wrapper.get();
 
+#ifdef USE_PCL
+        auto pcl_cloud = std::make_shared<PointCloudT>();
+        if (!ConvertLivoxPointCloudMessagePCL(*pc, *pcl_cloud)) {
+            spdlog::warn("Failed to convert point cloud message to PCL cloud");
+            return;
+        }
+        odom->PCLAddLidarData(pcl_cloud);
+#endif
+
         auto cloud = std::make_shared<PointCloud<PointXYZITDescriptor>>();
-        if (!ConvertLivoxPointCloudMessage(*pc, cloud)) {
+        if (!ConvertLivoxPointCloudMessage(*pc, cloud, blind_dist)) {
             spdlog::warn("Failed to convert point cloud message");
             return;
         }
@@ -201,7 +211,7 @@ int main()
     auto path_pub = std::make_shared<FBSPublisher<FoxglovePosesInFrame>>(node, "/path");
 
     while (!shouldExit.load()) {
-        EASY_BLOCK("Adaprer Publish", profiler::colors::Orange);
+        EASY_BLOCK("Adapter Publish", profiler::colors::Orange);
         // Get latest states from the odometry
         odom->GetLidarState(lidar_states_buffer);
 

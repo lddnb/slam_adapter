@@ -12,9 +12,10 @@ namespace ms_slam::slam_core
 struct Match {
     Eigen::Vector3d p;
     Eigen::Vector4d n;  // global normal vector
+    double dist2plane;
 
     Match() = default;
-    Match(const Eigen::Vector3d& p_, const Eigen::Vector4d& n_) : p(p_), n(n_){};
+    Match(const Eigen::Vector3d& p_, const Eigen::Vector4d& n_, const double dist) : p(p_), n(n_), dist2plane(dist){};
 
     inline static double Dist2Plane(const Eigen::Vector4d& normal, const Eigen::Vector3d& point) { return normal.head<3>().dot(point) + normal(3); }
 };

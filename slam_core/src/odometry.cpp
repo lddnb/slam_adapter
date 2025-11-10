@@ -108,16 +108,22 @@ std::vector<SyncData> Odometry::SyncPackages()
     std::unique_lock<std::mutex> lock(data_mutex_);
 
     while (!lidar_buffer_.empty()) {
+#ifdef USE_PCL
+        if (pcl_lidar_buffer_.empty()) break;
+        const auto& pcl_cloud = pcl_lidar_buffer_.front();
+#endif
+
         const auto& lidar_cloud = lidar_buffer_.front();
         const auto timestamps = lidar_cloud->field_view<TimestampTag>();
 
-        if (timestamps.empty()) {
-            lidar_buffer_.pop_front();
-            continue;
-        }
-
         const double lidar_beg_time = timestamps.front();
         const double lidar_end_time = timestamps.back();
+
+#ifdef USE_PCL
+        const double pcl_beg_time = pcl_cloud->points.front().timestamp;
+        const double pcl_end_time = pcl_cloud->points.back().timestamp;
+        CHECK(lidar_beg_time - pcl_beg_time < 1e-6 && pcl_end_time - lidar_end_time < 1e-6);
+#endif
 
         if (imu_buffer_.empty()) {
             break;
@@ -129,6 +135,9 @@ std::vector<SyncData> Odometry::SyncPackages()
             const double gap = first_imu_time - lidar_beg_time;
             spdlog::warn("Discard lidar frame at {:.3f}s: earliest IMU {:.3f}s, gap {:.3f}s exceeds tolerance", lidar_beg_time, first_imu_time, gap);
             lidar_buffer_.pop_front();
+#ifdef USE_PCL
+            pcl_lidar_buffer_.pop_front();
+#endif
             continue;
         }
         if (imu_buffer_.back().timestamp() < lidar_end_time) {
@@ -137,6 +146,9 @@ std::vector<SyncData> Odometry::SyncPackages()
 
         SyncData sync_data;
         sync_data.lidar_data = lidar_cloud;
+#ifdef USE_PCL
+        sync_data.pcl_lidar_data = pcl_cloud;
+#endif
         sync_data.lidar_beg_time = lidar_beg_time;
         sync_data.lidar_end_time = lidar_end_time;
 
@@ -199,6 +211,9 @@ std::vector<SyncData> Odometry::SyncPackages()
             imu_buffer_.erase(imu_buffer_.begin(), imu_buffer_.begin() + static_cast<std::ptrdiff_t>(imu_consumed - 2));
         }
         lidar_buffer_.pop_front();
+#ifdef USE_PCL
+        pcl_lidar_buffer_.pop_front();
+#endif
         sync_data_list.emplace_back(std::move(sync_data));
     }
 
@@ -213,7 +228,8 @@ void Odometry::Initialize(const SyncData& sync_data)
     static Eigen::Vector3d accel_avg(0., 0., 0.);
     static double last_imu_stamp = 0.0;
 
-    for (const auto& imu_data : sync_data.imu_data) {
+    for (size_t i = 0; i < sync_data.imu_data.size() - 1; ++i) {
+        const auto& imu_data = sync_data.imu_data[i];
         if (N == 0) {
             gyro_avg += imu_data.angular_velocity();
             accel_avg += imu_data.linear_acceleration();
@@ -230,17 +246,17 @@ void Odometry::Initialize(const SyncData& sync_data)
         Eigen::Vector3d grav_vec = accel_avg.normalized() * 9.809;
         state_.g(-grav_vec);
         state_.b_g(gyro_avg);
-        state_.b_a(accel_avg - grav_vec);
+        // state_.b_a(accel_avg - grav_vec);
         state_.timestamp(last_imu_stamp);
         imu_state_buffer_.emplace_back(state_);
-        mean_acc_ = accel_avg;
+        imu_scale_factor_ = 9.809 / accel_avg.norm();
         initialized_ = true;
 
         // clang-format off
         spdlog::info(
-            "Initialize with {} IMU:g = [{:.6f}, {:.6f}, {:.6f}], mean_acc_ = {:.6f},  b_g = [{:.6f}, {:.6f}, {:.6f}], b_a = [{:.6f}, {:.6f}, {:.6f}], timestamp = {:.3f}",
+            "Initialize with {} IMU:g = [{:.6f}, {:.6f}, {:.6f}], imu_scale_factor_ = {:.6f},  b_g = [{:.6f}, {:.6f}, {:.6f}], b_a = [{:.6f}, {:.6f}, {:.6f}], timestamp = {:.3f}",
             N,
-            state_.g().x(), state_.g().y(), state_.g().z(), accel_avg.norm(),
+            state_.g().x(), state_.g().y(), state_.g().z(), imu_scale_factor_,
             state_.b_g().x(), state_.b_g().y(), state_.b_g().z(),
             state_.b_a().x(), state_.b_a().y(), state_.b_a().z(),
             state_.timestamp());
@@ -269,7 +285,7 @@ void Odometry::ProcessImuData(const SyncData& sync_data)
             gyro = 0.5 * (last_imu.angular_velocity() + imu.angular_velocity());
             acc = 0.5 * (last_imu.linear_acceleration() + imu.linear_acceleration());
             // 校正比例因子
-            acc = acc / mean_acc_.norm() * 9.81;
+            acc = acc * imu_scale_factor_;
 
             input = State::BundleInput{gyro, acc};
             state_.Predict(input, dt, imu.timestamp());
@@ -287,7 +303,7 @@ void Odometry::ProcessImuData(const SyncData& sync_data)
             // double w2 = dt_2 / (dt_1 + dt_2);
             // gyro = w1 * last_imu.angular_velocity() + w2 * imu.angular_velocity();
             // acc = w1 * last_imu.linear_acceleration() + w2 * imu.linear_acceleration();
-            // acc = acc / mean_acc_.norm() * 9.81;
+            // acc = acc * imu_scale_factor_;
 
             // const State::BundleInput input = {gyro, acc};
             state_.Predict(input, dt, sync_data.lidar_end_time);
@@ -377,6 +393,97 @@ PointCloudType::Ptr Odometry::Deskew(const PointCloudType::ConstPtr& cloud, cons
     return deskewed_cloud;
 }
 
+#ifdef USE_PCL
+void Odometry::PCLAddLidarData(const PointCloudT::ConstPtr& lidar_data)
+{
+    std::unique_lock<std::mutex> lock(data_mutex_);
+    pcl_lidar_buffer_.emplace_back(lidar_data);
+}
+
+PointCloudT::Ptr Odometry::PCLDeskew(const PointCloudT::ConstPtr& cloud, const State& state, const States& buffer) const
+{
+    EASY_FUNCTION(profiler::colors::Teal900);
+    if (!cloud) {
+        spdlog::warn("PCLDeskew received null cloud");
+        return PointCloudT::Ptr(new PointCloudT);
+    }
+
+    PointCloudT::Ptr deskewed_cloud(new PointCloudT);
+    *deskewed_cloud = *cloud;
+
+    if (cloud->points.empty()) {
+        return deskewed_cloud;
+    }
+
+    const auto& config = Config::GetInstance();
+    Eigen::Isometry3d T_i_l_local = Eigen::Isometry3d::Identity();
+    T_i_l_local.linear() = config.mapping_params.extrinR;
+    T_i_l_local.translation() = config.mapping_params.extrinT;
+    Eigen::Isometry3f TN = (state.isometry3d() * T_i_l_local).cast<float>();
+
+    // 守护时间范围，避免插值越界
+    if (cloud->points.front().timestamp < buffer.front().timestamp()) {
+        spdlog::error(
+            "PCL cloud timestamp is earlier than buffer timestamp, cloud ts {:.3f}, buffer ts {:.3f}",
+            cloud->points.front().timestamp,
+            buffer.front().timestamp());
+    } else if (cloud->points.back().timestamp > buffer.back().timestamp()) {
+        spdlog::error(
+            "PCL cloud timestamp is later than buffer timestamp, cloud ts {:.3f}, buffer ts {:.3f}",
+            cloud->points.back().timestamp,
+            buffer.back().timestamp());
+    }
+
+    std::vector<std::size_t> indices(cloud->points.size());
+    std::iota(indices.begin(), indices.end(), 0);
+
+    EASY_BLOCK("DeskewPointsPCL", profiler::colors::BlueGrey300);
+    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](std::size_t k) {
+        const double point_time = cloud->points[k].timestamp;
+
+        // 查找包络状态用于线性插值
+        auto it = std::lower_bound(buffer.begin(), buffer.end(), point_time, [](const State& state_item, double target_time) {
+            return state_item.timestamp() < target_time;
+        });
+
+        if (it == buffer.end()) {
+            spdlog::error("Lower bound search failed for time {:.3f} (PCL)", point_time);
+            return;
+        }
+
+        const State& reference_state = (it->timestamp() == point_time) ? *it : *std::prev(it);
+
+        auto predicted_state = reference_state.Predict(point_time);
+        if (!predicted_state) {
+            spdlog::error("Failed to predict PCL point at time {:.3f}", point_time);
+            return;
+        }
+
+        // 计算点云在标定框架下的去畸变坐标
+        Eigen::Isometry3f T0 = (predicted_state.value() * T_i_l_local).cast<float>();
+
+        Eigen::Vector3f p(cloud->points[k].x, cloud->points[k].y, cloud->points[k].z);
+        Eigen::Vector3f deskewed = TN.inverse() * T0 * p;
+
+        auto& dst = deskewed_cloud->points[k];
+        dst.x = deskewed.x();
+        dst.y = deskewed.y();
+        dst.z = deskewed.z();
+    });
+
+    return deskewed_cloud;
+}
+
+void Odometry::GetPCLMapCloud(std::vector<PointCloudT::Ptr>& cloud_buffer)
+{
+    std::unique_lock<std::mutex> lock(state_mutex_);
+    cloud_buffer.clear();
+    if (!pcl_map_cloud_buffer_.empty()) {
+        cloud_buffer.swap(pcl_map_cloud_buffer_);
+    }
+}
+#endif
+
 void Odometry::GetLidarState(States& buffer)
 {
     std::unique_lock<std::mutex> lock(state_mutex_);
@@ -405,7 +512,7 @@ void Odometry::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
     local_map->append(local_points_);
 #elif defined(USE_IKDTREE)
     std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>>().swap(local_map_->PCL_Storage);
-    local_map_->flatten(local_map_->Root_Node, local_map_->PCL_Storage, ikdtreeNS::NOT_RECORD);
+    // local_map_->flatten(local_map_->Root_Node, local_map_->PCL_Storage, ikdtreeNS::NOT_RECORD);
     local_map->clear();
     local_map->append(local_map_->PCL_Storage);
 #endif
@@ -431,6 +538,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
     std::vector<int> indices(N);
     std::iota(indices.begin(), indices.end(), 0);
 
+    EASY_BLOCK("ours_matching", profiler::colors::BlueGrey500);
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
         const Eigen::Vector3d p = downsampled_cloud_->position(i).cast<double>();
         const Eigen::Vector3d g = state_.isometry3d() * T_i_l * p;  // global coords
@@ -455,9 +563,63 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
         Eigen::Vector4d p_abcd = Eigen::Vector4d::Zero();
         if (not EstimatePlane(p_abcd, neighbors, 0.1)) return;
 
-        chosen[i] = true;
-        matches[i] = Match(p, p_abcd);
+        double dist = p_abcd.head<3>().dot(g) + p_abcd(3);
+
+        float s = 1 - 0.9 * fabs(dist) / sqrt(p.norm());
+        if (s > 0.9) {
+            chosen[i] = true;
+            matches[i] = Match(p, p_abcd, dist);
+        }
     });  // end for_each
+    EASY_END_BLOCK;
+
+#ifdef USE_PCL
+    EASY_BLOCK("PCL_MATCHING", profiler::colors::BlueGrey300);
+    if (pcl_downsampled_cloud_ && !pcl_downsampled_cloud_->empty()) {
+        std::vector<int> pcl_indices(static_cast<int>(pcl_downsampled_cloud_->size()));
+        std::iota(pcl_indices.begin(), pcl_indices.end(), 0);
+        std::atomic<std::size_t> pcl_match_count{0};
+
+        std::for_each(std::execution::par_unseq, pcl_indices.begin(), pcl_indices.end(), [&](int idx) {
+            const auto& pcl_point = pcl_downsampled_cloud_->points[static_cast<std::size_t>(idx)];
+            const Eigen::Vector3d p = Eigen::Vector3d(pcl_point.x, pcl_point.y, pcl_point.z);
+            const Eigen::Vector3d g = state_.isometry3d() * T_i_l * p;
+
+            std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> neighbors;
+            std::vector<float> pointSearchSqDis;
+#ifdef USE_OCTREE
+            local_map_->KnnSearch(g.cast<float>(), 8, neighbors, pointSearchSqDis);
+#elif defined(USE_OCTREE_CHARLIE)
+            local_map_->knn(g.cast<float>(), 8, neighbors, pointSearchSqDis);
+#elif defined(USE_IKDTREE)
+            std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> cur_neighbors;
+            ikdtreeNS::ikdTree_PointType curr_point(g.x(), g.y(), g.z());
+            local_map_->Nearest_Search(curr_point, 5, cur_neighbors, pointSearchSqDis);
+            for (auto neighbor : cur_neighbors) {
+                neighbors.emplace_back(Eigen::Vector3f(neighbor.x, neighbor.y, neighbor.z));
+            }
+#endif
+
+            // 记录PCL管线下的近邻命中情况
+            if (neighbors.size() < 5 || pointSearchSqDis.empty() || pointSearchSqDis.back() > 5.0f) {
+                return;
+            }
+
+            Eigen::Vector4d p_abcd = Eigen::Vector4d::Zero();
+            if (not EstimatePlane(p_abcd, neighbors, 0.1)) return;
+
+            // chosen[idx] = true;
+            // matches[idx] = Match(p, p_abcd);
+
+            pcl_match_count.fetch_add(1, std::memory_order_relaxed);
+        });
+
+        spdlog::info("PCL candidate matches size: {}", pcl_match_count.load());
+    } else {
+        spdlog::warn("PCL downsampled cloud unavailable for ObsModel");
+    }
+    EASY_END_BLOCK;
+#endif
 
     first_matches.clear();
 
@@ -489,7 +651,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
         // LOG_EVERY_N(info, 1000, "manual_J_t: {} {} {} {}", i, m.n(0), m.n(1), m.n(2));
         // LOG_EVERY_N(info, 1000, "manual_J_R: {} {} {} {}", i, manual_J_R(0), manual_J_R(1), manual_J_R(2));
 
-        z(i) = -Match::Dist2Plane(m.n, g);
+        z(i) = -m.dist2plane;
         residual_sum.fetch_add(fabs(z(i)), std::memory_order_relaxed);
         
     });  // end for_each
@@ -575,6 +737,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
 void Odometry::RunOdometry()
 {
     EASY_THREAD_SCOPE("OdometryThread");
+    const auto& cfg = Config::GetInstance();
     while (running_) {
         std::vector<SyncData> sync_data_list = SyncPackages();
         if (!sync_data_list.empty()) {
@@ -602,10 +765,21 @@ void Odometry::RunOdometry()
             spdlog::info("[Lidar] stamp: {:.3f}, size: {}", sync_data.lidar_beg_time, sync_data.lidar_data->size());
             ProcessImuData(sync_data);
             deskewed_cloud_ = Deskew(sync_data.lidar_data, state_, imu_state_buffer_);
-            deskewed_cloud_buffer_.emplace_back(deskewed_cloud_->clone());
-
+            LidarFilterOptions options{.rate_active = true, .sampling_stride = static_cast<std::size_t>(cfg.common_params.point_filter_num)};
+            deskewed_cloud_ = ApplyLidarFilters<PointType>(deskewed_cloud_, options);
             downsampled_cloud_ = VoxelGridSamplingPstl<PointType>(deskewed_cloud_, 0.5);
             spdlog::info("[Lidar] downsize {}", downsampled_cloud_->size());
+
+#ifdef USE_PCL
+            pcl_deskewed_cloud_ = PCLDeskew(sync_data.pcl_lidar_data, state_, imu_state_buffer_);
+            pcl::VoxelGrid<PointT> voxel_grid;
+            voxel_grid.setInputCloud(pcl_deskewed_cloud_);
+            voxel_grid.setLeafSize(0.5f, 0.5f, 0.5f);
+            pcl_downsampled_cloud_ = PointCloudT::Ptr(new PointCloudT);
+            voxel_grid.filter(*pcl_downsampled_cloud_);
+            const Eigen::Matrix4f TiL = T_i_l.matrix().cast<float>();
+            spdlog::info("[PCL Lidar] downsize {}", pcl_downsampled_cloud_->size());
+#endif
 
 #ifdef USE_IKDTREE
             if (local_map_->Root_Node == nullptr) {
@@ -640,6 +814,15 @@ void Odometry::RunOdometry()
             downsampled_cloud_->transform(state_.isometry3d() * T_i_l);
             deskewed_cloud_->transform(state_.isometry3d() * T_i_l);
             map_cloud_buffer_.emplace_back(deskewed_cloud_->clone());
+
+#ifdef USE_PCL
+            // 将PCL降采样结果同样映射到世界坐标系
+            const Eigen::Matrix4f state_transform = (state_.isometry3d() * T_i_l).matrix().cast<float>();
+            pcl::transformPointCloud(*pcl_deskewed_cloud_, *pcl_deskewed_cloud_, state_transform);
+            PointCloudT::Ptr pcl_clone(new PointCloudT(*pcl_deskewed_cloud_));
+            pcl_map_cloud_buffer_.emplace_back(pcl_clone);
+            
+#endif
 
 #ifdef USE_OCTREE
             local_map_->Update(downsampled_cloud_->positions_vec3());

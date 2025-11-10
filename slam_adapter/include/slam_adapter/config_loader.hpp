@@ -198,6 +198,8 @@ inline void FillCommonParams(const YAML::Node& root, slam_core::CommonParams& co
 
     if (const auto preprocess_node = root["preprocess"]) {
         AssignIfPresent(preprocess_node, "lidar_type", common.lidar_type);
+        AssignIfPresent(preprocess_node, "blind", common.blind);
+        AssignIfPresent(preprocess_node, "point_filter_num", common.point_filter_num);
     }
 
     if (const auto publish_node = root["publish"]) {
@@ -348,6 +350,8 @@ inline void LogConfig()
     spdlog::info("[Config] Common.scan_body_pub_en: {}", common.scan_body_pub_en);
     spdlog::info("[Config] Common.opt_map_pub_en: {}", common.opt_map_pub_en);
     spdlog::info("[Config] Common.lidar_type: {}", common.lidar_type);
+    spdlog::info("[Config] Common.blind: {}", common.blind);
+    spdlog::info("[Config] Common.point_filter_num: {}", common.point_filter_num);
     spdlog::info("[Config] Common.render_en: {}", common.render_en);
     spdlog::info("[Config] Common.dense_pc: {}", common.dense_pc);
 

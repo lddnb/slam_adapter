@@ -19,6 +19,8 @@ struct CommonParams {
     int lidar_type;
     bool render_en;  ///< 点云着色flag
     bool dense_pc;   ///< 发布稠密点云flag
+    float blind;
+    int point_filter_num;
 };
 
 struct MappingParams {

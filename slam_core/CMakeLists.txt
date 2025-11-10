@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_BUILD_TYPE RelWithDebInfo)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+option(USE_PCL "Use PCL library" OFF)
+
 # Find Eigen3
 find_package(Eigen3 3.4 REQUIRED)
 find_package(spdlog REQUIRED)
@@ -45,6 +47,12 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
     easy_profiler
 )
 target_compile_definitions(${PROJECT_NAME} PUBLIC BUILD_WITH_EASY_PROFILER)
+if(USE_PCL)
+    find_package(PCL REQUIRED COMPONENTS common filters io)
+    target_include_directories(${PROJECT_NAME} PUBLIC ${PCL_INCLUDE_DIRS})
+    target_link_libraries(${PROJECT_NAME} PUBLIC ${PCL_LIBRARIES})
+    target_compile_definitions(${PROJECT_NAME} PUBLIC PCL_NO_PRECOMPILE USE_PCL)
+endif()
 
 # ============================================================================
 # Installation
