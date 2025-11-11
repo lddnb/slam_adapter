@@ -39,6 +39,8 @@ Odometry::Odometry()
 #elif defined(USE_IKDTREE)
     local_map_ = std::make_unique<ikdtreeNS::KD_TREE<ikdtreeNS::ikdTree_PointType>>();
     local_map_->set_downsample_param(0.5);
+#elif defined(USE_VDB)
+    local_map_ = std::make_unique<VDBMap>(0.5, 100, 10);
 #endif
     deskewed_cloud_ = std::make_shared<PointCloudType>();
     downsampled_cloud_ = std::make_shared<PointCloudType>();
@@ -243,13 +245,50 @@ void Odometry::Initialize(const SyncData& sync_data)
         last_imu_stamp = imu_data.timestamp();
     }
     if (N >= 100) {
-        Eigen::Vector3d grav_vec = accel_avg.normalized() * 9.809;
-        state_.g(-grav_vec);
+        const auto& cfg = Config::GetInstance();
+        const Eigen::Vector3d gravity_world = cfg.mapping_params.gravity;
+        const double gravity_norm = gravity_world.norm();
+
         state_.b_g(gyro_avg);
-        // state_.b_a(accel_avg - grav_vec);
+
+        imu_scale_factor_ = gravity_norm / accel_avg.norm();
+        const Eigen::Vector3d tmp_gravity = -accel_avg * imu_scale_factor_;
+
+        if (cfg.mapping_params.gravity_align) {
+            Eigen::Matrix3d hat_grav = -manif::skew(gravity_world);
+
+            const double ref_norm = gravity_world.norm();
+            const double tmp_norm = tmp_gravity.norm();
+            const double align_norm = (hat_grav * tmp_gravity).norm() / (tmp_norm * ref_norm);
+            double align_cos = gravity_world.dot(tmp_gravity) / (tmp_norm * ref_norm);
+            align_cos = std::clamp(align_cos, -1.0, 1.0);
+
+            Eigen::Matrix3d rot = Eigen::Matrix3d::Identity();
+            if (align_norm < 1e-6) {
+                if (align_cos <= 1e-6) {
+                    rot = -Eigen::Matrix3d::Identity();
+                }
+            } else {
+                Eigen::Vector3d axis = hat_grav * tmp_gravity;
+                const double axis_norm = axis.norm();
+                if (axis_norm > 1e-9) {
+                    axis /= axis_norm;
+                    const double angle = std::acos(align_cos);
+                    Eigen::AngleAxisd angle_axis(angle, axis);
+                    rot = angle_axis.toRotationMatrix();
+                }
+            }
+            Eigen::Quaterniond dq(rot);
+            state_.quat(dq.normalized());
+            state_.g(gravity_world);
+        } else {
+            state_.g(tmp_gravity);
+        }
+
+        // state_.b_a(bias_a);
+
         state_.timestamp(last_imu_stamp);
         imu_state_buffer_.emplace_back(state_);
-        imu_scale_factor_ = 9.809 / accel_avg.norm();
         initialized_ = true;
 
         // clang-format off
@@ -297,15 +336,16 @@ void Odometry::ProcessImuData(const SyncData& sync_data)
                 spdlog::error("Invalid IMU data timestamp, dt {:.3f}", dt);
                 continue;
             }
-            // double dt_1 = imu.timestamp() - sync_data.lidar_end_time;
-            // double dt_2 = sync_data.lidar_end_time - last_imu.timestamp();
-            // double w1 = dt_1 / (dt_1 + dt_2);
-            // double w2 = dt_2 / (dt_1 + dt_2);
-            // gyro = w1 * last_imu.angular_velocity() + w2 * imu.angular_velocity();
-            // acc = w1 * last_imu.linear_acceleration() + w2 * imu.linear_acceleration();
-            // acc = acc * imu_scale_factor_;
-
-            // const State::BundleInput input = {gyro, acc};
+            CHECK(last_imu.timestamp() == state_.timestamp());
+            double dt_1 = imu.timestamp() - sync_data.lidar_end_time;
+            double dt_2 = sync_data.lidar_end_time - last_imu.timestamp();
+            double w1 = dt_1 / (dt_1 + dt_2);
+            double w2 = dt_2 / (dt_1 + dt_2);
+            gyro = w1 * last_imu.angular_velocity() + w2 * imu.angular_velocity();
+            acc = w1 * last_imu.linear_acceleration() + w2 * imu.linear_acceleration();
+            acc = acc * imu_scale_factor_;
+            input = State::BundleInput{gyro, acc};
+            
             state_.Predict(input, dt, sync_data.lidar_end_time);
             spdlog::info(
                 "[state] predict pc ts: {:.3f}, pos: {:.6f} {:.6f} {:.6f}, quat: {:.6f} {:.6f} {:.6f} {:.6f}",
@@ -515,6 +555,10 @@ void Odometry::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
     // local_map_->flatten(local_map_->Root_Node, local_map_->PCL_Storage, ikdtreeNS::NOT_RECORD);
     local_map->clear();
     local_map->append(local_map_->PCL_Storage);
+#elif defined(USE_VDB)
+    // const auto points = local_map_->Pointcloud();
+    local_map->clear();
+    // local_map->append(points);
 #endif
 }
 
@@ -525,6 +569,8 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
     if (local_map_->Size() == 0)
 #elif defined(USE_OCTREE_CHARLIE) or defined(USE_IKDTREE)
     if (local_map_->size() == 0)
+#elif defined(USE_VDB)
+    if (local_map_->Empty())
 #endif
         return;
 
@@ -555,6 +601,14 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
         local_map_->Nearest_Search(curr_point, 5, cur_neighbors, pointSearchSqDis);
         for (auto neighbor : cur_neighbors) {
             neighbors.emplace_back(Eigen::Vector3f(neighbor.x, neighbor.y, neighbor.z));
+        }
+#elif defined(USE_VDB)
+        const auto& [closest_neighbor, distance] = local_map_->GetClosestNeighbor(g.cast<float>());
+        if (distance < 1) {
+            chosen[i] = true;
+            Eigen::Vector4d p_abcd = Eigen::Vector4d::Zero();
+            p_abcd.head(3) = closest_neighbor.cast<double>();
+            matches[i] = Match(p, p_abcd, 0);
         }
 #endif
 
@@ -629,8 +683,8 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
 
     spdlog::info("osb matches size: {}", first_matches.size());
 
-    H = Eigen::MatrixXd::Zero(first_matches.size(), State::DoFObs);
-    z = Eigen::MatrixXd::Zero(first_matches.size(), 1);
+    H = Eigen::MatrixXd::Zero(first_matches.size() * State::DoFRes, State::DoFObs);
+    z = Eigen::MatrixXd::Zero(first_matches.size() * State::DoFRes, 1);
 
     indices.resize(first_matches.size());
     std::iota(indices.begin(), indices.end(), 0);
@@ -644,95 +698,18 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
         const Eigen::Vector3d g = state_.ori_R().act(T_i_l * m.p, J) + state_.p();
         const Eigen::Vector3d J_R = m.n.head(3).transpose() * J;  // Jacobian of rot
 
-        H.block<1, State::DoFObs>(i, 0) << m.n.head(3).transpose(), J_R.transpose();
+        //! 这里要用负的残差
+        H.block<State::DoFRes, State::DoFObs>(i, 0) << m.n.head(3).transpose(), J_R.transpose();
+        z.block<State::DoFRes, 1>(i * State::DoFRes, 0) = -m.dist2plane;
 
-        // Eigen::Vector3d manual_J_R =  manif::skew(m.p) * state_.R().transpose() * m.n.head(3);
-        // LOG_EVERY_N(info, 1000, "H({}): {} {} {} {} {} {}", i, H(i, 0), H(i, 1), H(i, 2), H(i, 3), H(i, 4), H(i, 5));
-        // LOG_EVERY_N(info, 1000, "manual_J_t: {} {} {} {}", i, m.n(0), m.n(1), m.n(2));
-        // LOG_EVERY_N(info, 1000, "manual_J_R: {} {} {} {}", i, manual_J_R(0), manual_J_R(1), manual_J_R(2));
-
-        z(i) = -m.dist2plane;
+        // ICP
+        // H.block<State::DoFRes, State::DoFObs>(i * State::DoFRes, 0) << Eigen::Matrix3d::Identity(), J;
+        // z.block<State::DoFRes, 1>(i * State::DoFRes, 0) = -(g - m.n.head(3));
         residual_sum.fetch_add(fabs(z(i)), std::memory_order_relaxed);
         
     });  // end for_each
     spdlog::info("Residual sum: {:.6f}", residual_sum.load());
 }
-
-// void Odometry::ICP()
-// {
-//     #ifdef USE_OCTREE
-//     if (local_map_->Size() == 0)
-// #elif defined(USE_OCTREE_CHARLIE)
-//     if (local_map_->size() == 0)
-// #endif
-//       return;
-//     using H_b_type = std::pair<Eigen::Matrix<double, 6, 6>, Eigen::Matrix<double, 6, 1>>;
-//     int iterations = 0;
-//     for (; iterations < 4; ++iterations) {
-//         auto source_points_transformed = downsampled_cloud_->transformed(state_.isometry3d());
-//         Eigen::Matrix<double, 6, 6> H = Eigen::Matrix<double, 6, 6>::Zero();
-//         Eigen::Matrix<double, 6, 1> b = Eigen::Matrix<double, 6, 1>::Zero();
-//         std::vector<Eigen::Matrix<double, 6, 6>> Hs(source_points_transformed.size(), Eigen::Matrix<double, 6, 6>::Zero());
-//         std::vector<Eigen::Matrix<double, 6, 1>> bs(source_points_transformed.size(), Eigen::Matrix<double, 6, 1>::Zero());
-
-//         std::vector<int> index(source_points_transformed.size());
-//         std::iota(index.begin(), index.end(), 0);
-
-//         // 并行执行近邻搜索和构建H、b
-//         std::for_each(std::execution::par, index.begin(), index.end(), [&](int idx) {
-//             Eigen::Vector3f curr_point(source_points_transformed.position(idx));
-
-//             std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> neighbors;
-//             std::vector<float> pointSearchSqDis;
-// #ifdef USE_OCTREE
-//             local_map_->KnnSearch(curr_point, 1, neighbors, pointSearchSqDis);
-// #elif defined(USE_OCTREE_CHARLIE)
-//             local_map_->knn(curr_point, 1, neighbors, pointSearchSqDis);
-// #endif
-
-//             if (neighbors.size() < 1 or pointSearchSqDis.back() > 1.0) return;
-
-//             Eigen::Vector3f target_point = neighbors[0];
-
-//             Eigen::Vector3f source_point(downsampled_cloud_->position(idx));
-//             Eigen::Vector3d error = (curr_point - target_point).cast<double>();
-
-//             Eigen::Matrix<double, 3, 6> Jacobian = Eigen::Matrix<double, 3, 6>::Zero();
-//             Jacobian.leftCols(3) = Eigen::Matrix3d::Identity();
-//             Jacobian.rightCols(3) = -state_.R() * manif::skew(source_point).cast<double>();
-
-//             Hs[idx] = Jacobian.transpose() * Jacobian;
-//             bs[idx] = -Jacobian.transpose() * error;
-//         });
-
-//         // 并行规约求和
-//         auto result = std::transform_reduce(
-//             std::execution::par_unseq,
-//             index.begin(),
-//             index.end(),
-//             H_b_type(Eigen::Matrix<double, 6, 6>::Zero(), Eigen::Matrix<double, 6, 1>::Zero()),
-//             // 规约操作
-//             [](const auto& a, const auto& b) { return std::make_pair(a.first + b.first, a.second + b.second); },
-//             // 转换操作
-//             [&Hs, &bs](const int& idx) { return H_b_type(Hs[idx], bs[idx]); });
-
-//         H = result.first;
-//         b = result.second;
-
-//         if (H.determinant() == 0) {
-//             continue;
-//         }
-
-//         Eigen::Matrix<double, 6, 1> delta_x = H.inverse() * b;
-
-//         state_.X.element<0>() = state_.X.element<0>().plus(manif::R3Tangentd(delta_x.head(3)));
-//         state_.X.element<1>() = state_.X.element<1>().plus(manif::SO3Tangentd(delta_x.tail(3)));
-
-//         if (delta_x.norm() < 0.001) {
-//             break;
-//         }
-//     }
-// }
 
 void Odometry::RunOdometry()
 {
@@ -799,7 +776,6 @@ void Odometry::RunOdometry()
 #endif
 
             state_.Update();
-            // ICP();
             spdlog::info(
                 "[state] update pos: {:.6f} {:.6f} {:.6f}, quat: {:.6f} {:.6f} {:.6f} {:.6f}",
                 state_.p().x(),
@@ -838,6 +814,12 @@ void Odometry::RunOdometry()
                 local_points.emplace_back(cur_point);
             }
             local_map_->Add_Points(local_points, true);
+            spdlog::info("local map add {} points", local_points.size());
+#elif defined(USE_VDB)
+            auto ori_points = downsampled_cloud_->positions_vec3();
+            std::vector<Eigen::Vector3f> local_points;
+            local_points.assign(ori_points.begin(), ori_points.end());
+            local_map_->Update(local_points, state_.isometry3d() * T_i_l);
             spdlog::info("local map add {} points", local_points.size());
 #endif
         }

@@ -1,11 +1,12 @@
 #include "slam_core/state.hpp"
 
-#include <slam_core/logging_utils.hpp>
+#include "slam_core/logging_utils.hpp"
 #include "slam_core/config.hpp"
 
 namespace ms_slam::slam_core
 {
-State::State() : stamp(-1.0)
+template<int kObsDim, int kResDim>
+StateTemplate<kObsDim, kResDim>::StateTemplate() : stamp(-1.0)
 {
     const auto& cfg = Config::GetInstance();
     Eigen::Vector3d zero_vec = Eigen::Vector3d(0., 0., 0.);
@@ -38,7 +39,8 @@ State::State() : stamp(-1.0)
     Q.block<3, 3>(9, 9) = cfg.mapping_params.b_acc_cov * Eigen::Matrix3d::Identity();  // n_{b_a}
 }
 
-void State::Predict(const BundleInput& imu, double dt, double timestamp)
+template<int kObsDim, int kResDim>
+void StateTemplate<kObsDim, kResDim>::Predict(const BundleInput& imu, double dt, double timestamp)
 {
     const Eigen::Vector3d& in_gyro = imu.element<0>().coeffs();
     const Eigen::Vector3d& in_acc = imu.element<1>().coeffs();
@@ -61,7 +63,8 @@ void State::Predict(const BundleInput& imu, double dt, double timestamp)
     stamp = timestamp;
 }
 
-std::optional<Eigen::Isometry3d> State::Predict(double timestamp) const
+template<int kObsDim, int kResDim>
+std::optional<Eigen::Isometry3d> StateTemplate<kObsDim, kResDim>::Predict(double timestamp) const
 {
     double dt = timestamp - stamp;
     if (dt < 0.0) {
@@ -77,14 +80,15 @@ std::optional<Eigen::Isometry3d> State::Predict(double timestamp) const
     return res;
 }
 
-void State::Update()
+template<int kObsDim, int kResDim>
+void StateTemplate<kObsDim, kResDim>::Update()
 {
     // IESEKF UPDATE
     const manif::Bundle X_predicted = X;
     const ProcessMatrix P_predicted = P;
 
     Eigen::Matrix<double, Eigen::Dynamic, DoFObs> H;
-    Eigen::Matrix<double, Eigen::Dynamic, DoFRes> z;
+    Eigen::Matrix<double, Eigen::Dynamic, 1> z;
     ProcessMatrix KH;
 
     double R = 0.001;
@@ -98,12 +102,12 @@ void State::Update()
 
       P = J.inverse() * P_predicted * J.inverse().transpose();
       ProcessMatrix P_inv = (P / R).inverse();
-      Eigen::Matrix<double, DoFObs, DoFObs> HTH = H.transpose() * H;
+      const Eigen::Matrix<double, DoFObs, DoFObs> HTH = H.transpose() * H;
       
       P_inv.block<DoFObs, DoFObs>(0, 0) += HTH;
       P_inv = P_inv.inverse();
 
-      Tangent Kz = P_inv.block<DoF, DoFObs>(0, 0) * H.transpose() * z;
+      const Tangent Kz = P_inv.block<DoF, DoFObs>(0, 0) * H.transpose() * z;
 
       KH.setZero();
       KH.block<DoF, DoFObs>(0, 0) = P_inv.block<DoF, DoFObs>(0, 0) * HTH;
@@ -121,13 +125,13 @@ void State::Update()
         // Eigen::Matrix3d L_R = w.rjac();
         // spdlog::info("L_R:\n {}", as_eigen(L_R));
         break;
-      } else {
-        X = X.plus(dx);
       }
+      X = X.plus(dx);
     }
 }
 
-State::Tangent State::f(const Eigen::Vector3d& ang_vel, const Eigen::Vector3d& lin_acc) const
+template<int kObsDim, int kResDim>
+typename StateTemplate<kObsDim, kResDim>::Tangent StateTemplate<kObsDim, kResDim>::f(const Eigen::Vector3d& ang_vel, const Eigen::Vector3d& lin_acc) const
 {
     Tangent u = Tangent::Zero();
     u.element<0>().coeffs() = v();
@@ -139,7 +143,8 @@ State::Tangent State::f(const Eigen::Vector3d& ang_vel, const Eigen::Vector3d& l
     return u;
 }
 
-State::ProcessMatrix State::df_dx(const BundleInput& imu) const
+template<int kObsDim, int kResDim>
+typename StateTemplate<kObsDim, kResDim>::ProcessMatrix StateTemplate<kObsDim, kResDim>::df_dx(const BundleInput& imu) const
 {
     ProcessMatrix out = ProcessMatrix::Zero();
     const Eigen::Vector3d& in_acc = imu.element<1>().coeffs();
@@ -158,7 +163,8 @@ State::ProcessMatrix State::df_dx(const BundleInput& imu) const
     return out;
 }
 
-State::MappingMatrix State::df_dw(const BundleInput& imu) const
+template<int kObsDim, int kResDim>
+typename StateTemplate<kObsDim, kResDim>::MappingMatrix StateTemplate<kObsDim, kResDim>::df_dw(const BundleInput& imu) const
 {
     // w = (n_g, n_a, n_{b_g}, n_{b_a})
     MappingMatrix out = MappingMatrix::Zero();
@@ -170,5 +176,7 @@ State::MappingMatrix State::df_dw(const BundleInput& imu) const
 
     return out;
 }
+
+template class StateTemplate<6, 1>;
 
 }  // namespace ms_slam::slam_core

@@ -12,19 +12,22 @@
  * ./crash_processor [log_file] [crash_dir] [options]
  */
 
-#include <iostream>
+#include <ctime>
+
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <memory>
 #include <sstream>
 #include <vector>
-#include <chrono>
-#include <iomanip>
-#include <ctime>
 
 #include <cpptrace/cpptrace.hpp>
 #include <cpptrace/formatting.hpp>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 
 struct ProcessorConfig {
     std::string log_file_path = "slam_crash.log";
@@ -39,12 +42,22 @@ class CrashFileProcessor
   public:
     explicit CrashFileProcessor(const ProcessorConfig& config) : config_(config) {}
 
+    /**
+     * @brief 初始化崩溃文件处理器
+     * @return 初始化结果
+     */
     bool initialize()
     {
         try {
-            // 创建spdlog logger，用于追加到现有日志文件
-            auto logger = spdlog::basic_logger_mt("crash_processor", config_.log_file_path);
-            logger->set_pattern(config_.log_pattern);
+            // 同时构建文件与终端sink，确保堆栈信息双路输出
+            auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(config_.log_file_path, true);
+            file_sink->set_pattern(config_.log_pattern);
+            auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+            console_sink->set_pattern(config_.log_pattern);
+
+            std::vector<spdlog::sink_ptr> sinks{file_sink, console_sink};
+            auto logger = std::make_shared<spdlog::logger>("crash_processor", sinks.begin(), sinks.end());
+            spdlog::register_logger(logger);
             logger->set_level(spdlog::level::info);
             logger->flush_on(spdlog::level::critical);
 
@@ -273,10 +286,10 @@ int main(int argc, char* argv[])
     int processed = processor.process_crash_files();
 
     if (processed > 0) {
-        std::cout << "✅ Successfully processed " << processed << " crash file(s)" << std::endl;
-        std::cout << "📄 Check log file: " << config.log_file_path << std::endl;
+        std::cout << "Successfully processed " << processed << " crash file(s)" << std::endl;
+        std::cout << "Check log file: " << config.log_file_path << std::endl;
     } else {
-        std::cout << "ℹ️  No crash files found to process" << std::endl;
+        std::cout << "No crash files found to process" << std::endl;
     }
 
     return 0;

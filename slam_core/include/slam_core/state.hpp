@@ -3,12 +3,15 @@
 #include <deque>
 #include <optional>
 
+#include <Eigen/Core>
+#include <Eigen/Dense>
 #include <manif/manif.h>
 
 namespace ms_slam::slam_core
 {
 
-class State
+template<int kObsDim, int kResDim>
+class StateTemplate
 {
   public:
     using BundleState = manif::Bundle<
@@ -30,17 +33,17 @@ class State
     using Tangent = typename BundleState::Tangent;
     static constexpr int DoF = BundleState::DoF;     // DoF whole state
     static constexpr int DoFNoise = 12;              // b_w, b_a, n_{b_w}, n_{b_a}
-    static constexpr int DoFObs = BundleInput::DoF;  // DoF obsevation equation
-    static constexpr int DoFRes = 1;                 // DoF residual equation
+    static constexpr int DoFObs = kObsDim;           // DoF observation equation
+    static constexpr int DoFRes = kResDim;           // DoF residual equation
 
     using ProcessMatrix = Eigen::Matrix<double, DoF, DoF>;
     using MappingMatrix = Eigen::Matrix<double, DoF, DoFNoise>;
     using NoiseMatrix = Eigen::Matrix<double, DoFNoise, DoFNoise>;
     using ObsH = Eigen::Matrix<double, Eigen::Dynamic, DoFObs>;
-    using ObsZ = Eigen::Matrix<double, Eigen::Dynamic, DoFRes>;
+    using ObsZ = Eigen::Matrix<double, Eigen::Dynamic, 1>;
 
-    State();
-    ~State() = default;
+    StateTemplate();
+    ~StateTemplate() = default;
 
     void Predict(const BundleInput& imu, double dt, double timestamp);
     [[nodiscard]] std::optional<Eigen::Isometry3d> Predict(double timestamp) const;
@@ -72,17 +75,18 @@ class State
     inline Eigen::Map<const manif::R3d> ori_p()  const noexcept { return X.element<0>();}
     inline Eigen::Map<const manif::SO3d> ori_R() const noexcept { return X.element<1>();}
 
-    inline Eigen::Vector3d p()       const noexcept { return X.element<0>().coeffs();                  }
-    inline Eigen::Matrix3d R()       const noexcept { return X.element<1>().rotation();                }
-    inline Eigen::Quaterniond quat() const noexcept { return X.element<1>().quat();                    }
-    inline Eigen::Vector3d v()       const noexcept { return X.element<2>().coeffs();                  }
-    inline Eigen::Vector3d b_g()     const noexcept { return X.element<3>().coeffs();                  }
-    inline Eigen::Vector3d b_a()     const noexcept { return X.element<4>().coeffs();                  }
-    inline Eigen::Vector3d g()       const noexcept { return X.element<5>().coeffs();                  }
+    inline Eigen::Vector3d p()       const noexcept { return X.element<0>().coeffs();   }
+    inline Eigen::Matrix3d R()       const noexcept { return X.element<1>().rotation(); }
+    inline Eigen::Quaterniond quat() const noexcept { return X.element<1>().quat();     }
+    inline Eigen::Vector3d v()       const noexcept { return X.element<2>().coeffs();   }
+    inline Eigen::Vector3d b_g()     const noexcept { return X.element<3>().coeffs();   }
+    inline Eigen::Vector3d b_a()     const noexcept { return X.element<4>().coeffs();   }
+    inline Eigen::Vector3d g()       const noexcept { return X.element<5>().coeffs();   }
 
-    void b_g(const Eigen::Vector3d& in) { X.element<3>() = manif::R3d(in); }
-    void b_a(const Eigen::Vector3d& in) { X.element<4>() = manif::R3d(in); }
-    void g(const Eigen::Vector3d& in)   { X.element<5>() = manif::R3d(in); }
+    void quat(const Eigen::Quaterniond& in) { X.element<1>() = manif::SO3d(in); }
+    void b_g(const Eigen::Vector3d& in)     { X.element<3>() = manif::R3d(in);  }
+    void b_a(const Eigen::Vector3d& in)     { X.element<4>() = manif::R3d(in);  }
+    void g(const Eigen::Vector3d& in)       { X.element<5>() = manif::R3d(in);  }
     // clang-format on
 
     inline Eigen::Isometry3d isometry3d() const
@@ -112,6 +116,7 @@ class State
     std::function<void(ObsH& H, ObsZ& z)> h_model_;
 };
 
+using State = StateTemplate<6, 1>;
 using States = std::deque<State>;
 
 }  // namespace ms_slam::slam_core

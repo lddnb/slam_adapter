@@ -20,6 +20,8 @@
 #include "slam_core/Octree_charlie.hpp"
 #elif defined(USE_IKDTREE)
 #include "slam_core/ikd-Tree/ikd_Tree_impl.h"
+#elif defined(USE_VDB)
+#include "slam_core/VDB_map.hpp"
 #endif
 
 namespace ms_slam::slam_core
@@ -74,8 +76,6 @@ class Odometry
 
     void Stop();
 
-    // void ICP();
-
 #ifdef USE_PCL
     void PCLAddLidarData(const PointCloudT::ConstPtr& lidar_data);
 
@@ -102,6 +102,8 @@ class Odometry
     std::vector<Eigen::Vector3f> local_points_;
 #elif defined(USE_IKDTREE)
     std::unique_ptr<ikdtreeNS::KD_TREE<ikdtreeNS::ikdTree_PointType> > local_map_;  ///< 局部地图
+#elif defined(USE_VDB)
+    std::unique_ptr<VDBMap> local_map_;
 #endif
 
     double last_timestamp_imu_;
