@@ -183,7 +183,7 @@ int main()
     };
 
     auto imu_subscriber =
-        std::make_shared<FBSSubscriber<FoxgloveImu>>(node, config_inst.common_params.imu_topic, imu_callback, PubSubConfig{.subscriber_max_buffer_size = 100});
+        std::make_shared<FBSSubscriber<FoxgloveImu>>(node, config_inst.common_params.imu_topic, imu_callback, PubSubConfig{.subscriber_max_buffer_size = 300});
     spdlog::info("Starting imu threaded_subscriber...");
 
     CallbackDispatcher dispatcher;

@@ -38,7 +38,7 @@ void convert_ros1_to_flatbuffers(const std::string& input_file) {
         iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("successful node creation"));
     FBSPublisher<FoxgloveCompressedImage> img_publisher(node, "/camera/image_raw");
     FBSPublisher<FoxglovePointCloud> pc_publisher(node, "/lidar_points");
-    FBSPublisher<FoxgloveImu> imu_publisher(node, "/lidar_imu", PubSubConfig{.subscriber_max_buffer_size = 100});
+    FBSPublisher<FoxgloveImu> imu_publisher(node, "/lidar_imu", PubSubConfig{.subscriber_max_buffer_size = 300});
 
     // 打开输入文件
     mcap::McapReader reader;

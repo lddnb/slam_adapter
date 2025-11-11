@@ -21,11 +21,6 @@ find_package(slam_common REQUIRED)
 find_package(mcap REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
-get_target_property(_defs slam_core::slam_core INTERFACE_COMPILE_DEFINITIONS)
-if("USE_PCL" IN_LIST _defs)
-find_package(PCL REQUIRED COMPONENTS common filters io)
-endif()
-
 add_executable(sub_demo src/sub_demo.cpp)
 target_include_directories(sub_demo PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include

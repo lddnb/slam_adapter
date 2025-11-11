@@ -15,6 +15,7 @@ find_package(spdlog REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(manif REQUIRED)
 find_package(easy_profiler REQUIRED)
+find_package(tsl-robin-map REQUIRED)
 
 # ============================================================================
 # SLAM Core Library (Header-only for now)
@@ -45,6 +46,7 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
     ${OpenCV_LIBS}
     tbb
     easy_profiler
+    tsl::robin_map
 )
 target_compile_definitions(${PROJECT_NAME} PUBLIC BUILD_WITH_EASY_PROFILER)
 if(USE_PCL)

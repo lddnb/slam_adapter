@@ -99,7 +99,7 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config) : config_
                 node_,
                 topic.name,
                 nullptr,
-                slam_common::PubSubConfig{.subscriber_max_buffer_size = 100});
+                slam_common::PubSubConfig{.subscriber_max_buffer_size = 300});
         } else if (topic.schema == "foxglove.PoseInFrame") {
             schema.name = "foxglove.PoseInFrame";
             schema.data = reinterpret_cast<const std::byte*>(foxglove::PoseInFrameBinarySchema::data());

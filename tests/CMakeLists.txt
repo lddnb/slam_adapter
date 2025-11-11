@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(slam_test LANGUAGES CXX)
+project(slam_test LANGUAGES C CXX)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
@@ -18,7 +18,7 @@ find_package(slam_common REQUIRED)
 find_package(slam_core REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(mcap REQUIRED)
-find_package(PCL 1.14 REQUIRED COMPONENTS common filters)
+find_package(PCL 1.14 REQUIRED COMPONENTS common filters io)
 
 # ===================================================================
 # Unit Testing with Catch2

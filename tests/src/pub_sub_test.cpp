@@ -271,7 +271,7 @@ int main()
     spdlog::info("----------------------------------------");
 
     // Create Publisher
-    FBSPublisher<FoxgloveImu> imu_publisher(node, "/foxglove/imu", PubSubConfig{.subscriber_max_buffer_size = 100});
+    FBSPublisher<FoxgloveImu> imu_publisher(node, "/foxglove/imu", PubSubConfig{.subscriber_max_buffer_size = 300});
 
     // Create threaded Subscriber
     std::atomic<int> imu_received_count{0};

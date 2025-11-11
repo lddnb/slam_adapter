@@ -133,6 +133,13 @@ RUN cd /tmp && git clone https://github.com/artivis/manif.git && \
     cmake .. -DCMAKE_BUILD_TYPE=Release && \
     make install
 
+RUN cd /tmp && git clone https://github.com/Tessil/robin-map.git && \
+    cd robin-map && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make install
+
 # RUN cd /tmp && git clone https://github.com/olympus-robotics/mcap_builder.git && \
 #     cd mcap_builder && \
 #     mkdir build && \

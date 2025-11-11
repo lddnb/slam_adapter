@@ -150,11 +150,11 @@ void example_multiple_subscribers()
     auto node = std::make_shared<iox2::Node<iox2::ServiceType::Ipc>>(
         iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("node creation"));
 
-    auto imu_pub = std::make_shared<FBSPublisher<FoxgloveImu>>(node, "ImuTopic", PubSubConfig{.subscriber_max_buffer_size = 100});
+    auto imu_pub = std::make_shared<FBSPublisher<FoxgloveImu>>(node, "ImuTopic", PubSubConfig{.subscriber_max_buffer_size = 300});
     auto cloud_pub = std::make_shared<FBSPublisher<FoxglovePointCloud>>(node, "CloudTopic");
 
     // 创建 subscribers
-    auto imu_sub = std::make_shared<FBSSubscriber<FoxgloveImu>>(node, "ImuTopic", nullptr, PubSubConfig{.subscriber_max_buffer_size = 100});
+    auto imu_sub = std::make_shared<FBSSubscriber<FoxgloveImu>>(node, "ImuTopic", nullptr, PubSubConfig{.subscriber_max_buffer_size = 300});
     auto cloud_sub = std::make_shared<FBSSubscriber<FoxglovePointCloud>>(node, "CloudTopic");
 
     // 创建 dispatcher
@@ -250,7 +250,7 @@ void example_mixed_callbacks()
 
     // 创建 IMU pub-sub
     PubSubConfig config;
-    config.subscriber_max_buffer_size = 100;
+    config.subscriber_max_buffer_size = 300;
     auto imu_pub = std::make_shared<FBSPublisher<FoxgloveImu>>(node, "ImuTopic2", config);
     auto imu_sub = std::make_shared<FBSSubscriber<FoxgloveImu>>(node, "ImuTopic2", nullptr, config);
 
@@ -356,7 +356,7 @@ void example_dynamic_registration()
         iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("node creation"));
 
     PubSubConfig config;
-    config.subscriber_max_buffer_size = 100;
+    config.subscriber_max_buffer_size = 300;
     auto imu_pub = std::make_shared<FBSPublisher<FoxgloveImu>>(node, "ImuTopic3", config);
     auto imu_sub = std::make_shared<FBSSubscriber<FoxgloveImu>>(node, "ImuTopic3", nullptr, config);
 

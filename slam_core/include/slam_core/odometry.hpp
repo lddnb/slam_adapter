@@ -1,6 +1,6 @@
 #pragma once
 
-#define USE_OCTREE
+#define USE_HASHMAP
 
 #include <deque>
 #include <mutex>
@@ -14,14 +14,12 @@
 #include "slam_core/point_cloud.hpp"
 #include "slam_core/image.hpp"
 #include "slam_core/state.hpp"
-#ifdef USE_OCTREE
-#include "slam_core/Octree.hpp"
-#elif defined(USE_OCTREE_CHARLIE)
-#include "slam_core/Octree_charlie.hpp"
-#elif defined(USE_IKDTREE)
+#ifdef USE_IKDTREE
 #include "slam_core/ikd-Tree/ikd_Tree_impl.h"
 #elif defined(USE_VDB)
 #include "slam_core/VDB_map.hpp"
+#elif defined(USE_HASHMAP)
+#include "slam_core/voxel_hashmap.hpp"
 #endif
 
 namespace ms_slam::slam_core
@@ -95,15 +93,12 @@ class Odometry
 
     std::unique_ptr<std::thread> odometry_thread_;  ///< 里程计线程
 
-#ifdef USE_OCTREE
-    std::unique_ptr<Octree> local_map_;
-#elif defined(USE_OCTREE_CHARLIE)
-    std::unique_ptr<charlie::Octree> local_map_;  ///< 局部地图
-    std::vector<Eigen::Vector3f> local_points_;
-#elif defined(USE_IKDTREE)
+#ifdef USE_IKDTREE
     std::unique_ptr<ikdtreeNS::KD_TREE<ikdtreeNS::ikdTree_PointType> > local_map_;  ///< 局部地图
 #elif defined(USE_VDB)
     std::unique_ptr<VDBMap> local_map_;
+#elif defined(USE_HASHMAP)
+    std::unique_ptr<voxelHashMap> local_map_;  ///< 局部地图,
 #endif
 
     double last_timestamp_imu_;
