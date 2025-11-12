@@ -98,7 +98,7 @@ class Odometry
 #elif defined(USE_VDB)
     std::unique_ptr<VDBMap> local_map_;
 #elif defined(USE_HASHMAP)
-    std::unique_ptr<voxelHashMap> local_map_;  ///< 局部地图,
+    std::unique_ptr<voxelHashMap> local_map_;  ///< 局部地图
 #endif
 
     double last_timestamp_imu_;
@@ -119,6 +119,8 @@ class Odometry
     PointCloudType::Ptr downsampled_cloud_;
 
     Eigen::Isometry3d T_i_l;
+
+    std::size_t frame_index_;  ///< 帧索引
 
 #ifdef USE_PCL
     std::deque<PointCloudT::ConstPtr> pcl_lidar_buffer_;

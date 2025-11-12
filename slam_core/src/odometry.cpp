@@ -44,6 +44,8 @@ Odometry::Odometry()
     T_i_l.linear() = cfg.mapping_params.extrinR;
     T_i_l.translation() = cfg.mapping_params.extrinT;
 
+    frame_index_ = 0;
+
     spdlog::info("Odometry thread initialized");
 }
 
@@ -305,7 +307,6 @@ void Odometry::ProcessImuData(const SyncData& sync_data)
     Eigen::Vector3d acc = Eigen::Vector3d::Zero();
     double dt = 0.0;
     State::BundleInput input;
-    EASY_VALUE("imu_segment_count", static_cast<int>(sync_data.imu_data.size()), EASY_UNIQUE_VIN);
     for (const auto& imu : sync_data.imu_data) {
         EASY_BLOCK("IntegrateImu", profiler::colors::Purple500);
         dt = imu.timestamp() - state_.timestamp();
@@ -350,10 +351,14 @@ void Odometry::ProcessImuData(const SyncData& sync_data)
                 state_.quat().z(),
                 state_.quat().w());
 
-            spdlog::info("predict cov: {}", as_eigen(state_.cov().block<6, 6>(0, 0)));
+            // spdlog::info("predict cov: {}", as_eigen(state_.cov().block<6, 6>(0, 0)));
             {
-                std::unique_lock<std::mutex> lock(state_mutex_);
-                lidar_state_buffer_.emplace_back(state_);
+                std::unique_lock<std::mutex> lock(state_mutex_, std::try_to_lock);
+                if (lock.owns_lock()) {
+                    lidar_state_buffer_.emplace_back(state_);
+                } else {
+                    spdlog::info("Skip lidar_state_buffer push: state_mutex_ busy at {:.3f}s", state_.timestamp());
+                }
             }
         }
         imu_state_buffer_.emplace_back(state_);
@@ -555,14 +560,7 @@ void Odometry::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
 void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
 {
     EASY_FUNCTION(profiler::colors::Green500);
-#ifdef USE_IKDTREE
-    if (local_map_->size() == 0)
-#elif defined(USE_VDB)
-    if (local_map_->Empty())
-#elif defined(USE_HASHMAP)
-    if (local_map_->empty())
-#endif
-        return;
+    if (frame_index_ == 0) return;
 
     Matches first_matches;
 
@@ -574,7 +572,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
     std::vector<int> indices(N);
     std::iota(indices.begin(), indices.end(), 0);
 
-    EASY_BLOCK("ours_matching", profiler::colors::BlueGrey500);
+    EASY_BLOCK("matching", profiler::colors::BlueGrey500);
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
         const Eigen::Vector3d p = downsampled_cloud_->position(i).cast<double>();
         const Eigen::Vector3d g = state_.isometry3d() * T_i_l * p;  // global coords
@@ -589,22 +587,17 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
             neighbors.emplace_back(Eigen::Vector3f(neighbor.x, neighbor.y, neighbor.z));
         }
 #elif defined(USE_VDB)
-        const auto& [closest_neighbor, distance] = local_map_->GetClosestNeighbor(g.cast<float>());
-        if (distance < 1) {
-            chosen[i] = true;
-            Eigen::Vector4d p_abcd = Eigen::Vector4d::Zero();
-            p_abcd.head(3) = closest_neighbor.cast<double>();
-            matches[i] = Match(p, p_abcd, 0);
-        }
+        local_map_->GetKNearestNeighbors(g.cast<float>(), 10, neighbors, pointSearchSqDis);
 #elif defined(USE_HASHMAP)
         auto vector_neighbors = searchNeighbors(*local_map_, g, 1, 0.5, 10, 1, nullptr);
         if (vector_neighbors.size() < 5) return;
         for (auto neighbor : vector_neighbors) {
             neighbors.emplace_back(Eigen::Vector3f(neighbor.x(), neighbor.y(), neighbor.z()));
         }
+        pointSearchSqDis = std::vector<float>(5, 0);
 #endif
 
-        if (neighbors.size() < 5 or pointSearchSqDis.back() > 5.0) return;
+        if (neighbors.size() < 5 or pointSearchSqDis.back() > 1.0) return;
 
         Eigen::Vector4d p_abcd = Eigen::Vector4d::Zero();
         if (not EstimatePlane(p_abcd, neighbors, 0.1)) return;
@@ -677,7 +670,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
     indices.resize(first_matches.size());
     std::iota(indices.begin(), indices.end(), 0);
 
-    // For each match, calculate its derivative and distance
+    EASY_BLOCK("build_jacobian", profiler::colors::Lime600);
     std::atomic<double> residual_sum = 0.0;
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
         const Match m = first_matches[i];
@@ -695,6 +688,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
         // z.segment<State::DoFRes>(i * State::DoFRes) = -(g - m.n.head(3));
         residual_sum.fetch_add(fabs(z(i)), std::memory_order_relaxed);
     });  // end for_each
+    EASY_END_BLOCK;
     spdlog::info("Residual sum: {:.6f}", residual_sum.load());
 }
 
@@ -709,9 +703,11 @@ void Odometry::RunOdometry()
         }
 
         for (const auto& sync_data : sync_data_list) {
+            EASY_VALUE("frame_index", static_cast<int>(frame_index_));
             EASY_BLOCK("ProcessSyncData", profiler::colors::Lime500);
             spdlog::info(
-                "Sync data: PC start ts: {:.3f}, PC end ts: {:.3f}, IMU start ts: {:.3f}, IMU end ts: {:.3f}, size: {}",
+                "Frame [{}]: PC start ts: {:.3f}, PC end ts: {:.3f}, IMU start ts: {:.3f}, IMU end ts: {:.3f}, size: {}",
+                frame_index_,
                 sync_data.lidar_beg_time,
                 sync_data.lidar_end_time,
                 sync_data.imu_data.front().timestamp(),
@@ -729,9 +725,12 @@ void Odometry::RunOdometry()
             spdlog::info("[Lidar] stamp: {:.3f}, size: {}", sync_data.lidar_beg_time, sync_data.lidar_data->size());
             ProcessImuData(sync_data);
             deskewed_cloud_ = Deskew(sync_data.lidar_data, state_, imu_state_buffer_);
+
+            EASY_BLOCK("Filter", profiler::colors::Pink400);
             LidarFilterOptions options{.rate_active = true, .sampling_stride = static_cast<std::size_t>(cfg.common_params.point_filter_num)};
             deskewed_cloud_ = ApplyLidarFilters<PointType>(deskewed_cloud_, options);
             downsampled_cloud_ = VoxelGridSamplingPstl<PointType>(deskewed_cloud_, 0.5);
+            EASY_END_BLOCK;
             spdlog::info("[Lidar] downsize {}", downsampled_cloud_->size());
 
 #ifdef USE_PCL
@@ -758,11 +757,14 @@ void Odometry::RunOdometry()
                     local_map_->Build(local_points);
                     spdlog::info("build local map with {} points", local_points.size());
                 }
+                frame_index_++;
                 continue;
             }
 #endif
 
+            EASY_BLOCK("Update", profiler::colors::DeepPurpleA400);
             state_.Update();
+            EASY_END_BLOCK;
             spdlog::info(
                 "[state] update pos: {:.6f} {:.6f} {:.6f}, quat: {:.6f} {:.6f} {:.6f} {:.6f}",
                 state_.p().x(),
@@ -772,11 +774,15 @@ void Odometry::RunOdometry()
                 state_.quat().y(),
                 state_.quat().z(),
                 state_.quat().w());
-            spdlog::info("update cov: {}", as_eigen(state_.cov().block<6, 6>(0, 0)));
+            // spdlog::info("update cov: {}", as_eigen(state_.cov().block<6, 6>(0, 0)));
 
+            EASY_BLOCK("TransformToWorld", profiler::colors::Indigo700);
+#ifndef USE_VDB
             downsampled_cloud_->transform(state_.isometry3d() * T_i_l);
+#endif
             deskewed_cloud_->transform(state_.isometry3d() * T_i_l);
             map_cloud_buffer_.emplace_back(deskewed_cloud_->clone());
+            EASY_END_BLOCK;
 
 #ifdef USE_PCL
             // 将PCL降采样结果同样映射到世界坐标系
@@ -786,16 +792,62 @@ void Odometry::RunOdometry()
             pcl_map_cloud_buffer_.emplace_back(pcl_clone);
 #endif
 
-            EASY_BLOCK("UpdateLocalMap", profiler::colors::Green500);
+            EASY_BLOCK("UpdateLocalMap", profiler::colors::DarkBrown);
 #ifdef USE_IKDTREE
             auto ori_points = downsampled_cloud_->positions_vec3();
-            std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> local_points;
-            for (const auto point : ori_points) {
-                ikdtreeNS::ikdTree_PointType cur_point(point.x(), point.y(), point.z());
-                local_points.emplace_back(cur_point);
+            constexpr int kMinMatchPoints = 5;
+            constexpr int kNumMatchPoints = 10;
+            const float filter_size_map_min = 0.5;
+            const float half_voxel = 0.5F * filter_size_map_min;
+
+            std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> filtered_points;
+            std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> direct_points;
+            filtered_points.reserve(ori_points.size());
+
+            for (const auto& point_world : ori_points) {
+                ikdtreeNS::ikdTree_PointType curr_point(point_world.x(), point_world.y(), point_world.z());
+
+                std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> neighbors;
+                std::vector<float> neighbor_sq_dists;
+                local_map_->Nearest_Search(curr_point, kNumMatchPoints, neighbors, neighbor_sq_dists);
+
+                const Eigen::Vector3f center = ((point_world / filter_size_map_min).array().floor() + 0.5F) * filter_size_map_min;
+
+                if (!neighbors.empty()) {
+                    const Eigen::Vector3f nearest(neighbors.front().x, neighbors.front().y, neighbors.front().z);
+                    const Eigen::Vector3f delta = nearest - center;
+                    if (std::abs(delta.x()) > half_voxel && std::abs(delta.y()) > half_voxel && std::abs(delta.z()) > half_voxel) {
+                        direct_points.emplace_back(curr_point);
+                        continue;
+                    }
+                }
+
+                bool need_add = neighbors.size() < kMinMatchPoints;
+                if (!need_add) {
+                    const Eigen::Vector3f center = ((point_world / filter_size_map_min).array().floor() + 0.5F) * filter_size_map_min;
+                    const float dist_to_center = (point_world - center).norm();
+                    need_add = true;
+                    for (const auto& nb : neighbors) {
+                        const Eigen::Vector3f nb_vec(nb.x, nb.y, nb.z);
+                        if ((nb_vec - center).norm() < dist_to_center + 1e-6F) {
+                            need_add = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (need_add) {
+                    filtered_points.emplace_back(curr_point);
+                }
             }
-            local_map_->Add_Points(local_points, true);
-            spdlog::info("local map add {} points", local_points.size());
+
+            if (!filtered_points.empty()) {
+                local_map_->Add_Points(filtered_points, true);
+            }
+            if (!direct_points.empty()) {
+                local_map_->Add_Points(direct_points, false);
+            }
+            spdlog::info("local map add {} filtered points and {} direct points", filtered_points.size(), direct_points.size());
 #elif defined(USE_VDB)
             auto ori_points = downsampled_cloud_->positions_vec3();
             std::vector<Eigen::Vector3f> local_points;
@@ -810,18 +862,16 @@ void Odometry::RunOdometry()
             }
             Eigen::Vector3d location = state_.p();
             std::vector<voxel> voxels_to_erase;
-            for (const auto &pair : *local_map_)
-            {
-                 Eigen::Vector3d pt = pair.second.points[0];
-                 if ((pt - location).squaredNorm() > (100 * 100))
-                 {
-                      voxels_to_erase.push_back(pair.first);
-                 }
+            for (const auto& pair : *local_map_) {
+                Eigen::Vector3d pt = pair.second.points[0];
+                if ((pt - location).squaredNorm() > (100 * 100)) {
+                    voxels_to_erase.push_back(pair.first);
+                }
             }
-            for (auto &vox : voxels_to_erase)
-                 local_map_->erase(vox);
+            for (auto& vox : voxels_to_erase) local_map_->erase(vox);
             std::vector<voxel>().swap(voxels_to_erase);
 #endif
+            frame_index_++;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
