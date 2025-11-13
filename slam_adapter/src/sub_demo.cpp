@@ -73,6 +73,7 @@ int main()
     LogConfig();
     const auto& config_inst = Config::GetInstance();
     const double blind_dist = config_inst.common_params.blind;
+    const bool use_img = config_inst.common_params.render_en;
 
     auto odom = std::make_unique<Odometry>();
     auto processed_image_pub = std::make_shared<FBSPublisher<FoxgloveCompressedImage>>(node, "/camera/image_processed");
@@ -114,7 +115,7 @@ int main()
     spdlog::info("Starting pointcloud threaded_subscriber...");
 
     std::atomic<int> received_count{0};
-    auto img_callback = [&received_count, &odom, processed_image_pub](const FoxgloveCompressedImage& img_wrapper) {
+    auto img_callback = [&received_count, &odom, processed_image_pub, use_img](const FoxgloveCompressedImage& img_wrapper) {
         EASY_BLOCK("img_cb", profiler::colors::Coral);
         received_count++;
 
@@ -126,7 +127,9 @@ int main()
             return;
         }
 
-        odom->AddImageData(image);
+        if (use_img) {
+            odom->AddImageData(image);
+        }
 
         if (processed_image_pub) {
             flatbuffers::FlatBufferBuilder image_builder(512 * 1024);

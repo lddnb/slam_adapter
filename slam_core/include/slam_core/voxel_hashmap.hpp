@@ -23,7 +23,7 @@ struct voxel {
 
     inline bool operator<(const voxel& vox) const { return x < vox.x || (x == vox.x && y < vox.y) || (x == vox.x && y == vox.y && z < vox.z); }
 
-    inline static voxel coordinates(const Eigen::Vector3d& point, double voxel_size)
+    inline static voxel coordinates(const Eigen::Vector3f& point, double voxel_size)
     {
         return {short(point.x() / voxel_size), short(point.y() / voxel_size), short(point.z() / voxel_size)};
     }
@@ -36,11 +36,11 @@ struct voxel {
 struct voxelBlock {
     explicit voxelBlock(int num_points_ = 20) : num_points(num_points_) { points.reserve(num_points_); }
 
-    std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> points;
+    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> points;
 
     bool IsFull() const { return num_points == points.size(); }
 
-    void AddPoint(const Eigen::Vector3d& point)
+    void AddPoint(const Eigen::Vector3f& point)
     {
         assert(num_points > points.size());
         points.push_back(point);
@@ -75,7 +75,7 @@ struct hash<ms_slam::slam_core::voxel> {
 
 namespace ms_slam::slam_core
 {
-using pair_distance_t = std::tuple<double, Eigen::Vector3d, voxel>;
+using pair_distance_t = std::tuple<double, Eigen::Vector3f, voxel>;
 
 struct comparator {
     bool operator()(const pair_distance_t& left, const pair_distance_t& right) const { return std::get<0>(left) < std::get<0>(right); }
@@ -83,9 +83,9 @@ struct comparator {
 
 using priority_queue_t = std::priority_queue<pair_distance_t, std::vector<pair_distance_t>, comparator>;
 
-std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> searchNeighbors(
+std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> searchNeighbors(
     const voxelHashMap& map,
-    const Eigen::Vector3d& point,
+    const Eigen::Vector3f& point,
     int nb_voxels_visited,
     double size_voxel_map,
     int max_num_neighbors,
@@ -112,7 +112,7 @@ std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> searchNe
                 if (search != map.end()) {
                     const auto& voxel_block = search.value();
                     if (voxel_block.NumPoints() < threshold_voxel_capacity) continue;
-                    for (int i(0); i < voxel_block.NumPoints(); ++i) {
+                    for (int i = 0; i < voxel_block.NumPoints(); ++i) {
                         auto& neighbor = voxel_block.points[i];
                         double distance = (neighbor - point).norm();
                         if (priority_queue.size() == max_num_neighbors) {
@@ -129,7 +129,7 @@ std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> searchNe
     }
 
     auto size = priority_queue.size();
-    std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> closest_neighbors(size);
+    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> closest_neighbors(size);
     if (voxels != nullptr) {
         voxels->resize(size);
     }
@@ -144,7 +144,7 @@ std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> searchNe
 
 void addPointToMap(
     voxelHashMap& map,
-    const Eigen::Vector3d& point,
+    const Eigen::Vector3f& point,
     double voxel_size,
     int max_num_points_in_voxel,
     double min_distance_points,
@@ -161,9 +161,9 @@ void addPointToMap(
 
         if (!voxel_block.IsFull()) {
             double sq_dist_min_to_points = 10 * voxel_size * voxel_size;
-            for (int i(0); i < voxel_block.NumPoints(); ++i) {
+            for (int i = 0; i < voxel_block.NumPoints(); ++i) {
                 auto& _point = voxel_block.points[i];
-                double sq_dist = (_point - point).squaredNorm();
+                const double sq_dist = (_point - point).squaredNorm();
                 if (sq_dist < sq_dist_min_to_points) {
                     sq_dist_min_to_points = sq_dist;
                 }

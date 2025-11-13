@@ -1,7 +1,12 @@
 #pragma once
 
 #include <deque>
+#include <functional>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 #include <Eigen/Core>
 #include <Eigen/Dense>
@@ -41,6 +46,14 @@ class StateTemplate
     using NoiseMatrix = Eigen::Matrix<double, DoFNoise, DoFNoise>;
     using ObsH = Eigen::Matrix<double, Eigen::Dynamic, DoFObs>;
     using ObsZ = Eigen::Matrix<double, Eigen::Dynamic, 1>;
+    using NoiseDiag = Eigen::VectorXd;
+    /**
+     * @brief 观测模型回调类型
+     * @param H 线性化雅可比
+     * @param z 观测残差
+     * @param noise_diag_inv 观测噪声协方差对角的逆；若 size==1 表示统一噪声
+     */
+    using ObservationModel = std::function<void(ObsH& H, ObsZ& z, NoiseDiag& noise_diag_inv)>;
 
     StateTemplate();
     ~StateTemplate() = default;
@@ -48,6 +61,18 @@ class StateTemplate
     void Predict(const BundleInput& imu, double dt, double timestamp);
     [[nodiscard]] std::optional<Eigen::Isometry3d> Predict(double timestamp) const;
     void Update();
+
+    /**
+     * @brief 仅更新指定名称的观测模型
+     * @param name 观测模型名称
+     */
+    void UpdateWithModel(std::string_view name);
+
+    /**
+     * @brief 依序更新给定名称集合对应的观测模型
+     * @param names 观测模型名称列表
+     */
+    void UpdateWithModels(const std::vector<std::string>& names);
 
     /**
      * @brief 计算离散时间预测所需的李代数增量
@@ -101,9 +126,51 @@ class StateTemplate
     inline double timestamp() const noexcept { return stamp; }
     void timestamp(double in) noexcept { stamp = in; }
 
-    void SetHModel(std::function<void(ObsH& H, ObsZ& z)> h_model) { h_model_ = h_model; }
+    /**
+     * @brief 设置单一观测模型，旧接口保持兼容（内部清空后追加）
+     * @param h_model 观测方程回调
+     */
+    void SetHModel(const ObservationModel& h_model);
+
+    /**
+     * @brief 批量设置观测模型
+     * @param h_models 观测模型列表
+     */
+    void SetHModels(const std::vector<ObservationModel>& h_models);
+
+    /**
+     * @brief 使用自定义名称批量设置观测模型
+     * @param named_models 名称与模型的组合
+     */
+    void SetNamedHModels(const std::vector<std::pair<std::string, ObservationModel>>& named_models);
+
+    /**
+     * @brief 追加单个观测模型
+     * @param h_model 观测方程回调
+     */
+    void AddHModel(const ObservationModel& h_model);
+
+    /**
+     * @brief 追加带名称的观测模型
+     * @param name 观测模型名称
+     * @param h_model 观测方程回调
+     */
+    void AddHModel(const std::string& name, const ObservationModel& h_model);
+
+    /**
+     * @brief 清空全部观测模型
+     */
+    void ClearHModels();
 
   private:
+    struct ObservationEntry
+    {
+        std::string name;
+        ObservationModel model;
+    };
+
+    void ApplyObservationModel(const ObservationEntry& entry);
+
     BundleState X;
     ProcessMatrix P;
     NoiseMatrix Q;
@@ -113,7 +180,7 @@ class StateTemplate
 
     double stamp;
 
-    std::function<void(ObsH& H, ObsZ& z)> h_model_;
+    std::vector<ObservationEntry> h_models_;
 };
 
 using State = StateTemplate<6, 1>;

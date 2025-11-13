@@ -1,5 +1,7 @@
 #include "slam_core/state.hpp"
 
+#include <algorithm>
+
 #include "slam_core/logging_utils.hpp"
 #include "slam_core/config.hpp"
 
@@ -83,50 +85,111 @@ std::optional<Eigen::Isometry3d> StateTemplate<kObsDim, kResDim>::Predict(double
 template<int kObsDim, int kResDim>
 void StateTemplate<kObsDim, kResDim>::Update()
 {
-    // IESEKF UPDATE
-    const manif::Bundle X_predicted = X;
+    if (h_models_.empty()) {
+        spdlog::warn("State::Update: no observation models available");
+        return;
+    }
+
+    for (const auto& entry : h_models_) {
+        ApplyObservationModel(entry);
+    }
+}
+
+// TODO：用for循环是否好一点
+template<int kObsDim, int kResDim>
+void StateTemplate<kObsDim, kResDim>::UpdateWithModel(std::string_view name)
+{
+    if (h_models_.empty()) {
+        spdlog::warn("State::UpdateWithModel: no observation models available");
+        return;
+    }
+
+    const auto it = std::find_if(h_models_.begin(), h_models_.end(), [&](const ObservationEntry& entry) {
+        return entry.name == name;
+    });
+
+    if (it == h_models_.end()) {
+        spdlog::warn("State::UpdateWithModel: model {} not registered", name);
+        return;
+    }
+
+    ApplyObservationModel(*it);
+}
+
+template<int kObsDim, int kResDim>
+void StateTemplate<kObsDim, kResDim>::UpdateWithModels(const std::vector<std::string>& names)
+{
+    if (names.empty()) {
+        spdlog::warn("State::UpdateWithModels: empty name list");
+        return;
+    }
+
+    for (const auto& name : names) {
+        UpdateWithModel(name);
+    }
+}
+
+template<int kObsDim, int kResDim>
+void StateTemplate<kObsDim, kResDim>::ApplyObservationModel(const ObservationEntry& entry)
+{
+    if (!entry.model) {
+        spdlog::warn("State::Update: skip empty observation model {}", entry.name);
+        return;
+    }
+
+    const ProcessMatrix identity = ProcessMatrix::Identity();
+
+    const BundleState X_predicted = X;
     const ProcessMatrix P_predicted = P;
 
-    Eigen::Matrix<double, Eigen::Dynamic, DoFObs> H;
-    Eigen::Matrix<double, Eigen::Dynamic, 1> z;
-    ProcessMatrix KH;
+    ObsH H;
+    ObsZ z;
+    NoiseDiag noise_diag_inv;
+    bool has_observation = false;
 
-    double R = 0.001;
+    for (int iter = 0; iter < 4; ++iter) {
+        noise_diag_inv.resize(0);
+        entry.model(H, z, noise_diag_inv);
+        if (H.rows() == 0 || z.rows() == 0) {
+            break;
+        }
 
-    for (int i = 0; i < 4; ++i) {
-      h_model_(H, z); // Update H,z and set K to zeros
+        has_observation = true;
 
-      // update P
-      ProcessMatrix J;
-      Tangent dx = X.minus(X_predicted, J); // Xu-2021, [https://arxiv.org/abs/2107.06829] Eq. (35)
+        ProcessMatrix J;
+        Tangent dx = X.minus(X_predicted, J);  // Xu-2021, Eq. (35)
+        const ProcessMatrix J_inv = J.inverse();
+        const ProcessMatrix P_linearized = J_inv * P_predicted * J_inv.transpose();
 
-      P = J.inverse() * P_predicted * J.inverse().transpose();
-      ProcessMatrix P_inv = (P / R).inverse();
-      const Eigen::Matrix<double, DoFObs, DoFObs> HTH = H.transpose() * H;
-      
-      P_inv.block<DoFObs, DoFObs>(0, 0) += HTH;
-      P_inv = P_inv.inverse();
+        const Eigen::Matrix<double, DoFObs, Eigen::Dynamic> HTR_inv = H.transpose() * noise_diag_inv.asDiagonal();
 
-      const Tangent Kz = P_inv.block<DoF, DoFObs>(0, 0) * H.transpose() * z;
+        ProcessMatrix P_inv = P_linearized.inverse();
+        const Eigen::Matrix<double, DoFObs, DoFObs> HTH = HTR_inv * H;
 
-      KH.setZero();
-      KH.block<DoF, DoFObs>(0, 0) = P_inv.block<DoF, DoFObs>(0, 0) * HTH;
+        P_inv.block<DoFObs, DoFObs>(0, 0) += HTH;
+        P_inv = P_inv.inverse();
 
-      dx = Kz + (KH - ProcessMatrix::Identity()) * J.inverse() * dx;
+        const Tangent Kz = P_inv.block<DoF, DoFObs>(0, 0) * HTR_inv * z;
 
-      if ((dx.coeffs().array().abs() <= 0.0001).all() || i == 3) {
-        ProcessMatrix L;
-        X = X.plus(dx, {}, L);
-        P = (ProcessMatrix::Identity() - KH) * P;
-        P = L * P * L.transpose();
+        ProcessMatrix KH = ProcessMatrix::Zero();
+        KH.block<DoF, DoFObs>(0, 0) = P_inv.block<DoF, DoFObs>(0, 0) * HTH;
 
-        // spdlog::info("L ori:\n {}", as_eigen(L.block<3, 3>(3, 3)));
-        // manif::SO3Tangentd w(dx.element<1>());
-        // Eigen::Matrix3d L_R = w.rjac();
-        // spdlog::info("L_R:\n {}", as_eigen(L_R));
-        break;
-      }
-      X = X.plus(dx);
+        dx = Kz + (KH - identity) * J_inv * dx;
+
+        if ((dx.coeffs().array().abs() <= 0.0001).all() || iter == 3) {
+            ProcessMatrix L;
+            X = X.plus(dx, {}, L);
+
+            ProcessMatrix cov = (identity - KH) * P_linearized;
+            P = L * cov * L.transpose();
+            break;
+        }
+
+        X = X.plus(dx);
+    }
+
+    if (!has_observation) {
+        spdlog::info("State::Update: observation produced no residuals ({})", entry.name);
     }
 }
 
@@ -175,6 +238,52 @@ typename StateTemplate<kObsDim, kResDim>::MappingMatrix StateTemplate<kObsDim, k
     out.block<3, 3>(12, 9) = Eigen::Matrix3d::Identity();  // b_a w.r.t n_{b_a}
 
     return out;
+}
+
+template<int kObsDim, int kResDim>
+void StateTemplate<kObsDim, kResDim>::SetHModel(const ObservationModel& h_model)
+{
+    h_models_.clear();
+    h_models_.push_back(ObservationEntry{std::string("obs_0"), h_model});
+}
+
+template<int kObsDim, int kResDim>
+void StateTemplate<kObsDim, kResDim>::SetHModels(const std::vector<ObservationModel>& h_models)
+{
+    h_models_.clear();
+    h_models_.reserve(h_models.size());
+    for (std::size_t i = 0; i < h_models.size(); ++i) {
+        h_models_.push_back(ObservationEntry{std::string("obs_") + std::to_string(i), h_models[i]});
+    }
+}
+
+template<int kObsDim, int kResDim>
+void StateTemplate<kObsDim, kResDim>::SetNamedHModels(const std::vector<std::pair<std::string, ObservationModel>>& named_models)
+{
+    h_models_.clear();
+    h_models_.reserve(named_models.size());
+    for (const auto& item : named_models) {
+        h_models_.push_back(ObservationEntry{item.first, item.second});
+    }
+}
+
+template<int kObsDim, int kResDim>
+void StateTemplate<kObsDim, kResDim>::AddHModel(const ObservationModel& h_model)
+{
+    const std::string name = "obs_" + std::to_string(h_models_.size());
+    h_models_.push_back(ObservationEntry{name, h_model});
+}
+
+template<int kObsDim, int kResDim>
+void StateTemplate<kObsDim, kResDim>::AddHModel(const std::string& name, const ObservationModel& h_model)
+{
+    h_models_.push_back(ObservationEntry{name, h_model});
+}
+
+template<int kObsDim, int kResDim>
+void StateTemplate<kObsDim, kResDim>::ClearHModels()
+{
+    h_models_.clear();
 }
 
 template class StateTemplate<6, 1>;

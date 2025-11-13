@@ -9,28 +9,78 @@
 #include <spdlog/spdlog.h>
 #include <Eigen/Core>
 
+/**
+ * @brief Eigen矩阵的轻量包装器，配合fmt实现高性能日志输出
+ * @tparam Derived Eigen矩阵派生类型
+ */
 template <class Derived>
 struct EigenWrap {
-    const Eigen::MatrixBase<Derived>& m;
-    Eigen::IOFormat fmt;
+    const Eigen::MatrixBase<Derived>& matrix;  ///< 需格式化的矩阵引用
+    Eigen::IOFormat fmt;                      ///< 输出格式配置
 };
 
+/**
+ * @brief 将Eigen矩阵封装为EigenWrap以便fmt格式化
+ * @tparam Derived Eigen矩阵派生类型
+ * @param matrix 待输出的矩阵
+ * @param io 自定义输出格式，默认与Eigen标准输出一致
+ * @return EigenWrap<Derived> 可直接用于spdlog/fmt的对象
+ */
 template <class Derived>
-EigenWrap<Derived> as_eigen(const Eigen::MatrixBase<Derived>& m,
-                            Eigen::IOFormat io = Eigen::IOFormat(
-                                Eigen::StreamPrecision, 0, ", ", "\n", "[", "]")) {
-    return {m, io};
+EigenWrap<Derived> as_eigen(
+    const Eigen::MatrixBase<Derived>& matrix,
+    Eigen::IOFormat io = Eigen::IOFormat(Eigen::StreamPrecision, 0, ", ", "\n", "[", "]"))
+{
+    return {matrix, io};
 }
 
 template <class Derived>
 struct fmt::formatter<EigenWrap<Derived>> {
-    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+    constexpr auto parse(format_parse_context& ctx)
+    {
+        auto it = ctx.begin();
+        if (it != ctx.end() && *it != '}') {
+            throw fmt::format_error("invalid format for EigenWrap");
+        }
+        return it;
+    }
 
     template <class FormatContext>
-    auto format(const EigenWrap<Derived>& w, FormatContext& ctx) {
-        std::ostringstream oss;
-        oss << w.m.derived().format(w.fmt);
-        return fmt::format_to(ctx.out(), "{}", oss.str());
+    auto format(const EigenWrap<Derived>& wrapper, FormatContext& ctx)
+    {
+        auto out = ctx.out();
+        const auto rows = wrapper.matrix.rows();
+        const auto cols = wrapper.matrix.cols();
+        const auto& fmt_cfg = wrapper.fmt;
+        const bool use_stream_precision = fmt_cfg.precision == Eigen::StreamPrecision;
+
+        auto append_literal = [&](const std::string& literal) {
+            if (!literal.empty()) {
+                out = fmt::format_to(out, "{}", literal);
+            }
+        };
+
+        append_literal(fmt_cfg.matPrefix);
+        for (Eigen::Index r = 0; r < rows; ++r) {
+            append_literal(fmt_cfg.rowPrefix);
+            for (Eigen::Index c = 0; c < cols; ++c) {
+                if (c > 0) {
+                    append_literal(fmt_cfg.coeffSeparator);
+                }
+                const auto coeff = wrapper.matrix.coeff(r, c);
+                if (use_stream_precision) {
+                    out = fmt::format_to(out, "{}", coeff);
+                } else {
+                    out = fmt::format_to(out, "{:.{}f}", coeff, fmt_cfg.precision);
+                }
+            }
+            append_literal(fmt_cfg.rowSuffix);
+            if (r + 1 < rows) {
+                append_literal(fmt_cfg.rowSeparator);
+            }
+        }
+        append_literal(fmt_cfg.matSuffix);
+        return out;
     }
 };
 

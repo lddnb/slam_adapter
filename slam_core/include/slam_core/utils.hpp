@@ -13,9 +13,10 @@ struct Match {
     Eigen::Vector3d p;
     Eigen::Vector4d n;  // global normal vector
     double dist2plane;
+    double confidence = 1.0;
 
     Match() = default;
-    Match(const Eigen::Vector3d& p_, const Eigen::Vector4d& n_, const double dist) : p(p_), n(n_), dist2plane(dist){};
+    Match(const Eigen::Vector3d& p_, const Eigen::Vector4d& n_, const double dist) : p(p_), n(n_), dist2plane(dist), confidence(1.0){};
 
     inline static double Dist2Plane(const Eigen::Vector4d& normal, const Eigen::Vector3d& point) { return normal.head<3>().dot(point) + normal(3); }
 };

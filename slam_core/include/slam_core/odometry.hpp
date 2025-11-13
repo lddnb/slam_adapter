@@ -64,7 +64,13 @@ class Odometry
 
     void RunOdometry();
 
-    void ObsModel(State::ObsH& H, State::ObsZ& z);
+    /**
+     * @brief 构建点云观测模型并输出噪声逆
+     * @param H 观测雅可比
+     * @param z 观测残差
+     * @param noise_inv 噪声协方差对角的逆（可为统一值或逐点值）
+     */
+    void ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_inv);
 
     void GetLidarState(States& buffer);
 
@@ -121,6 +127,8 @@ class Odometry
     Eigen::Isometry3d T_i_l;
 
     std::size_t frame_index_;  ///< 帧索引
+
+    double lidar_measurement_cov_;
 
 #ifdef USE_PCL
     std::deque<PointCloudT::ConstPtr> pcl_lidar_buffer_;

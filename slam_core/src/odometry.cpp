@@ -38,7 +38,9 @@ Odometry::Odometry()
     downsampled_cloud_ = std::make_shared<PointCloudType>();
     odometry_thread_ = std::make_unique<std::thread>(&Odometry::RunOdometry, this);
     state_ = State();
-    state_.SetHModel(std::bind(&Odometry::ObsModel, this, std::placeholders::_1, std::placeholders::_2));
+    state_.AddHModel("lidar", std::bind(&Odometry::ObsModel, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+
+    lidar_measurement_cov_ = std::max(static_cast<double>(cfg.mapping_params.laser_point_cov), 1e-6);
 
     T_i_l = Eigen::Isometry3d::Identity();
     T_i_l.linear() = cfg.mapping_params.extrinR;
@@ -557,12 +559,15 @@ void Odometry::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
 #endif
 }
 
-void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
+void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_inv)
 {
     EASY_FUNCTION(profiler::colors::Green500);
+    H.resize(0, State::DoFObs);
+    z.resize(0, 1);
+    noise_inv.resize(0);
     if (frame_index_ == 0) return;
 
-    Matches first_matches;
+    Matches obs_matches;
 
     int N = downsampled_cloud_->size();
 
@@ -589,11 +594,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
 #elif defined(USE_VDB)
         local_map_->GetKNearestNeighbors(g.cast<float>(), 10, neighbors, pointSearchSqDis);
 #elif defined(USE_HASHMAP)
-        auto vector_neighbors = searchNeighbors(*local_map_, g, 1, 0.5, 10, 1, nullptr);
-        if (vector_neighbors.size() < 5) return;
-        for (auto neighbor : vector_neighbors) {
-            neighbors.emplace_back(Eigen::Vector3f(neighbor.x(), neighbor.y(), neighbor.z()));
-        }
+        neighbors = searchNeighbors(*local_map_, g.cast<float>(), 1, 0.5, 10, 1, nullptr);
         pointSearchSqDis = std::vector<float>(5, 0);
 #endif
 
@@ -608,6 +609,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
         if (s > 0.9) {
             chosen[i] = true;
             matches[i] = Match(p, p_abcd, dist);
+            matches[i].confidence = static_cast<double>(s);
         }
     });  // end for_each
     EASY_END_BLOCK;
@@ -656,24 +658,25 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
     EASY_END_BLOCK;
 #endif
 
-    first_matches.clear();
+    obs_matches.clear();
 
     for (int i = 0; i < N; i++) {
-        if (chosen[i]) first_matches.emplace_back(matches[i]);
+        if (chosen[i]) obs_matches.emplace_back(matches[i]);
     }
 
-    spdlog::info("osb matches size: {}", first_matches.size());
+    spdlog::info("osb matches size: {}", obs_matches.size());
 
-    H = Eigen::MatrixXd::Zero(first_matches.size() * State::DoFRes, State::DoFObs);
-    z = Eigen::MatrixXd::Zero(first_matches.size() * State::DoFRes, 1);
+    H = Eigen::MatrixXd::Zero(obs_matches.size() * State::DoFRes, State::DoFObs);
+    z = Eigen::MatrixXd::Zero(obs_matches.size() * State::DoFRes, 1);
+    noise_inv = State::NoiseDiag::Zero(obs_matches.size() * State::DoFRes);
 
-    indices.resize(first_matches.size());
+    indices.resize(obs_matches.size());
     std::iota(indices.begin(), indices.end(), 0);
 
     EASY_BLOCK("build_jacobian", profiler::colors::Lime600);
     std::atomic<double> residual_sum = 0.0;
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
-        const Match m = first_matches[i];
+        const Match m = obs_matches[i];
 
         Eigen::Matrix3d J;  // Jacobian of R act.
         const Eigen::Vector3d g = state_.ori_R().act(T_i_l * m.p, J) + state_.p();
@@ -683,11 +686,16 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z)
         H.block<State::DoFRes, State::DoFObs>(i * State::DoFRes, 0) << m.n.head(3).transpose(), J_R.transpose();
         z.segment<State::DoFRes>(i * State::DoFRes).setConstant(-m.dist2plane);
 
+        // noise_inv.segment<State::DoFRes>(i * State::DoFRes).setConstant(cov_inv);
+
         // ICP
         // H.block<State::DoFRes, State::DoFObs>(i * State::DoFRes, 0) << Eigen::Matrix3d::Identity(), J;
         // z.segment<State::DoFRes>(i * State::DoFRes) = -(g - m.n.head(3));
         residual_sum.fetch_add(fabs(z(i)), std::memory_order_relaxed);
     });  // end for_each
+    const double base_cov_inv = 1.0 / lidar_measurement_cov_;
+    spdlog::info("Base covariance inverse: {:.6f}", base_cov_inv);
+    noise_inv = State::NoiseDiag::Constant(obs_matches.size() * State::DoFRes, base_cov_inv);
     EASY_END_BLOCK;
     spdlog::info("Residual sum: {:.6f}", residual_sum.load());
 }
@@ -763,7 +771,7 @@ void Odometry::RunOdometry()
 #endif
 
             EASY_BLOCK("Update", profiler::colors::DeepPurpleA400);
-            state_.Update();
+            state_.UpdateWithModel("lidar");
             EASY_END_BLOCK;
             spdlog::info(
                 "[state] update pos: {:.6f} {:.6f} {:.6f}, quat: {:.6f} {:.6f} {:.6f} {:.6f}",
@@ -856,15 +864,14 @@ void Odometry::RunOdometry()
             spdlog::info("local map add {} points", local_points.size());
 #elif defined(USE_HASHMAP)
             auto ori_points = downsampled_cloud_->positions_vec3();
-            for (const auto& point : ori_points) {
-                Eigen::Vector3d cur_point(point.x(), point.y(), point.z());
-                addPointToMap(*local_map_, cur_point, 0.5, 20, 0.05, 0);
+            for (const Eigen::Vector3f& point : ori_points) {
+                addPointToMap(*local_map_, point, 0.5, 20, 0.05, 0);
             }
             Eigen::Vector3d location = state_.p();
             std::vector<voxel> voxels_to_erase;
             for (const auto& pair : *local_map_) {
-                Eigen::Vector3d pt = pair.second.points[0];
-                if ((pt - location).squaredNorm() > (100 * 100)) {
+                Eigen::Vector3f pt = pair.second.points[0];
+                if ((pt.cast<double>() - location).squaredNorm() > (100 * 100)) {
                     voxels_to_erase.push_back(pair.first);
                 }
             }
