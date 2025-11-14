@@ -33,12 +33,17 @@ Odometry::Odometry()
     local_map_ = std::make_unique<VDBMap>(0.5, 100, 10);
 #elif defined(USE_HASHMAP)
     local_map_ = std::make_unique<voxelHashMap>();
+#elif defined(USE_VOXELMAP)
+    local_map_ = std::make_unique<std::unordered_map<VOXEL_LOC, OctoTree*>>();
 #endif
     deskewed_cloud_ = std::make_shared<PointCloudType>();
     downsampled_cloud_ = std::make_shared<PointCloudType>();
     odometry_thread_ = std::make_unique<std::thread>(&Odometry::RunOdometry, this);
     state_ = State();
     state_.AddHModel("lidar", std::bind(&Odometry::ObsModel, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+#ifdef USE_VOXELMAP
+    state_.AddHModel("voxelmap", std::bind(&Odometry::VoxelMapObsModel, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+#endif
 
     lidar_measurement_cov_ = std::max(static_cast<double>(cfg.mapping_params.laser_point_cov), 1e-6);
 
@@ -667,8 +672,8 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_
     spdlog::info("osb matches size: {}", obs_matches.size());
 
     H = Eigen::MatrixXd::Zero(obs_matches.size() * State::DoFRes, State::DoFObs);
-    z = Eigen::MatrixXd::Zero(obs_matches.size() * State::DoFRes, 1);
-    noise_inv = State::NoiseDiag::Zero(obs_matches.size() * State::DoFRes);
+    z = Eigen::VectorXd::Zero(obs_matches.size() * State::DoFRes);
+    noise_inv = Eigen::VectorXd::Zero(obs_matches.size() * State::DoFRes);
 
     indices.resize(obs_matches.size());
     std::iota(indices.begin(), indices.end(), 0);
@@ -691,13 +696,108 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_
         // ICP
         // H.block<State::DoFRes, State::DoFObs>(i * State::DoFRes, 0) << Eigen::Matrix3d::Identity(), J;
         // z.segment<State::DoFRes>(i * State::DoFRes) = -(g - m.n.head(3));
-        residual_sum.fetch_add(fabs(z(i)), std::memory_order_relaxed);
+        residual_sum.fetch_add(fabs(z(i * State::DoFRes)), std::memory_order_relaxed);
     });  // end for_each
     const double base_cov_inv = 1.0 / lidar_measurement_cov_;
-    spdlog::info("Base covariance inverse: {:.6f}", base_cov_inv);
     noise_inv = State::NoiseDiag::Constant(obs_matches.size() * State::DoFRes, base_cov_inv);
     EASY_END_BLOCK;
     spdlog::info("Residual sum: {:.6f}", residual_sum.load());
+}
+
+void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_inv)
+{
+    EASY_FUNCTION(profiler::colors::Green500);
+    H.resize(0, State::DoFObs);
+    z.resize(0, 1);
+    noise_inv.resize(0);
+    if (frame_index_ == 0) return;
+
+    int N = downsampled_cloud_->size();
+    std::vector<pointWithCov> pv_list(N);
+
+    std::vector<int> indices(N);
+    std::iota(indices.begin(), indices.end(), 0);
+
+    EASY_BLOCK("matching", profiler::colors::BlueGrey500);
+    
+    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
+        const Eigen::Vector3d p = downsampled_cloud_->position(i).cast<double>();
+        const Eigen::Vector3d g = state_.isometry3d() * T_i_l * p;  // global coords
+
+        pointWithCov pv;
+        pv.point = p;
+        pv.point_world = g;
+        // 计算lidar点的cov
+        // 注意这个在每次迭代时是存在重复计算的 因为lidar系的点云covariance是不变的
+        // Eigen::Matrix3d cov_lidar = calcBodyCov(pv.point, ranging_cov, angle_cov);
+        Eigen::Matrix3d cov_lidar = var_down_body_[i];
+        // 将body系的var转换到world系
+        pv.cov = transformLiDARCovToWorld(pv.point.cast<float>(), T_i_l, state_, cov_lidar);
+        pv.cov_lidar = cov_lidar;
+        pv_list[i] = pv;
+    });
+
+    std::vector<ptpl> ptpl_list;
+    std::vector<Eigen::Vector3d> non_match_list;
+    BuildResidualListOMP(*local_map_, 0.5, 3.0, 4, pv_list,
+                         ptpl_list, non_match_list);
+    EASY_END_BLOCK;
+
+    int effct_feat_num = ptpl_list.size();
+
+    spdlog::info("osb matches size: {}", effct_feat_num);
+
+    H = Eigen::MatrixXd::Zero(effct_feat_num * State::DoFRes, State::DoFObs);
+    z = Eigen::VectorXd::Zero(effct_feat_num * State::DoFRes);
+    noise_inv = Eigen::VectorXd::Zero(effct_feat_num * State::DoFRes);
+
+    indices.resize(effct_feat_num);
+    std::iota(indices.begin(), indices.end(), 0);
+
+    EASY_BLOCK("build_jacobian", profiler::colors::Lime600);
+    std::atomic<double> residual_sum = 0.0;
+    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
+        Eigen::Vector3d point_this_be(ptpl_list[i].point);
+        Eigen::Matrix3d point_be_crossmat = manif::skew(point_this_be);
+        Eigen::Vector3d point_this = T_i_l * point_this_be;
+        Eigen::Matrix3d point_crossmat = manif::skew(point_this);
+
+        Eigen::Vector3d norm_vec(ptpl_list[i].normal);
+
+        Eigen::Vector3d C(state_.R().transpose() * norm_vec);
+        Eigen::Vector3d A(point_crossmat * C);
+
+        // Eigen::Matrix3d J;  // Jacobian of R act.
+        // const Eigen::Vector3d g = state_.ori_R().act(T_i_l * m.p, J) + state_.p();
+        // const Eigen::Vector3d J_R = m.n.head(3).transpose() * J;  // Jacobian of rot
+
+        //! 这里要用负的残差
+        H.block<State::DoFRes, State::DoFObs>(i * State::DoFRes, 0) << norm_vec.x(), norm_vec.y(), norm_vec.z(), A[0], A[1], A[2];
+        double pd2 = norm_vec.dot(ptpl_list[i].point_world) + ptpl_list[i].d;
+                
+        z.segment<State::DoFRes>(i * State::DoFRes).setConstant(-pd2);
+
+        Eigen::Vector3d point_world = ptpl_list[i].point_world;
+        // /*** get the normal vector of closest surface/corner ***/
+        Eigen::Matrix<double, 1, 6> J_nq;
+        J_nq.block<1, 3>(0, 0) = point_world - ptpl_list[i].center;
+        J_nq.block<1, 3>(0, 3) = -ptpl_list[i].normal;
+        double sigma_l = J_nq * ptpl_list[i].plane_cov * J_nq.transpose();
+
+        // Eigen::Matrix3d cov_lidar = calcBodyCov(ptpl_list[i].point, ranging_cov, angle_cov);
+        Eigen::Matrix3d cov_lidar = ptpl_list[i].cov_lidar;
+        Eigen::Matrix3d R_cov_Rt = state_.R() * T_i_l.rotation() * cov_lidar * T_i_l.rotation().transpose() * state_.R().transpose();
+        // HACK 1. 因为是标量 所以求逆直接用1除
+        // HACK 2. 不同分量的方差用加法来合成 因为公式(12)中的Sigma是对角阵，逐元素运算之后就是对角线上的项目相加
+        double R_inv = 1.0 / (sigma_l + norm_vec.transpose() * R_cov_Rt * norm_vec);
+
+        noise_inv.segment<State::DoFRes>(i * State::DoFRes).setConstant(R_inv);
+
+        residual_sum.fetch_add(fabs(z(i * State::DoFRes)), std::memory_order_relaxed);
+    });  // end for_each
+    EASY_END_BLOCK;
+    spdlog::info("Residual sum: {:.6f}", residual_sum.load());
+    
 }
 
 void Odometry::RunOdometry()
@@ -753,7 +853,7 @@ void Odometry::RunOdometry()
 #endif
 
 #ifdef USE_IKDTREE
-            if (local_map_->Root_Node == nullptr) {
+            if (frame_index_ == 0) {
                 if (downsampled_cloud_->size() > 5) {
                     downsampled_cloud_->transform(state_.isometry3d() * T_i_l);
                     std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> local_points;
@@ -768,10 +868,46 @@ void Odometry::RunOdometry()
                 frame_index_++;
                 continue;
             }
+#elif defined(USE_VOXELMAP)
+            if (frame_index_ == 0) {
+                std::vector<pointWithCov> pv_list;
+                auto downsampled_world = downsampled_cloud_->transformed(state_.isometry3d() * T_i_l);
+                const auto world_points = downsampled_world.positions_vec3();
+                const auto body_points = downsampled_cloud_->positions_vec3();
+                pv_list.reserve(world_points.size());
+
+                for (size_t i = 0; i < world_points.size(); ++i) {
+                    pointWithCov pv;
+                    const Eigen::Vector3f body_pt = body_points[i];
+                    const Eigen::Vector3f world_pt = world_points[i];
+                    pv.point = world_pt.cast<double>();
+                    const Eigen::Matrix3d cov_lidar = calcBodyCov(body_pt, 0.02, 0.05);
+                    pv.cov = transformLiDARCovToWorld(body_pt, T_i_l, state_, cov_lidar);
+                    pv_list.emplace_back(pv);
+                }
+
+                std::vector<int> layer_size(5, 5);
+                buildVoxelMap(pv_list, 0.5, 4, layer_size, 1000, 1000, 0.01, *local_map_);
+                spdlog::info("build local map with {} points", pv_list.size());
+
+                frame_index_++;
+                continue;
+            }
+
+            var_down_body_.clear();
+            const auto body_points = downsampled_cloud_->positions_vec3();
+            var_down_body_.reserve(body_points.size());
+            for (const Eigen::Vector3f& pt : body_points) {
+                var_down_body_.emplace_back(calcBodyCov(pt, 0.02, 0.05));
+            }
 #endif
 
             EASY_BLOCK("Update", profiler::colors::DeepPurpleA400);
+#ifdef USE_VOXELMAP
+            state_.UpdateWithModel("voxelmap");
+#else
             state_.UpdateWithModel("lidar");
+#endif
             EASY_END_BLOCK;
             spdlog::info(
                 "[state] update pos: {:.6f} {:.6f} {:.6f}, quat: {:.6f} {:.6f} {:.6f} {:.6f}",
@@ -785,7 +921,7 @@ void Odometry::RunOdometry()
             // spdlog::info("update cov: {}", as_eigen(state_.cov().block<6, 6>(0, 0)));
 
             EASY_BLOCK("TransformToWorld", profiler::colors::Indigo700);
-#ifndef USE_VDB
+#if !defined(USE_VDB) && !defined(USE_VOXELMAP)
             downsampled_cloud_->transform(state_.isometry3d() * T_i_l);
 #endif
             deskewed_cloud_->transform(state_.isometry3d() * T_i_l);
@@ -872,11 +1008,41 @@ void Odometry::RunOdometry()
             for (const auto& pair : *local_map_) {
                 Eigen::Vector3f pt = pair.second.points[0];
                 if ((pt.cast<double>() - location).squaredNorm() > (100 * 100)) {
-                    voxels_to_erase.push_back(pair.first);
+                    voxels_to_erase.emplace_back(pair.first);
                 }
             }
             for (auto& vox : voxels_to_erase) local_map_->erase(vox);
             std::vector<voxel>().swap(voxels_to_erase);
+#elif defined(USE_VOXELMAP)
+            auto downsampled_world = downsampled_cloud_->transformed(state_.isometry3d() * T_i_l);
+            auto world_points = downsampled_world.positions_vec3();
+            auto lidar_points = downsampled_cloud_->positions_vec3();
+            std::vector<pointWithCov> pv_list;
+            pv_list.reserve(world_points.size());
+            for (size_t i = 0; i < world_points.size(); i++) {
+                const Eigen::Vector3f& point_lidar = lidar_points[i];
+                const Eigen::Vector3f& point_world = world_points[i];
+                // 保存body系和world系坐标
+                pointWithCov pv;
+                // 计算lidar点的cov
+                // FIXME 这里错误的使用世界系的点来calcBodyCov时 反倒在某些seq（比如hilti2022的03 15）上效果更好
+                // 需要考虑是不是init_plane时使用更大的cov更好 注意这个在每次迭代时是存在重复计算的 因为lidar系的点云covariance是不变的
+                // Eigen::Matrix3d cov_lidar = calcBodyCov(pv.point, ranging_cov, angle_cov);
+                const Eigen::Matrix3d& cov_lidar = var_down_body_[i];
+                // 将body系的var转换到world系
+                pv.cov = transformLiDARCovToWorld(point_lidar, T_i_l, state_, cov_lidar);
+
+                // 最终updateVoxelMap需要用的是world系的point
+                pv.point = point_world.cast<double>();
+                pv_list.push_back(pv);
+            }
+
+            std::sort(pv_list.begin(), pv_list.end(), var_contrast);
+            std::vector<int> layer_size(5, 5);
+            updateVoxelMapOMP(pv_list, 0.5, 4, layer_size,
+                           1000, 1000, 0.01,
+                           *local_map_);
+            spdlog::info("local map add {} points", world_points.size());
 #endif
             frame_index_++;
         }

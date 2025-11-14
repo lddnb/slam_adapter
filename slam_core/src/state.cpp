@@ -95,7 +95,6 @@ void StateTemplate<kObsDim, kResDim>::Update()
     }
 }
 
-// TODO：用for循环是否好一点
 template<int kObsDim, int kResDim>
 void StateTemplate<kObsDim, kResDim>::UpdateWithModel(std::string_view name)
 {
@@ -104,6 +103,7 @@ void StateTemplate<kObsDim, kResDim>::UpdateWithModel(std::string_view name)
         return;
     }
 
+    // 零散两个观测模型来说，std::find_if 和手写 for 循环在效率上没有本质差别：两者最终都会线性扫描整个容器
     const auto it = std::find_if(h_models_.begin(), h_models_.end(), [&](const ObservationEntry& entry) {
         return entry.name == name;
     });

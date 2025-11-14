@@ -1,6 +1,6 @@
 #pragma once
 
-#define USE_HASHMAP
+#define USE_VOXELMAP
 
 #include <deque>
 #include <mutex>
@@ -19,7 +19,9 @@
 #elif defined(USE_VDB)
 #include "slam_core/VDB_map.hpp"
 #elif defined(USE_HASHMAP)
-#include "slam_core/voxel_hashmap.hpp"
+#include "slam_core/hash_map.hpp"
+#elif defined(USE_VOXELMAP)
+#include "slam_core/voxel_map.hpp"
 #endif
 
 namespace ms_slam::slam_core
@@ -72,6 +74,10 @@ class Odometry
      */
     void ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_inv);
 
+#if defined(USE_VOXELMAP)
+    void VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_inv);
+#endif
+
     void GetLidarState(States& buffer);
 
     void GetMapCloud(std::vector<PointCloudType::Ptr>& cloud_buffer);
@@ -105,6 +111,9 @@ class Odometry
     std::unique_ptr<VDBMap> local_map_;
 #elif defined(USE_HASHMAP)
     std::unique_ptr<voxelHashMap> local_map_;  ///< 局部地图
+#elif defined(USE_VOXELMAP)
+    std::unique_ptr<std::unordered_map<VOXEL_LOC, OctoTree *>> local_map_;
+    std::vector<Eigen::Matrix3d> var_down_body_;
 #endif
 
     double last_timestamp_imu_;
@@ -117,7 +126,7 @@ class Odometry
     bool initialized_;           ///< 是否初始化
 
     double imu_scale_factor_;  ///< 平均加速度
-    std::mutex state_mutex_;    ///< 状态互斥锁
+    std::mutex state_mutex_;   ///< 状态互斥锁
 
     std::vector<PointCloudType::Ptr> map_cloud_buffer_;  ///< 同步数据列表
 
