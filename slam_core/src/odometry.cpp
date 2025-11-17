@@ -34,7 +34,7 @@ Odometry::Odometry()
 #elif defined(USE_HASHMAP)
     local_map_ = std::make_unique<voxelHashMap>();
 #elif defined(USE_VOXELMAP)
-    local_map_ = std::make_unique<std::unordered_map<VOXEL_LOC, OctoTree*>>();
+    local_map_ = std::make_unique<VoxelMap>();
 #endif
     deskewed_cloud_ = std::make_shared<PointCloudType>();
     downsampled_cloud_ = std::make_shared<PointCloudType>();
@@ -713,7 +713,7 @@ void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag
     if (frame_index_ == 0) return;
 
     int N = downsampled_cloud_->size();
-    std::vector<pointWithCov> pv_list(N);
+    std::vector<PointWithCov> pv_list(N);
 
     std::vector<int> indices(N);
     std::iota(indices.begin(), indices.end(), 0);
@@ -724,23 +724,22 @@ void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag
         const Eigen::Vector3d p = downsampled_cloud_->position(i).cast<double>();
         const Eigen::Vector3d g = state_.isometry3d() * T_i_l * p;  // global coords
 
-        pointWithCov pv;
-        pv.point = p;
-        pv.point_world = g;
+        PointWithCov pv;
+        pv.body_point = p.cast<float>();
+        pv.world_point = g.cast<float>();
         // 计算lidar点的cov
         // 注意这个在每次迭代时是存在重复计算的 因为lidar系的点云covariance是不变的
-        // Eigen::Matrix3d cov_lidar = calcBodyCov(pv.point, ranging_cov, angle_cov);
+        // Eigen::Matrix3d cov_lidar = CalcBodyCov(pv.body_point, ranging_cov, angle_cov);
         Eigen::Matrix3d cov_lidar = var_down_body_[i];
         // 将body系的var转换到world系
-        pv.cov = transformLiDARCovToWorld(pv.point.cast<float>(), T_i_l, state_, cov_lidar);
+        pv.cov = TransformLiDARCovToWorld(pv.body_point, T_i_l, state_, cov_lidar);
         pv.cov_lidar = cov_lidar;
         pv_list[i] = pv;
     });
 
-    std::vector<ptpl> ptpl_list;
+    std::vector<PointToPlaneResidual> ptpl_list;
     std::vector<Eigen::Vector3d> non_match_list;
-    BuildResidualListOMP(*local_map_, 0.5, 3.0, 4, pv_list,
-                         ptpl_list, non_match_list);
+    local_map_->BuildResidualList(pv_list, ptpl_list, non_match_list);
     EASY_END_BLOCK;
 
     int effct_feat_num = ptpl_list.size();
@@ -757,12 +756,12 @@ void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag
     EASY_BLOCK("build_jacobian", profiler::colors::Lime600);
     std::atomic<double> residual_sum = 0.0;
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
-        Eigen::Vector3d point_this_be(ptpl_list[i].point);
+        Eigen::Vector3d point_this_be = ptpl_list[i].body_point.cast<double>();
         Eigen::Matrix3d point_be_crossmat = manif::skew(point_this_be);
         Eigen::Vector3d point_this = T_i_l * point_this_be;
         Eigen::Matrix3d point_crossmat = manif::skew(point_this);
 
-        Eigen::Vector3d norm_vec(ptpl_list[i].normal);
+        Eigen::Vector3d norm_vec = ptpl_list[i].normal.cast<double>();
 
         Eigen::Vector3d C(state_.R().transpose() * norm_vec);
         Eigen::Vector3d A(point_crossmat * C);
@@ -773,18 +772,18 @@ void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag
 
         //! 这里要用负的残差
         H.block<State::DoFRes, State::DoFObs>(i * State::DoFRes, 0) << norm_vec.x(), norm_vec.y(), norm_vec.z(), A[0], A[1], A[2];
-        double pd2 = norm_vec.dot(ptpl_list[i].point_world) + ptpl_list[i].d;
+        double pd2 = norm_vec.dot(ptpl_list[i].world_point.cast<double>()) + ptpl_list[i].d;
                 
         z.segment<State::DoFRes>(i * State::DoFRes).setConstant(-pd2);
 
-        Eigen::Vector3d point_world = ptpl_list[i].point_world;
+        Eigen::Vector3d point_world = ptpl_list[i].world_point.cast<double>();
         // /*** get the normal vector of closest surface/corner ***/
         Eigen::Matrix<double, 1, 6> J_nq;
-        J_nq.block<1, 3>(0, 0) = point_world - ptpl_list[i].center;
-        J_nq.block<1, 3>(0, 3) = -ptpl_list[i].normal;
+        J_nq.block<1, 3>(0, 0) = point_world - ptpl_list[i].center.cast<double>();
+        J_nq.block<1, 3>(0, 3) = -ptpl_list[i].normal.cast<double>();
         double sigma_l = J_nq * ptpl_list[i].plane_cov * J_nq.transpose();
 
-        // Eigen::Matrix3d cov_lidar = calcBodyCov(ptpl_list[i].point, ranging_cov, angle_cov);
+        // Eigen::Matrix3d cov_lidar = CalcBodyCov(ptpl_list[i].body_point, ranging_cov, angle_cov);
         Eigen::Matrix3d cov_lidar = ptpl_list[i].cov_lidar;
         Eigen::Matrix3d R_cov_Rt = state_.R() * T_i_l.rotation() * cov_lidar * T_i_l.rotation().transpose() * state_.R().transpose();
         // HACK 1. 因为是标量 所以求逆直接用1除
@@ -870,24 +869,25 @@ void Odometry::RunOdometry()
             }
 #elif defined(USE_VOXELMAP)
             if (frame_index_ == 0) {
-                std::vector<pointWithCov> pv_list;
+                std::vector<PointWithCov> pv_list;
                 auto downsampled_world = downsampled_cloud_->transformed(state_.isometry3d() * T_i_l);
                 const auto world_points = downsampled_world.positions_vec3();
                 const auto body_points = downsampled_cloud_->positions_vec3();
                 pv_list.reserve(world_points.size());
 
                 for (size_t i = 0; i < world_points.size(); ++i) {
-                    pointWithCov pv;
+                    PointWithCov pv;
                     const Eigen::Vector3f body_pt = body_points[i];
                     const Eigen::Vector3f world_pt = world_points[i];
-                    pv.point = world_pt.cast<double>();
-                    const Eigen::Matrix3d cov_lidar = calcBodyCov(body_pt, 0.02, 0.05);
-                    pv.cov = transformLiDARCovToWorld(body_pt, T_i_l, state_, cov_lidar);
+                    pv.body_point = body_pt;
+                    pv.world_point = world_pt;
+                    const Eigen::Matrix3d cov_lidar = CalcBodyCov(body_pt, 0.02, 0.05);
+                    pv.cov = TransformLiDARCovToWorld(body_pt, T_i_l, state_, cov_lidar);
+                    pv.cov_lidar = cov_lidar;
                     pv_list.emplace_back(pv);
                 }
 
-                std::vector<int> layer_size(5, 5);
-                buildVoxelMap(pv_list, 0.5, 4, layer_size, 1000, 1000, 0.01, *local_map_);
+                local_map_->Build(pv_list);
                 spdlog::info("build local map with {} points", pv_list.size());
 
                 frame_index_++;
@@ -898,7 +898,7 @@ void Odometry::RunOdometry()
             const auto body_points = downsampled_cloud_->positions_vec3();
             var_down_body_.reserve(body_points.size());
             for (const Eigen::Vector3f& pt : body_points) {
-                var_down_body_.emplace_back(calcBodyCov(pt, 0.02, 0.05));
+                var_down_body_.emplace_back(CalcBodyCov(pt, 0.02, 0.05));
             }
 #endif
 
@@ -1017,31 +1017,30 @@ void Odometry::RunOdometry()
             auto downsampled_world = downsampled_cloud_->transformed(state_.isometry3d() * T_i_l);
             auto world_points = downsampled_world.positions_vec3();
             auto lidar_points = downsampled_cloud_->positions_vec3();
-            std::vector<pointWithCov> pv_list;
+            std::vector<PointWithCov> pv_list;
             pv_list.reserve(world_points.size());
             for (size_t i = 0; i < world_points.size(); i++) {
                 const Eigen::Vector3f& point_lidar = lidar_points[i];
                 const Eigen::Vector3f& point_world = world_points[i];
                 // 保存body系和world系坐标
-                pointWithCov pv;
+                PointWithCov pv;
                 // 计算lidar点的cov
-                // FIXME 这里错误的使用世界系的点来calcBodyCov时 反倒在某些seq（比如hilti2022的03 15）上效果更好
+                // FIXME 这里错误的使用世界系的点来CalcBodyCov时 反倒在某些seq（比如hilti2022的03 15）上效果更好
                 // 需要考虑是不是init_plane时使用更大的cov更好 注意这个在每次迭代时是存在重复计算的 因为lidar系的点云covariance是不变的
-                // Eigen::Matrix3d cov_lidar = calcBodyCov(pv.point, ranging_cov, angle_cov);
+                // Eigen::Matrix3d cov_lidar = CalcBodyCov(pv.body_point, ranging_cov, angle_cov);
                 const Eigen::Matrix3d& cov_lidar = var_down_body_[i];
                 // 将body系的var转换到world系
-                pv.cov = transformLiDARCovToWorld(point_lidar, T_i_l, state_, cov_lidar);
+                pv.cov = TransformLiDARCovToWorld(point_lidar, T_i_l, state_, cov_lidar);
 
-                // 最终updateVoxelMap需要用的是world系的point
-                pv.point = point_world.cast<double>();
+                // 最终更新VoxelMap需要用的是world系的point
+                pv.body_point = point_lidar;
+                pv.world_point = point_world;
+                pv.cov_lidar = cov_lidar;
                 pv_list.push_back(pv);
             }
 
-            std::sort(pv_list.begin(), pv_list.end(), var_contrast);
-            std::vector<int> layer_size(5, 5);
-            updateVoxelMapOMP(pv_list, 0.5, 4, layer_size,
-                           1000, 1000, 0.01,
-                           *local_map_);
+            std::sort(pv_list.begin(), pv_list.end(), VarContrast);
+            local_map_->UpdateParallel(pv_list);
             spdlog::info("local map add {} points", world_points.size());
 #endif
             frame_index_++;

@@ -112,7 +112,7 @@ class Odometry
 #elif defined(USE_HASHMAP)
     std::unique_ptr<voxelHashMap> local_map_;  ///< 局部地图
 #elif defined(USE_VOXELMAP)
-    std::unique_ptr<std::unordered_map<VOXEL_LOC, OctoTree *>> local_map_;
+    std::unique_ptr<VoxelMap> local_map_;
     std::vector<Eigen::Matrix3d> var_down_body_;
 #endif
 
