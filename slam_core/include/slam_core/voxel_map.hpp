@@ -4,7 +4,6 @@
 
 #include <array>
 #include <memory>
-#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -167,7 +166,7 @@ class VoxelMap
      * @param pub_max_voxel_layer 发布层数
      * @param plane_list 输出平面
      */
-    void GetUpdatedPlanes(int pub_max_voxel_layer, std::vector<Plane>& plane_list) const;
+    void GetUpdatedPlanes(int pub_max_voxel_layer, std::vector<Plane>& plane_list);
 
     /**
      * @brief 获取底层八叉树映射
@@ -201,12 +200,20 @@ class VoxelMap
         PointToPlaneResidual& single_ptpl) const;
 
     /**
+     * @brief 尝试构建单点残差
+     * @param pv 输入点
+     * @param single_ptpl 输出残差
+     * @return 匹配是否成功
+     */
+    bool TryBuildResidualForPoint(const PointWithCov& pv, PointToPlaneResidual& single_ptpl) const;
+
+    /**
      * @brief 递归收集更新平面
      * @param current_octo 当前八叉树
      * @param pub_max_voxel_layer 发布层数
      * @param plane_list 平面集合
      */
-    void CollectUpdatedPlanes(const OctoTree* current_octo, int pub_max_voxel_layer, std::vector<Plane>& plane_list) const;
+    void CollectUpdatedPlanes(OctoTree* current_octo, int pub_max_voxel_layer, std::vector<Plane>& plane_list);
 
     /**
      * @brief 创建新的八叉树节点
@@ -215,20 +222,16 @@ class VoxelMap
      */
     std::unique_ptr<OctoTree> CreateOctoTree(const VoxelLoc& position);
 
+    /**
+     * @brief 获取或创建八叉树节点
+     * @param position 体素索引
+     * @return 节点指针
+     */
+    OctoTree* GetOrCreateTree(const VoxelLoc& position);
+
     VoxelMapConfig config_;
     std::unordered_map<VoxelLoc, std::unique_ptr<OctoTree>, VoxelLocHash> voxel_map_;
 };
-
-/**
- * @brief jet伪彩映射
- * @param v 输入值
- * @param vmin 最小值
- * @param vmax 最大值
- * @param r 红色通道
- * @param g 绿色通道
- * @param b 蓝色通道
- */
-void MapJet(double v, double vmin, double vmax, uint8_t& r, uint8_t& g, uint8_t& b);
 
 /**
  * @brief 单个八叉树节点
@@ -290,6 +293,12 @@ class OctoTree
     [[nodiscard]] const Plane& PlaneData() const { return plane_; }
 
     /**
+     * @brief 获取平面数据指针
+     * @return 平面指针
+     */
+    Plane* MutablePlane() { return &plane_; }
+
+    /**
      * @brief 获取四分之一体素长度
      * @return 四分之一长度
      */
@@ -320,6 +329,13 @@ class OctoTree
      */
     [[nodiscard]] const OctoTree* GetChild(std::size_t index) const { return leaves_[index].get(); }
 
+    /**
+     * @brief 获取可写子节点
+     * @param index 子节点索引
+     * @return 子节点指针
+     */
+    OctoTree* MutableChild(std::size_t index) { return leaves_[index].get(); }
+
   private:
     /**
      * @brief 初始化平面
@@ -338,12 +354,44 @@ class OctoTree
      */
     void CutTree();
 
+    /**
+     * @brief 处理平面节点的增量更新
+     * @param point 新点
+     */
+    void UpdatePlaneNode(const PointWithCov& point);
+
+    /**
+     * @brief 处理分支节点的递归更新
+     * @param point 新点
+     */
+    void UpdateBranchNode(const PointWithCov& point);
+
+    /**
+     * @brief 计算子节点索引
+     * @param point 点坐标
+     * @return 子节点编号
+     */
+    std::size_t ComputeChildIndex(const Eigen::Vector3f& point) const;
+
+    /**
+     * @brief 计算子节点中心
+     * @param child_index 子节点编号
+     * @return 子节点中心
+     */
+    Eigen::Vector3f ChildCenter(std::size_t child_index) const;
+
+    /**
+     * @brief 确保子节点存在
+     * @param child_index 子节点编号
+     * @return 子节点指针
+     */
+    OctoTree* EnsureChild(std::size_t child_index);
+
     std::vector<PointWithCov> temp_points_;
     std::vector<PointWithCov> new_points_;
     Plane plane_;
     int max_layer_;
     int layer_;
-    int octo_state_;
     std::array<std::unique_ptr<OctoTree>, 8> leaves_;
     Eigen::Vector3f voxel_center_ = Eigen::Vector3f::Zero();
     std::vector<int> layer_point_size_;

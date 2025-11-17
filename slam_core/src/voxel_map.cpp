@@ -4,7 +4,6 @@
 #include <atomic>
 #include <cmath>
 #include <execution>
-#include <mutex>
 #include <numeric>
 #include <unordered_map>
 #include <utility>
@@ -56,15 +55,8 @@ VoxelMap::VoxelMap(const VoxelMapConfig& config) : config_(config)
 void VoxelMap::Build(const std::vector<PointWithCov>& input_points)
 {
     for (const auto& point : input_points) {
-        const VoxelLoc loc = ComputeVoxelLoc(point.world_point);
-        auto iter = voxel_map_.find(loc);
-        if (iter != voxel_map_.end()) {
-            iter->second->AddInitialPoint(point);
-        } else {
-            auto tree = CreateOctoTree(loc);
-            tree->AddInitialPoint(point);
-            voxel_map_[loc] = std::move(tree);
-        }
+        OctoTree* tree = GetOrCreateTree(ComputeVoxelLoc(point.world_point));
+        tree->AddInitialPoint(point);
     }
 
     for (auto& [_, tree] : voxel_map_) {
@@ -80,15 +72,8 @@ void VoxelMap::Build(const std::vector<PointWithCov>& input_points)
 void VoxelMap::Update(const std::vector<PointWithCov>& input_points)
 {
     for (const auto& point : input_points) {
-        const VoxelLoc loc = ComputeVoxelLoc(point.world_point);
-        auto iter = voxel_map_.find(loc);
-        if (iter != voxel_map_.end()) {
-            iter->second->Update(point);
-        } else {
-            auto tree = CreateOctoTree(loc);
-            tree->Update(point);
-            voxel_map_[loc] = std::move(tree);
-        }
+        OctoTree* tree = GetOrCreateTree(ComputeVoxelLoc(point.world_point));
+        tree->Update(point);
     }
 }
 
@@ -105,17 +90,9 @@ void VoxelMap::UpdateParallel(const std::vector<PointWithCov>& input_points)
     }
 
     for (auto& [loc, points] : buckets) {
-        auto iter = voxel_map_.find(loc);
-        if (iter == voxel_map_.end()) {
-            auto tree = CreateOctoTree(loc);
-            for (const auto& pt : points) {
-                tree->Update(pt);
-            }
-            voxel_map_[loc] = std::move(tree);
-        } else {
-            for (const auto& pt : points) {
-                iter->second->Update(pt);
-            }
+        OctoTree* tree = GetOrCreateTree(loc);
+        for (const auto& pt : points) {
+            tree->Update(pt);
         }
     }
 }
@@ -132,53 +109,20 @@ void VoxelMap::BuildResidualList(
     std::vector<Eigen::Vector3d>& non_match) const
 {
     ptpl_list.clear();
+    non_match.clear();
+    if (pv_list.empty()) {
+        return;
+    }
+
     std::vector<PointToPlaneResidual> all_ptpl_list(pv_list.size());
     std::vector<bool> useful_ptpl(pv_list.size(), false);
 
-    std::mutex result_mutex;
     std::vector<std::size_t> indices(pv_list.size());
     std::iota(indices.begin(), indices.end(), 0);
 
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](std::size_t i) {
-        const PointWithCov& pv = pv_list[i];
-        const VoxelLoc position = ComputeVoxelLoc(pv.world_point);
-        auto iter = voxel_map_.find(position);
-        if (iter == voxel_map_.end()) {
-            return;
-        }
-
-        const OctoTree* current_octo = iter->second.get();
         PointToPlaneResidual single_ptpl;
-        bool is_success = false;
-        double prob = 0.0;
-        BuildSingleResidual(pv, current_octo, 0, is_success, prob, single_ptpl);
-
-        if (!is_success) {
-            VoxelLoc near_position = position;
-            // 判断点是否超出当前voxel中心边界
-            if (pv.world_point.x() > (current_octo->Center().x() + current_octo->QuarterLength())) {
-                near_position.x += 1;
-            } else if (pv.world_point.x() < (current_octo->Center().x() - current_octo->QuarterLength())) {
-                near_position.x -= 1;
-            }
-            if (pv.world_point.y() > (current_octo->Center().y() + current_octo->QuarterLength())) {
-                near_position.y += 1;
-            } else if (pv.world_point.y() < (current_octo->Center().y() - current_octo->QuarterLength())) {
-                near_position.y -= 1;
-            }
-            if (pv.world_point.z() > (current_octo->Center().z() + current_octo->QuarterLength())) {
-                near_position.z += 1;
-            } else if (pv.world_point.z() < (current_octo->Center().z() - current_octo->QuarterLength())) {
-                near_position.z -= 1;
-            }
-            auto iter_near = voxel_map_.find(near_position);
-            if (iter_near != voxel_map_.end()) {
-                BuildSingleResidual(pv, iter_near->second.get(), 0, is_success, prob, single_ptpl);
-            }
-        }
-
-        if (is_success) {
-            std::scoped_lock lock(result_mutex);
+        if (TryBuildResidualForPoint(pv_list[i], single_ptpl)) {
             useful_ptpl[i] = true;
             all_ptpl_list[i] = single_ptpl;
         }
@@ -187,6 +131,8 @@ void VoxelMap::BuildResidualList(
     for (std::size_t i = 0; i < useful_ptpl.size(); ++i) {
         if (useful_ptpl[i]) {
             ptpl_list.push_back(all_ptpl_list[i]);
+        } else {
+            non_match.push_back(pv_list[i].world_point.cast<double>());
         }
     }
 }
@@ -203,18 +149,10 @@ void VoxelMap::BuildResidualListNormal(
     std::vector<Eigen::Vector3d>& non_match) const
 {
     ptpl_list.clear();
+    non_match.clear();
     for (const PointWithCov& pv : pv_list) {
-        const VoxelLoc position = ComputeVoxelLoc(pv.world_point);
-        auto iter = voxel_map_.find(position);
-        if (iter == voxel_map_.end()) {
-            continue;
-        }
-        const OctoTree* current_octo = iter->second.get();
         PointToPlaneResidual single_ptpl;
-        bool is_success = false;
-        double prob = 0.0;
-        BuildSingleResidual(pv, current_octo, 0, is_success, prob, single_ptpl);
-        if (!is_success) {
+        if (!TryBuildResidualForPoint(pv, single_ptpl)) {
             non_match.push_back(pv.world_point.cast<double>());
         } else {
             ptpl_list.push_back(single_ptpl);
@@ -227,10 +165,10 @@ void VoxelMap::BuildResidualListNormal(
  * @param pub_max_voxel_layer 发布层数
  * @param plane_list 输出平面
  */
-void VoxelMap::GetUpdatedPlanes(int pub_max_voxel_layer, std::vector<Plane>& plane_list) const
+void VoxelMap::GetUpdatedPlanes(int pub_max_voxel_layer, std::vector<Plane>& plane_list)
 {
     plane_list.clear();
-    for (const auto& [_, tree] : voxel_map_) {
+    for (auto& [_, tree] : voxel_map_) {
         CollectUpdatedPlanes(tree.get(), pub_max_voxel_layer, plane_list);
     }
 }
@@ -320,22 +258,73 @@ void VoxelMap::BuildSingleResidual(
 }
 
 /**
+ * @brief 尝试构建单点残差
+ * @param pv 输入点
+ * @param single_ptpl 输出残差
+ * @return 匹配结果
+ */
+bool VoxelMap::TryBuildResidualForPoint(const PointWithCov& pv, PointToPlaneResidual& single_ptpl) const
+{
+    const VoxelLoc position = ComputeVoxelLoc(pv.world_point);
+    auto iter = voxel_map_.find(position);
+    if (iter == voxel_map_.end()) {
+        return false;
+    }
+
+    const OctoTree* current_octo = iter->second.get();
+    bool is_success = false;
+    double prob = 0.0;
+    BuildSingleResidual(pv, current_octo, 0, is_success, prob, single_ptpl);
+    if (is_success) {
+        return true;
+    }
+
+    VoxelLoc near_position = position;
+    const Eigen::Vector3f& center = current_octo->Center();
+    const float quarter_length = current_octo->QuarterLength();
+    // 根据相对位置尝试相邻体素
+    if (pv.world_point.x() > (center.x() + quarter_length)) {
+        near_position.x += 1;
+    } else if (pv.world_point.x() < (center.x() - quarter_length)) {
+        near_position.x -= 1;
+    }
+    if (pv.world_point.y() > (center.y() + quarter_length)) {
+        near_position.y += 1;
+    } else if (pv.world_point.y() < (center.y() - quarter_length)) {
+        near_position.y -= 1;
+    }
+    if (pv.world_point.z() > (center.z() + quarter_length)) {
+        near_position.z += 1;
+    } else if (pv.world_point.z() < (center.z() - quarter_length)) {
+        near_position.z -= 1;
+    }
+
+    auto iter_near = voxel_map_.find(near_position);
+    if (iter_near == voxel_map_.end()) {
+        return false;
+    }
+    BuildSingleResidual(pv, iter_near->second.get(), 0, is_success, prob, single_ptpl);
+    return is_success;
+}
+
+/**
  * @brief 收集更新平面
  * @param current_octo 当前节点
  * @param pub_max_voxel_layer 最大层级
  * @param plane_list 平面列表
  */
-void VoxelMap::CollectUpdatedPlanes(const OctoTree* current_octo, int pub_max_voxel_layer, std::vector<Plane>& plane_list) const
+void VoxelMap::CollectUpdatedPlanes(OctoTree* current_octo, int pub_max_voxel_layer, std::vector<Plane>& plane_list)
 {
-    if (current_octo->Layer() > pub_max_voxel_layer) {
+    if (current_octo == nullptr || current_octo->Layer() > pub_max_voxel_layer) {
         return;
     }
     if (current_octo->PlaneData().is_update) {
         plane_list.push_back(current_octo->PlaneData());
+        current_octo->MutablePlane()->is_update = false;
     }
     if (current_octo->Layer() < current_octo->MaxLayer() && !current_octo->HasPlane()) {
         for (std::size_t i = 0; i < 8; ++i) {
-            const OctoTree* child = current_octo->GetChild(i);
+            OctoTree* child = current_octo->MutableChild(i);
             if (child != nullptr) {
                 CollectUpdatedPlanes(child, pub_max_voxel_layer, plane_list);
             }
@@ -362,6 +351,23 @@ std::unique_ptr<OctoTree> VoxelMap::CreateOctoTree(const VoxelLoc& position)
         Eigen::Vector3f::Constant(config_.voxel_size * 0.5F);
     octo_tree->ConfigureCenter(center, config_.voxel_size * 0.25F);
     return octo_tree;
+}
+
+/**
+ * @brief 获取或创建体素八叉树
+ * @param position 体素索引
+ * @return 八叉树指针
+ */
+OctoTree* VoxelMap::GetOrCreateTree(const VoxelLoc& position)
+{
+    auto iter = voxel_map_.find(position);
+    if (iter != voxel_map_.end()) {
+        return iter->second.get();
+    }
+    auto tree = CreateOctoTree(position);
+    OctoTree* tree_ptr = tree.get();
+    voxel_map_.emplace(position, std::move(tree));
+    return tree_ptr;
 }
 
 /**
@@ -429,7 +435,6 @@ void OctoTree::Initialize()
     }
     InitPlane(temp_points_);
     if (plane_.is_plane) {
-        octo_state_ = 0;
         if (static_cast<int>(temp_points_.size()) > max_cov_points_size_) {
             update_cov_enable_ = false;
         }
@@ -437,7 +442,6 @@ void OctoTree::Initialize()
             update_enable_ = false;
         }
     } else {
-        octo_state_ = 1;
         CutTree();
     }
     init_octo_ = true;
@@ -456,87 +460,112 @@ void OctoTree::Update(const PointWithCov& point)
     }
 
     if (plane_.is_plane) {
-        if (!update_enable_) {
-            return;
-        }
-        new_points_num_++;
-        all_points_num_++;
+        UpdatePlaneNode(point);
+    } else {
+        UpdateBranchNode(point);
+    }
+}
+
+/**
+ * @brief 平面节点增量更新
+ * @param point 新点
+ */
+void OctoTree::UpdatePlaneNode(const PointWithCov& point)
+{
+    if (!update_enable_) {
+        return;
+    }
+    ++new_points_num_;
+    ++all_points_num_;
+    if (update_cov_enable_) {
+        temp_points_.push_back(point);
+    } else {
+        new_points_.push_back(point);
+    }
+    if (new_points_num_ > update_size_threshold_) {
         if (update_cov_enable_) {
-            temp_points_.push_back(point);
+            InitPlane(temp_points_);
         } else {
-            new_points_.push_back(point);
+            UpdatePlane(new_points_);
+            new_points_.clear();
         }
-        if (new_points_num_ > update_size_threshold_) {
-            if (update_cov_enable_) {
-                InitPlane(temp_points_);
-            } else {
-                UpdatePlane(new_points_);
-                new_points_.clear();
-            }
-            new_points_num_ = 0;
-        }
-        if (all_points_num_ >= max_cov_points_size_) {
-            update_cov_enable_ = false;
-            std::vector<PointWithCov>().swap(temp_points_);
-        }
-        if (all_points_num_ >= max_points_size_) {
-            update_enable_ = false;
-            plane_.update_enable = false;
-            std::vector<PointWithCov>().swap(new_points_);
-        }
+        new_points_num_ = 0;
+    }
+    if (all_points_num_ >= max_cov_points_size_) {
+        update_cov_enable_ = false;
+        std::vector<PointWithCov>().swap(temp_points_);
+    }
+    if (all_points_num_ >= max_points_size_) {
+        update_enable_ = false;
+        plane_.update_enable = false;
+        std::vector<PointWithCov>().swap(new_points_);
+    }
+}
+
+/**
+ * @brief 分支节点更新
+ * @param point 新点
+ */
+void OctoTree::UpdateBranchNode(const PointWithCov& point)
+{
+    if (layer_ < max_layer_) {
+        const std::size_t child_index = ComputeChildIndex(point.world_point);
+        OctoTree* child = EnsureChild(child_index);
+        child->Update(point);
         return;
     }
 
-    if (layer_ < max_layer_) {
-        temp_points_.clear();
-        new_points_.clear();
-        int xyz[3] = {0, 0, 0};
-        xyz[0] = static_cast<int>(point.world_point.x() > voxel_center_.x());
-        xyz[1] = static_cast<int>(point.world_point.y() > voxel_center_.y());
-        xyz[2] = static_cast<int>(point.world_point.z() > voxel_center_.z());
-        const int leafnum = 4 * xyz[0] + 2 * xyz[1] + xyz[2];
-        if (leaves_[leafnum]) {
-            leaves_[leafnum]->Update(point);
-        } else {
-            auto child = std::make_unique<OctoTree>(max_layer_, layer_ + 1, layer_point_size_, max_points_size_, max_cov_points_size_, planer_threshold_);
-            child->layer_point_size_ = layer_point_size_;
-            Eigen::Vector3f child_center = voxel_center_;
-            child_center[0] += (2 * xyz[0] - 1) * quater_length_;
-            child_center[1] += (2 * xyz[1] - 1) * quater_length_;
-            child_center[2] += (2 * xyz[2] - 1) * quater_length_;
-            child->ConfigureCenter(child_center, quater_length_ / 2.0F);
-            child->Update(point);
-            leaves_[leafnum] = std::move(child);
-        }
-    } else {
-        if (update_enable_) {
-            new_points_num_++;
-            all_points_num_++;
-            if (update_cov_enable_) {
-                temp_points_.push_back(point);
-            } else {
-                new_points_.push_back(point);
-            }
-            if (new_points_num_ > update_size_threshold_) {
-                if (update_cov_enable_) {
-                    InitPlane(temp_points_);
-                } else {
-                    UpdatePlane(new_points_);
-                    new_points_.clear();
-                }
-                new_points_num_ = 0;
-            }
-            if (all_points_num_ >= max_cov_points_size_) {
-                update_cov_enable_ = false;
-                std::vector<PointWithCov>().swap(temp_points_);
-            }
-            if (all_points_num_ >= max_points_size_) {
-                update_enable_ = false;
-                plane_.update_enable = false;
-                std::vector<PointWithCov>().swap(new_points_);
-            }
-        }
+    // 到达叶节点后退化为平面节点处理
+    UpdatePlaneNode(point);
+}
+
+/**
+ * @brief 计算子节点索引
+ * @param point 点坐标
+ * @return 子节点编号
+ */
+std::size_t OctoTree::ComputeChildIndex(const Eigen::Vector3f& point) const
+{
+    std::size_t index = 0U;
+    if (point.x() > voxel_center_.x()) {
+        index |= 4U;
     }
+    if (point.y() > voxel_center_.y()) {
+        index |= 2U;
+    }
+    if (point.z() > voxel_center_.z()) {
+        index |= 1U;
+    }
+    return index;
+}
+
+/**
+ * @brief 计算子节点中心
+ * @param child_index 子节点编号
+ * @return 中心坐标
+ */
+Eigen::Vector3f OctoTree::ChildCenter(std::size_t child_index) const
+{
+    Eigen::Vector3f child_center = voxel_center_;
+    child_center.x() += ((child_index & 4U) ? 1.0F : -1.0F) * quater_length_;
+    child_center.y() += ((child_index & 2U) ? 1.0F : -1.0F) * quater_length_;
+    child_center.z() += ((child_index & 1U) ? 1.0F : -1.0F) * quater_length_;
+    return child_center;
+}
+
+/**
+ * @brief 确保子节点存在
+ * @param child_index 子节点编号
+ * @return 子节点指针
+ */
+OctoTree* OctoTree::EnsureChild(std::size_t child_index)
+{
+    if (!leaves_[child_index]) {
+        auto child = std::make_unique<OctoTree>(max_layer_, layer_ + 1, layer_point_size_, max_points_size_, max_cov_points_size_, planer_threshold_);
+        child->ConfigureCenter(ChildCenter(child_index), quater_length_ / 2.0F);
+        leaves_[child_index] = std::move(child);
+    }
+    return leaves_[child_index].get();
 }
 
 /**
@@ -658,25 +687,12 @@ void OctoTree::UpdatePlane(const std::vector<PointWithCov>& points)
 void OctoTree::CutTree()
 {
     if (layer_ >= max_layer_) {
-        octo_state_ = 0;
         return;
     }
     for (const auto& pv : temp_points_) {
-        int xyz[3] = {0, 0, 0};
-        xyz[0] = static_cast<int>(pv.world_point.x() > voxel_center_.x());
-        xyz[1] = static_cast<int>(pv.world_point.y() > voxel_center_.y());
-        xyz[2] = static_cast<int>(pv.world_point.z() > voxel_center_.z());
-        const int leafnum = 4 * xyz[0] + 2 * xyz[1] + xyz[2];
-        if (!leaves_[leafnum]) {
-            auto child = std::make_unique<OctoTree>(max_layer_, layer_ + 1, layer_point_size_, max_points_size_, max_cov_points_size_, planer_threshold_);
-            Eigen::Vector3f child_center = voxel_center_;
-            child_center[0] += (2 * xyz[0] - 1) * quater_length_;
-            child_center[1] += (2 * xyz[1] - 1) * quater_length_;
-            child_center[2] += (2 * xyz[2] - 1) * quater_length_;
-            child->ConfigureCenter(child_center, quater_length_ / 2.0F);
-            leaves_[leafnum] = std::move(child);
-        }
-        leaves_[leafnum]->AddInitialPoint(pv);
+        const std::size_t leafnum = ComputeChildIndex(pv.world_point);
+        OctoTree* child = EnsureChild(leafnum);
+        child->AddInitialPoint(pv);
     }
 
     for (auto& leaf : leaves_) {
@@ -692,48 +708,6 @@ void OctoTree::CutTree()
         }
     }
     std::vector<PointWithCov>().swap(temp_points_);
-}
-
-/**
- * @brief jet映射
- * @param v 输入值
- * @param vmin 最小
- * @param vmax 最大
- * @param r 红
- * @param g 绿
- * @param b 蓝
- */
-void MapJet(double v, double vmin, double vmax, uint8_t& r, uint8_t& g, uint8_t& b)
-{
-    v = std::clamp(v, vmin, vmax);
-    double dr = 1.0;
-    double dg = 1.0;
-    double db = 1.0;
-
-    if (v < 0.1242) {
-        db = 0.504 + ((1.0 - 0.504) / 0.1242) * v;
-        dg = dr = 0.0;
-    } else if (v < 0.3747) {
-        db = 1.0;
-        dr = 0.0;
-        dg = (v - 0.1242) * (1.0 / (0.3747 - 0.1242));
-    } else if (v < 0.6253) {
-        db = (0.6253 - v) * (1.0 / (0.6253 - 0.3747));
-        dg = 1.0;
-        dr = (v - 0.3747) * (1.0 / (0.6253 - 0.3747));
-    } else if (v < 0.8758) {
-        db = 0.0;
-        dr = 1.0;
-        dg = (0.8758 - v) * (1.0 / (0.8758 - 0.6253));
-    } else {
-        db = 0.0;
-        dg = 0.0;
-        dr = 1.0 - (v - 0.8758) * ((1.0 - 0.504) / (1.0 - 0.8758));
-    }
-
-    r = static_cast<uint8_t>(255.0 * dr);
-    g = static_cast<uint8_t>(255.0 * dg);
-    b = static_cast<uint8_t>(255.0 * db);
 }
 
 /**
