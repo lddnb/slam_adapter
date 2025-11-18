@@ -33,6 +33,10 @@ Odometry::Odometry()
     local_map_ = std::make_unique<VDBMap>(0.5, 100, 10);
 #elif defined(USE_HASHMAP)
     local_map_ = std::make_unique<voxelHashMap>();
+#elif defined(USE_OCTREE)
+    local_map_ = std::make_unique<LocalMap>();
+    local_map_->setOrigin(Eigen::Vector3d::Zero());
+    local_map_->planeRes_ = 0.1;
 #elif defined(USE_VOXELMAP)
     local_map_ = std::make_unique<VoxelMap>();
 #endif
@@ -601,6 +605,8 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_
 #elif defined(USE_HASHMAP)
         neighbors = searchNeighbors(*local_map_, g.cast<float>(), 1, 0.5, 10, 1, nullptr);
         pointSearchSqDis = std::vector<float>(5, 0);
+#elif defined(USE_OCTREE)
+        local_map_->nearestKSearchSurf(g.cast<float>(), neighbors, pointSearchSqDis, 10);
 #endif
 
         if (neighbors.size() < 5 or pointSearchSqDis.back() > 1.0) return;
@@ -701,9 +707,10 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_
     const double base_cov_inv = 1.0 / lidar_measurement_cov_;
     noise_inv = State::NoiseDiag::Constant(obs_matches.size() * State::DoFRes, base_cov_inv);
     EASY_END_BLOCK;
-    spdlog::info("Residual sum: {:.6f}", residual_sum.load());
+    spdlog::info("Avg. Residual: {:.4f}", residual_sum.load() / obs_matches.size());
 }
 
+#ifdef USE_VOXELMAP
 void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_inv)
 {
     EASY_FUNCTION(profiler::colors::Green500);
@@ -795,9 +802,10 @@ void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag
         residual_sum.fetch_add(fabs(z(i * State::DoFRes)), std::memory_order_relaxed);
     });  // end for_each
     EASY_END_BLOCK;
-    spdlog::info("Residual sum: {:.6f}", residual_sum.load());
+    spdlog::info("Avg. Residual: {:.4f}", residual_sum.load() / effct_feat_num);
     
 }
+#endif
 
 void Odometry::RunOdometry()
 {
@@ -807,6 +815,7 @@ void Odometry::RunOdometry()
         std::vector<SyncData> sync_data_list = SyncPackages();
         if (sync_data_list.empty()) {
             LOG_EVERY_N(info, 1000, "No sync data available");
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
         }
 
         for (const auto& sync_data : sync_data_list) {
@@ -1013,6 +1022,13 @@ void Odometry::RunOdometry()
             }
             for (auto& vox : voxels_to_erase) local_map_->erase(vox);
             std::vector<voxel>().swap(voxels_to_erase);
+#elif defined(USE_OCTREE)
+            auto ori_points = downsampled_cloud_->positions_vec3();
+            std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> local_points;
+            local_points.assign(ori_points.begin(), ori_points.end());
+            local_map_->addSurfPointCloud(local_points);
+            local_map_->shiftMap(state_.isometry3d().translation());
+            spdlog::info("local map add {} points", local_points.size());
 #elif defined(USE_VOXELMAP)
             auto downsampled_world = downsampled_cloud_->transformed(state_.isometry3d() * T_i_l);
             auto world_points = downsampled_world.positions_vec3();
@@ -1046,7 +1062,7 @@ void Odometry::RunOdometry()
             frame_index_++;
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 
