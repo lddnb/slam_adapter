@@ -11,7 +11,7 @@
 namespace ms_slam::slam_core
 {
 
-using VoxelBlock = std::vector<Eigen::Vector3f>;
+using VoxelBlock = std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>;
 
 /**
  * @brief 基于 Bonxai 的稀疏 VDB 地图封装

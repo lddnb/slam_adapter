@@ -15,14 +15,12 @@
 #include "slam_core/image.hpp"
 #include "slam_core/state.hpp"
 #include "slam_core/config.hpp"
-#ifdef USE_IKDTREE
-#include "slam_core/ikd-Tree/ikd_Tree_impl.h"
-#elif defined(USE_VDB)
+#ifdef USE_VDB
 #include "slam_core/VDB_map.hpp"
 #elif defined(USE_HASHMAP)
 #include "slam_core/hash_map.hpp"
 #elif defined(USE_OCTREE)
-#include "slam_core/dynamic_octree.hpp"
+#include "slam_core/Octree.hpp"
 #elif defined(USE_VOXELMAP)
 #include "slam_core/voxel_map.hpp"
 #endif
@@ -108,14 +106,12 @@ class Odometry
 
     std::unique_ptr<std::thread> odometry_thread_;  ///< 里程计线程
 
-#ifdef USE_IKDTREE
-    std::unique_ptr<ikdtreeNS::KD_TREE<ikdtreeNS::ikdTree_PointType> > local_map_;  ///< 局部地图
-#elif defined(USE_VDB)
+#ifdef USE_VDB
     std::unique_ptr<VDBMap> local_map_;
 #elif defined(USE_HASHMAP)
     std::unique_ptr<VoxelHashMap> local_map_;  ///< 局部地图
 #elif defined(USE_OCTREE)
-    std::unique_ptr<LocalMap> local_map_;
+    std::unique_ptr<thuni::Octree> local_map_;
 #elif defined(USE_VOXELMAP)
     std::unique_ptr<VoxelMap> local_map_;
     std::vector<Eigen::Matrix3d> var_down_body_;

@@ -27,11 +27,7 @@ Odometry::Odometry()
     initialized_ = false;
     last_timestamp_imu_ = 0.0;
     localmap_params_ = cfg.localmap_params;
-#ifdef USE_IKDTREE
-    local_map_ = std::make_unique<ikdtreeNS::KD_TREE<ikdtreeNS::ikdTree_PointType>>();
-    local_map_->set_downsample_param(localmap_params_.voxel_size);
-    spdlog::info("!!! Using ikd-Tree map !!!");
-#elif defined(USE_VDB)
+#ifdef USE_VDB
     local_map_ = std::make_unique<VDBMap>(
         localmap_params_.voxel_size,
         localmap_params_.map_clipping_distance,
@@ -47,9 +43,10 @@ Odometry::Odometry()
     local_map_ = std::make_unique<VoxelHashMap>(hash_map_config);
     spdlog::info("!!! Using HashMap !!!");
 #elif defined(USE_OCTREE)
-    local_map_ = std::make_unique<LocalMap>();
-    local_map_->setOrigin(Eigen::Vector3d::Zero());
-    local_map_->planeRes_ = 0.1;
+    local_map_ = std::make_unique<thuni::Octree>();
+    local_map_->set_min_extent(localmap_params_.voxel_size);
+    local_map_->set_bucket_size(static_cast<size_t>(std::max(localmap_params_.max_points_per_voxel, 1)));
+    local_map_->set_down_size(true);
     spdlog::info("!!! Using Octree map !!!");
 #elif defined(USE_VOXELMAP)
     VoxelMapConfig config;
@@ -571,12 +568,7 @@ void Odometry::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
 {
     EASY_FUNCTION();
     std::unique_lock<std::mutex> lock(state_mutex_);
-#ifdef USE_IKDTREE
-    std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>>().swap(local_map_->PCL_Storage);
-    // local_map_->flatten(local_map_->Root_Node, local_map_->PCL_Storage, ikdtreeNS::NOT_RECORD);
-    local_map->clear();
-    local_map->append(local_map_->PCL_Storage);
-#elif defined(USE_VDB)
+#ifdef USE_VDB
     // const auto points = local_map_->GetPointCloud();
     local_map->clear();
     // local_map->append(points);
@@ -610,22 +602,15 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_
 
         std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> neighbors;
         std::vector<float> pointSearchSqDis;
-#ifdef USE_IKDTREE
-        std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> cur_neighbors;
-        ikdtreeNS::ikdTree_PointType curr_point(g.x(), g.y(), g.z());
-        local_map_->Nearest_Search(curr_point, localmap_params_.knn_num, cur_neighbors, pointSearchSqDis);
-        for (auto neighbor : cur_neighbors) {
-            neighbors.emplace_back(Eigen::Vector3f(neighbor.x, neighbor.y, neighbor.z));
-        }
-#elif defined(USE_VDB)
+#ifdef USE_VDB
         local_map_->GetKNearestNeighbors(g.cast<float>(), localmap_params_.knn_num, neighbors, pointSearchSqDis);
 #elif defined(USE_HASHMAP)
         neighbors = local_map_->SearchNeighbors(g.cast<float>(), localmap_params_.knn_num, pointSearchSqDis);
 #elif defined(USE_OCTREE)
-        local_map_->nearestKSearchSurf(g.cast<float>(), neighbors, pointSearchSqDis, localmap_params_.knn_num);
+        local_map_->knnNeighbors(g.cast<float>(), localmap_params_.knn_num, neighbors, pointSearchSqDis);
 #endif
 
-        if (neighbors.size() < localmap_params_.min_knn_num or pointSearchSqDis.back() > 1.0) return;
+        if (neighbors.size() < localmap_params_.min_knn_num || pointSearchSqDis.empty() || pointSearchSqDis.back() > 1.0) return;
 
         Eigen::Vector4d p_abcd = Eigen::Vector4d::Zero();
         if (not EstimatePlane(p_abcd, neighbors, localmap_params_.plane_threshold)) return;
@@ -655,14 +640,6 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_
 
             std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> neighbors;
             std::vector<float> pointSearchSqDis;
-#ifdef USE_IKDTREE
-            std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> cur_neighbors;
-            ikdtreeNS::ikdTree_PointType curr_point(g.x(), g.y(), g.z());
-            local_map_->Nearest_Search(curr_point, 5, cur_neighbors, pointSearchSqDis);
-            for (auto neighbor : cur_neighbors) {
-                neighbors.emplace_back(Eigen::Vector3f(neighbor.x, neighbor.y, neighbor.z));
-            }
-#endif
 
             // 记录PCL管线下的近邻命中情况
             if (neighbors.size() < 5 || pointSearchSqDis.empty() || pointSearchSqDis.back() > 5.0f) {
@@ -875,23 +852,7 @@ void Odometry::RunOdometry()
             spdlog::info("[PCL Lidar] downsize {}", pcl_downsampled_cloud_->size());
 #endif
 
-#ifdef USE_IKDTREE
-            if (frame_index_ == 0) {
-                if (downsampled_cloud_->size() > 5) {
-                    downsampled_cloud_->transform(state_.isometry3d() * T_i_l);
-                    std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> local_points;
-                    auto ori_points = downsampled_cloud_->positions_vec3();
-                    for (const auto point : ori_points) {
-                        ikdtreeNS::ikdTree_PointType cur_point(point.x(), point.y(), point.z());
-                        local_points.emplace_back(cur_point);
-                    }
-                    local_map_->Build(local_points);
-                    spdlog::info("build local map with {} points", local_points.size());
-                }
-                frame_index_++;
-                continue;
-            }
-#elif defined(USE_VOXELMAP)
+#ifdef USE_VOXELMAP
             if (frame_index_ == 0) {
                 std::vector<PointWithCov> pv_list;
                 auto downsampled_world = downsampled_cloud_->transformed(state_.isometry3d() * T_i_l);
@@ -961,62 +922,7 @@ void Odometry::RunOdometry()
 #endif
 
             EASY_BLOCK("UpdateLocalMap", profiler::colors::DarkBrown);
-#ifdef USE_IKDTREE
-            auto ori_points = downsampled_cloud_->positions_vec3();
-            constexpr int kMinMatchPoints = 5;
-            constexpr int kNumMatchPoints = 10;
-            const float filter_size_map_min = 0.5;
-            const float half_voxel = 0.5F * filter_size_map_min;
-
-            std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> filtered_points;
-            std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> direct_points;
-            filtered_points.reserve(ori_points.size());
-
-            for (const auto& point_world : ori_points) {
-                ikdtreeNS::ikdTree_PointType curr_point(point_world.x(), point_world.y(), point_world.z());
-
-                std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> neighbors;
-                std::vector<float> neighbor_sq_dists;
-                local_map_->Nearest_Search(curr_point, kNumMatchPoints, neighbors, neighbor_sq_dists);
-
-                const Eigen::Vector3f center = ((point_world / filter_size_map_min).array().floor() + 0.5F) * filter_size_map_min;
-
-                if (!neighbors.empty()) {
-                    const Eigen::Vector3f nearest(neighbors.front().x, neighbors.front().y, neighbors.front().z);
-                    const Eigen::Vector3f delta = nearest - center;
-                    if (std::abs(delta.x()) > half_voxel && std::abs(delta.y()) > half_voxel && std::abs(delta.z()) > half_voxel) {
-                        direct_points.emplace_back(curr_point);
-                        continue;
-                    }
-                }
-
-                bool need_add = neighbors.size() < kMinMatchPoints;
-                if (!need_add) {
-                    const Eigen::Vector3f center = ((point_world / filter_size_map_min).array().floor() + 0.5F) * filter_size_map_min;
-                    const float dist_to_center = (point_world - center).norm();
-                    need_add = true;
-                    for (const auto& nb : neighbors) {
-                        const Eigen::Vector3f nb_vec(nb.x, nb.y, nb.z);
-                        if ((nb_vec - center).norm() < dist_to_center + 1e-6F) {
-                            need_add = false;
-                            break;
-                        }
-                    }
-                }
-
-                if (need_add) {
-                    filtered_points.emplace_back(curr_point);
-                }
-            }
-
-            if (!filtered_points.empty()) {
-                local_map_->Add_Points(filtered_points, true);
-            }
-            if (!direct_points.empty()) {
-                local_map_->Add_Points(direct_points, false);
-            }
-            spdlog::info("local map add {} filtered points and {} direct points", filtered_points.size(), direct_points.size());
-#elif defined(USE_VDB)
+#ifdef USE_VDB
             auto ori_points = downsampled_cloud_->positions_vec3();
             std::vector<Eigen::Vector3f> local_points;
             local_points.assign(ori_points.begin(), ori_points.end());
@@ -1032,8 +938,7 @@ void Odometry::RunOdometry()
             auto ori_points = downsampled_cloud_->positions_vec3();
             std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> local_points;
             local_points.assign(ori_points.begin(), ori_points.end());
-            local_map_->addSurfPointCloud(local_points);
-            local_map_->shiftMap(state_.isometry3d().translation());
+            local_map_->update(local_points);
             spdlog::info("local map add {} points", local_points.size());
 #elif defined(USE_VOXELMAP)
             auto downsampled_world = downsampled_cloud_->transformed(state_.isometry3d() * T_i_l);
