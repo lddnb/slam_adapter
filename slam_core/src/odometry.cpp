@@ -26,19 +26,36 @@ Odometry::Odometry()
     visual_enable_ = cfg.common_params.render_en;
     initialized_ = false;
     last_timestamp_imu_ = 0.0;
+    localmap_params_ = cfg.localmap_params;
 #ifdef USE_IKDTREE
     local_map_ = std::make_unique<ikdtreeNS::KD_TREE<ikdtreeNS::ikdTree_PointType>>();
-    local_map_->set_downsample_param(0.5);
+    local_map_->set_downsample_param(localmap_params_.voxel_size);
+    spdlog::info("!!! Using ikd-Tree map !!!");
 #elif defined(USE_VDB)
-    local_map_ = std::make_unique<VDBMap>(0.5, 100, 10);
+    local_map_ = std::make_unique<VDBMap>(
+        localmap_params_.voxel_size,
+        localmap_params_.map_clipping_distance,
+        localmap_params_.max_points_per_voxel,
+        localmap_params_.voxel_neighborhood);
+    spdlog::info("!!! Using VDB map !!!");
 #elif defined(USE_HASHMAP)
-    local_map_ = std::make_unique<voxelHashMap>();
+    HashMapConfig hash_map_config{};
+    hash_map_config.voxel_size = localmap_params_.voxel_size;
+    hash_map_config.map_clipping_distance = localmap_params_.map_clipping_distance;
+    hash_map_config.max_points_per_voxel = localmap_params_.max_points_per_voxel;
+    hash_map_config.voxel_neighborhood = localmap_params_.voxel_neighborhood;
+    local_map_ = std::make_unique<VoxelHashMap>(hash_map_config);
+    spdlog::info("!!! Using HashMap !!!");
 #elif defined(USE_OCTREE)
     local_map_ = std::make_unique<LocalMap>();
     local_map_->setOrigin(Eigen::Vector3d::Zero());
     local_map_->planeRes_ = 0.1;
+    spdlog::info("!!! Using Octree map !!!");
 #elif defined(USE_VOXELMAP)
-    local_map_ = std::make_unique<VoxelMap>();
+    VoxelMapConfig config;
+    config.voxel_size = localmap_params_.voxel_size;
+    local_map_ = std::make_unique<VoxelMap>(config);
+    spdlog::info("!!! Using VoxelMap !!!");
 #endif
     deskewed_cloud_ = std::make_shared<PointCloudType>();
     downsampled_cloud_ = std::make_shared<PointCloudType>();
@@ -132,7 +149,7 @@ std::vector<SyncData> Odometry::SyncPackages()
         CHECK(lidar_beg_time - pcl_beg_time < 1e-6 && pcl_end_time - lidar_end_time < 1e-6);
 #endif
 
-        if (imu_buffer_.empty()) {
+        if (imu_buffer_.size() < 10) {
             break;
         }
 
@@ -560,7 +577,7 @@ void Odometry::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
     local_map->clear();
     local_map->append(local_map_->PCL_Storage);
 #elif defined(USE_VDB)
-    // const auto points = local_map_->Pointcloud();
+    // const auto points = local_map_->GetPointCloud();
     local_map->clear();
     // local_map->append(points);
 #elif defined(USE_HASHMAP)
@@ -596,23 +613,22 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_
 #ifdef USE_IKDTREE
         std::vector<ikdtreeNS::ikdTree_PointType, Eigen::aligned_allocator<ikdtreeNS::ikdTree_PointType>> cur_neighbors;
         ikdtreeNS::ikdTree_PointType curr_point(g.x(), g.y(), g.z());
-        local_map_->Nearest_Search(curr_point, 5, cur_neighbors, pointSearchSqDis);
+        local_map_->Nearest_Search(curr_point, localmap_params_.knn_num, cur_neighbors, pointSearchSqDis);
         for (auto neighbor : cur_neighbors) {
             neighbors.emplace_back(Eigen::Vector3f(neighbor.x, neighbor.y, neighbor.z));
         }
 #elif defined(USE_VDB)
-        local_map_->GetKNearestNeighbors(g.cast<float>(), 10, neighbors, pointSearchSqDis);
+        local_map_->GetKNearestNeighbors(g.cast<float>(), localmap_params_.knn_num, neighbors, pointSearchSqDis);
 #elif defined(USE_HASHMAP)
-        neighbors = searchNeighbors(*local_map_, g.cast<float>(), 1, 0.5, 10, 1, nullptr);
-        pointSearchSqDis = std::vector<float>(5, 0);
+        neighbors = local_map_->SearchNeighbors(g.cast<float>(), localmap_params_.knn_num, pointSearchSqDis);
 #elif defined(USE_OCTREE)
-        local_map_->nearestKSearchSurf(g.cast<float>(), neighbors, pointSearchSqDis, 10);
+        local_map_->nearestKSearchSurf(g.cast<float>(), neighbors, pointSearchSqDis, localmap_params_.knn_num);
 #endif
 
-        if (neighbors.size() < 5 or pointSearchSqDis.back() > 1.0) return;
+        if (neighbors.size() < localmap_params_.min_knn_num or pointSearchSqDis.back() > 1.0) return;
 
         Eigen::Vector4d p_abcd = Eigen::Vector4d::Zero();
-        if (not EstimatePlane(p_abcd, neighbors, 0.1)) return;
+        if (not EstimatePlane(p_abcd, neighbors, localmap_params_.plane_threshold)) return;
 
         double dist = p_abcd.head<3>().dot(g) + p_abcd(3);
 
@@ -726,7 +742,7 @@ void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag
     std::iota(indices.begin(), indices.end(), 0);
 
     EASY_BLOCK("matching", profiler::colors::BlueGrey500);
-    
+
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
         const Eigen::Vector3d p = downsampled_cloud_->position(i).cast<double>();
         const Eigen::Vector3d g = state_.isometry3d() * T_i_l * p;  // global coords
@@ -780,7 +796,7 @@ void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag
         //! 这里要用负的残差
         H.block<State::DoFRes, State::DoFObs>(i * State::DoFRes, 0) << norm_vec.x(), norm_vec.y(), norm_vec.z(), A[0], A[1], A[2];
         double pd2 = norm_vec.dot(ptpl_list[i].world_point.cast<double>()) + ptpl_list[i].d;
-                
+
         z.segment<State::DoFRes>(i * State::DoFRes).setConstant(-pd2);
 
         Eigen::Vector3d point_world = ptpl_list[i].world_point.cast<double>();
@@ -803,7 +819,6 @@ void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag
     });  // end for_each
     EASY_END_BLOCK;
     spdlog::info("Avg. Residual: {:.4f}", residual_sum.load() / effct_feat_num);
-    
 }
 #endif
 
@@ -845,7 +860,7 @@ void Odometry::RunOdometry()
             EASY_BLOCK("Filter", profiler::colors::Pink400);
             LidarFilterOptions options{.rate_active = true, .sampling_stride = static_cast<std::size_t>(cfg.common_params.point_filter_num)};
             deskewed_cloud_ = ApplyLidarFilters<PointType>(deskewed_cloud_, options);
-            downsampled_cloud_ = VoxelGridSamplingPstl<PointType>(deskewed_cloud_, 0.5);
+            downsampled_cloud_ = VoxelGridSamplingPstl<PointType>(deskewed_cloud_, cfg.mapping_params.down_size);
             EASY_END_BLOCK;
             spdlog::info("[Lidar] downsize {}", downsampled_cloud_->size());
 
@@ -1010,18 +1025,9 @@ void Odometry::RunOdometry()
 #elif defined(USE_HASHMAP)
             auto ori_points = downsampled_cloud_->positions_vec3();
             for (const Eigen::Vector3f& point : ori_points) {
-                addPointToMap(*local_map_, point, 0.5, 20, 0.05, 0);
+                local_map_->AddPoint(point);
             }
-            Eigen::Vector3d location = state_.p();
-            std::vector<voxel> voxels_to_erase;
-            for (const auto& pair : *local_map_) {
-                Eigen::Vector3f pt = pair.second.points[0];
-                if ((pt.cast<double>() - location).squaredNorm() > (100 * 100)) {
-                    voxels_to_erase.emplace_back(pair.first);
-                }
-            }
-            for (auto& vox : voxels_to_erase) local_map_->erase(vox);
-            std::vector<voxel>().swap(voxels_to_erase);
+            local_map_->RemoveDistantVoxels(state_.p());
 #elif defined(USE_OCTREE)
             auto ori_points = downsampled_cloud_->positions_vec3();
             std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> local_points;

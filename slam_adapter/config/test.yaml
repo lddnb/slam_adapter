@@ -31,24 +31,25 @@ preprocess:
     blind: 0.3
     point_filter_num: 3
 
+localmap:
+    voxel_size: 0.2
+    map_clipping_distance: 300
+    max_points_per_voxel: 20
+    voxel_neighborhood: 1 # 1: 3x3x3-neighborhood, 2: 5x5x5-neighborhood, 3: 7x7x7-neighborhood (2n+1 cube)
+    knn_num: 12
+    min_knn_num: 10
+    plane_threshold: 0.05 # 0.05, the threshold for plane criteria, the smaller, the flatter a plane
+
 mapping:
-    start_in_aggressive_motion: false # if true, a preknown gravity should be provided in following gravity_init
-    extrinsic_est_en: false # for aggressive motion, set this variable false
-    imu_time_inte: 0.005 # = 1 / frequency of IMU
+    down_size: 0.2
     satu_acc: 4.0 # the saturation value of IMU's acceleration. not related to the units
     satu_gyro: 35 # the saturation value of IMU's angular velocity. not related to the units
     acc_norm: 1.0 # 1.0 for g as unit, 9.81 for m/s^2 as unit of the IMU's acceleration
     lidar_meas_cov: 0.001 # 0.001; 0.01
-    acc_cov_output: 500
-    gyr_cov_output: 1000 
-    imu_meas_acc_cov: 0.1 #0.1 # 0.1
-    imu_meas_omg_cov: 0.1 #0.01 # 0.1
     acc_cov: 0.1 # for IMU as input model
     gyr_cov: 0.1 # for IMU as input model
     b_acc_cov: 0.0001 
     b_gyr_cov: 0.0001 
-    plane_thr: 0.05 # 0.05, the threshold for plane criteria, the smaller, the flatter a plane
-    match_s: 81
     fov_degree: 360
     det_range: 40.0
     gravity_align: true # true to align the z axis of world frame with the direction of gravity, and the gravity direction should be specified below

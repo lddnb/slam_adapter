@@ -1,65 +1,39 @@
 #include "slam_core/VDB_map.hpp"
 
-#include <Eigen/Core>
 #include <algorithm>
-#include <array>
 #include <cstdint>
-#include <limits>
+#include <cmath>
 
+#include <Eigen/Core>
 #include <spdlog/spdlog.h>
+
 #include "slam_core/bonxai/grid_coord.hpp"
 
 namespace
 {
 using Bonxai::CoordT;
-using NeighborType = ms_slam::slam_core::VDBMap::NeighborType;
-
-constexpr std::array<Bonxai::CoordT, 27> kAllNeighborShifts{
-    CoordT{.x = -1, .y = -1, .z = -1}, CoordT{.x = -1, .y = -1, .z = 0}, CoordT{.x = -1, .y = -1, .z = 1},
-    CoordT{.x = -1, .y = 0, .z = -1},  CoordT{.x = -1, .y = 0, .z = 0},  CoordT{.x = -1, .y = 0, .z = 1},
-    CoordT{.x = -1, .y = 1, .z = -1},  CoordT{.x = -1, .y = 1, .z = 0},  CoordT{.x = -1, .y = 1, .z = 1},
-
-    CoordT{.x = 0, .y = -1, .z = -1},  CoordT{.x = 0, .y = -1, .z = 0},  CoordT{.x = 0, .y = -1, .z = 1},
-    CoordT{.x = 0, .y = 0, .z = -1},   CoordT{.x = 0, .y = 0, .z = 0},   CoordT{.x = 0, .y = 0, .z = 1},
-    CoordT{.x = 0, .y = 1, .z = -1},   CoordT{.x = 0, .y = 1, .z = 0},   CoordT{.x = 0, .y = 1, .z = 1},
-
-    CoordT{.x = 1, .y = -1, .z = -1},  CoordT{.x = 1, .y = -1, .z = 0},  CoordT{.x = 1, .y = -1, .z = 1},
-    CoordT{.x = 1, .y = 0, .z = -1},   CoordT{.x = 1, .y = 0, .z = 0},   CoordT{.x = 1, .y = 0, .z = 1},
-    CoordT{.x = 1, .y = 1, .z = -1},   CoordT{.x = 1, .y = 1, .z = 0},   CoordT{.x = 1, .y = 1, .z = 1}};
 
 constexpr uint8_t inner_grid_log2_dim = 2;
 constexpr uint8_t leaf_grid_log2_dim = 3;
 
-inline int AbsInt(int value)
+/**
+ * @brief 根据邻域层数生成需要遍历的体素偏移表
+ * @param neighbor_layers 邻域层数，1 表示以查询体素为中心的 3x3x3 搜索
+ * @return 需要访问的体素偏移集合
+ */
+std::vector<CoordT> BuildNeighborShifts(const int neighbor_layers)
 {
-    return value >= 0 ? value : -value;
-}
-
-std::vector<CoordT> BuildNeighborShifts(NeighborType neighbor_type)
-{
+    // 将层数约束为非负，避免非法配置导致搜索范围为空
+    const int radius = std::max(0, neighbor_layers);
+    const int span = radius * 2 + 1;
     std::vector<CoordT> result;
-    result.reserve(kAllNeighborShifts.size());
+    result.reserve(static_cast<std::size_t>(span) * static_cast<std::size_t>(span) * static_cast<std::size_t>(span));
 
-    for (const auto& shift : kAllNeighborShifts) {
-        const bool is_center = (shift.x == 0 && shift.y == 0 && shift.z == 0);
-        const int non_zero = (AbsInt(shift.x) > 0) + (AbsInt(shift.y) > 0) + (AbsInt(shift.z) > 0);
-        bool keep = false;
-        switch (neighbor_type) {
-            case NeighborType::CENTER:
-                keep = is_center;
-                break;
-            case NeighborType::NEARBY6:
-                keep = non_zero <= 1;
-                break;
-            case NeighborType::NEARBY18:
-                keep = non_zero <= 2;
-                break;
-            case NeighborType::NEARBY26:
-                keep = true;
-                break;
-        }
-        if (keep) {
-            result.emplace_back(shift);
+    for (int dx = -radius; dx <= radius; ++dx) {
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dz = -radius; dz <= radius; ++dz) {
+                result.emplace_back(CoordT{.x = dx, .y = dy, .z = dz});
+            }
         }
     }
     return result;
@@ -70,15 +44,17 @@ std::vector<CoordT> BuildNeighborShifts(NeighborType neighbor_type)
 namespace ms_slam::slam_core
 {
 
-VDBMap::VDBMap(const double voxel_size, const double clipping_distance, const unsigned int max_points_per_voxel, NeighborType neighbor_type)
+VDBMap::VDBMap(const double voxel_size, const double clipping_distance, const unsigned int max_points_per_voxel, const int neighbor_type)
 : voxel_size_(voxel_size),
   clipping_distance_(clipping_distance),
   max_points_per_voxel_(max_points_per_voxel),
-  neighbor_type_(neighbor_type),
+  neighbor_layers_(std::max(neighbor_type, 1)),
   map_(voxel_size, inner_grid_log2_dim, leaf_grid_log2_dim),
   accessor_(map_.createAccessor()),
-  neighbor_shifts_(BuildNeighborShifts(neighbor_type))
+  neighbor_shifts_(BuildNeighborShifts(neighbor_layers_))
 {
+    // 使用 max_points_per_voxel_ 近似控制体素内点间距，避免密度过高
+    map_resolution_ = std::sqrt(voxel_size_ * voxel_size_ / max_points_per_voxel_);
 }
 
 bool VDBMap::GetKNearestNeighbors(
@@ -96,7 +72,7 @@ bool VDBMap::GetKNearestNeighbors(
     const Bonxai::CoordT voxel = map_.posToCoord(query);
 
     std::vector<std::pair<double, Eigen::Vector3f>> candidates;
-    candidates.reserve(k * 4);
+    candidates.reserve(neighbor_shifts_.size() * static_cast<std::size_t>(max_points_per_voxel_));
 
     // 遍历查询体素及其相邻体素，收集所有候选点
     for (const auto& voxel_shift : neighbor_shifts_) {
@@ -140,12 +116,11 @@ bool VDBMap::GetKNearestNeighbors(
 
 void VDBMap::AddPoints(const std::vector<Eigen::Vector3f>& points)
 {
-    const double map_resolution = std::sqrt(voxel_size_ * voxel_size_ / max_points_per_voxel_);
     std::for_each(points.cbegin(), points.cend(), [&](const Eigen::Vector3f& p) {
         const auto voxel_coordinates = map_.posToCoord(p);
         VoxelBlock* voxel_points = accessor_.value(voxel_coordinates, /*create_if_missing=*/true);
         if (voxel_points->size() == max_points_per_voxel_ || std::any_of(voxel_points->cbegin(), voxel_points->cend(), [&](const auto& voxel_point) {
-                return (voxel_point - p).norm() < map_resolution;
+                return (voxel_point - p).norm() < map_resolution_;
             })) {
             return;
         }
@@ -188,7 +163,7 @@ void VDBMap::Update(const std::vector<Eigen::Vector3f>& points, const Eigen::Iso
     RemovePointsFarFromLocation(origin);
 }
 
-std::vector<Eigen::Vector3f> VDBMap::Pointcloud() const
+std::vector<Eigen::Vector3f> VDBMap::GetPointCloud() const
 {
     std::vector<Eigen::Vector3f> point_cloud;
     point_cloud.reserve(map_.activeCellsCount() * max_points_per_voxel_);

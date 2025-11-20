@@ -122,10 +122,10 @@ int main()
         spdlog::stopwatch ws;
         const foxglove::CompressedImage* img = img_wrapper.get();
         Image image;
-        if (!DecodeCompressedImageMessage(*img, image)) {
-            spdlog::warn("Failed to decode compressed image");
-            return;
-        }
+        // if (!DecodeCompressedImageMessage(*img, image)) {
+        //     spdlog::warn("Failed to decode compressed image");
+        //     return;
+        // }
 
         if (use_img) {
             odom->AddImageData(image);

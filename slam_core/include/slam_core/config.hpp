@@ -24,26 +24,23 @@ struct CommonParams {
 };
 
 struct MappingParams {
-    bool non_station_start, extrinsic_est_en, gravity_align, prop_at_freq_of_imu, check_satu;
-    int init_map_size;
-    float imu_time_inte, satu_acc, satu_gyro, acc_norm;
+    bool gravity_align, check_satu;
+    float satu_acc, satu_gyro, acc_norm;
+    float down_size;
     float laser_point_cov, gyr_cov, acc_cov, b_acc_cov, b_gyr_cov;
-    float imu_meas_acc_cov, imu_meas_omg_cov;  ///< for point-lio imu output model
-    float plane_thr, match_s, fov_deg, DET_RANGE;
+    float plane_thr, fov_deg, DET_RANGE;
     Eigen::Vector3d gravity_init, gravity;
     Eigen::Vector3d extrinT;
     Eigen::Matrix3d extrinR;
     float keyframe_adding_dist_thres, keyframe_adding_ang_thres;
-    float filter_size_surf_min, filter_size_map_min;
     float cube_len, vel_cov;
     bool save_in_advance;
 };
 
-struct VoxelParams {
-    float voxel_size, plannar_threshold;
-    std::vector<int> layer_point_size;
-    float ranging_cov, angle_cov, acc_cov, gyr_cov, b_acc_cov, b_gyr_cov;
-    int max_layer, max_points_size, max_cov_points_size, max_iteration;
+struct LocalMapParams {
+    float voxel_size, map_clipping_distance, plane_threshold;
+    int max_points_per_voxel, voxel_neighborhood, knn_num, min_knn_num;
+    int max_layer, max_iteration;
 };
 
 struct CameraParams {
@@ -62,7 +59,7 @@ class Config
   public:
     CommonParams common_params;
     MappingParams mapping_params;
-    VoxelParams voxel_params;
+    LocalMapParams localmap_params;
     CameraParams camera_params;
 
     static Config& GetInstance()

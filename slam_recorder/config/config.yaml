@@ -94,7 +94,7 @@ BagTool:
         playback_enabled: true
         record_enabled: true
         publish_service: /livox/imu
-        queue_depth: 100
+        queue_depth: 300
       - name: /path
         schema: nav_msgs/Path
         playback_enabled: true

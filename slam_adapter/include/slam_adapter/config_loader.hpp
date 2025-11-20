@@ -220,33 +220,24 @@ inline void FillMappingParams(const YAML::Node& node, slam_core::MappingParams& 
         return;
     }
 
-    AssignIfPresent(node, "start_in_aggressive_motion", mapping.non_station_start);
-    AssignIfPresent(node, "extrinsic_est_en", mapping.extrinsic_est_en);
+    AssignIfPresent(node, "down_size", mapping.down_size);
     AssignIfPresent(node, "gravity_align", mapping.gravity_align);
-    AssignIfPresent(node, "prop_at_freq_of_imu", mapping.prop_at_freq_of_imu);
     AssignIfPresent(node, "check_satu", mapping.check_satu);
-    AssignIfPresent(node, "imu_time_inte", mapping.imu_time_inte);
     AssignIfPresent(node, "satu_acc", mapping.satu_acc);
     AssignIfPresent(node, "satu_gyro", mapping.satu_gyro);
     AssignIfPresent(node, "acc_norm", mapping.acc_norm);
     AssignIfPresent(node, "lidar_meas_cov", mapping.laser_point_cov);
-    AssignIfPresent(node, "imu_meas_acc_cov", mapping.imu_meas_acc_cov);
-    AssignIfPresent(node, "imu_meas_omg_cov", mapping.imu_meas_omg_cov);
     AssignIfPresent(node, "acc_cov", mapping.acc_cov);
     AssignIfPresent(node, "gyr_cov", mapping.gyr_cov);
     AssignIfPresent(node, "b_acc_cov", mapping.b_acc_cov);
     AssignIfPresent(node, "b_gyr_cov", mapping.b_gyr_cov);
     AssignIfPresent(node, "plane_thr", mapping.plane_thr);
-    AssignIfPresent(node, "match_s", mapping.match_s);
     AssignIfPresent(node, "fov_degree", mapping.fov_deg);
     AssignIfPresent(node, "det_range", mapping.DET_RANGE);
     AssignIfPresent(node, "keyframe_adding_dist_thres", mapping.keyframe_adding_dist_thres);
     AssignIfPresent(node, "keyframe_adding_ang_thres", mapping.keyframe_adding_ang_thres);
-    AssignIfPresent(node, "filter_size_surf_min", mapping.filter_size_surf_min);
-    AssignIfPresent(node, "filter_size_map_min", mapping.filter_size_map_min);
     AssignIfPresent(node, "cube_len", mapping.cube_len);
     AssignIfPresent(node, "vel_cov", mapping.vel_cov);
-    AssignIfPresent(node, "save_in_advance", mapping.save_in_advance);
 
     AssignEigenFromSequence(node["gravity"], mapping.gravity);
     AssignEigenFromSequence(node["gravity_init"], mapping.gravity_init);
@@ -254,27 +245,19 @@ inline void FillMappingParams(const YAML::Node& node, slam_core::MappingParams& 
     AssignEigenFromSequence(node["extrinsic_R"], mapping.extrinR);
 }
 
-inline void FillVoxelParams(const YAML::Node& node, slam_core::VoxelParams& voxel)
+inline void FillVoxelParams(const YAML::Node& node, slam_core::LocalMapParams& local_map)
 {
     if (!node) {
         return;
     }
 
-    AssignIfPresent(node, "voxel_size", voxel.voxel_size);
-    AssignIfPresent(node, "plannar_threshold", voxel.plannar_threshold);
-    if (const auto layer_sizes = SequenceToVector<int>(node["layer_point_size"])) {
-        voxel.layer_point_size = *layer_sizes;
-    }
-    AssignIfPresent(node, "ranging_cov", voxel.ranging_cov);
-    AssignIfPresent(node, "angle_cov", voxel.angle_cov);
-    AssignIfPresent(node, "acc_cov", voxel.acc_cov);
-    AssignIfPresent(node, "gyr_cov", voxel.gyr_cov);
-    AssignIfPresent(node, "b_acc_cov", voxel.b_acc_cov);
-    AssignIfPresent(node, "b_gyr_cov", voxel.b_gyr_cov);
-    AssignIfPresent(node, "max_layer", voxel.max_layer);
-    AssignIfPresent(node, "max_points_size", voxel.max_points_size);
-    AssignIfPresent(node, "max_cov_points_size", voxel.max_cov_points_size);
-    AssignIfPresent(node, "max_iteration", voxel.max_iteration);
+    AssignIfPresent(node, "voxel_size", local_map.voxel_size);
+    AssignIfPresent(node, "map_clipping_distance", local_map.map_clipping_distance);
+    AssignIfPresent(node, "max_points_per_voxel", local_map.max_points_per_voxel);
+    AssignIfPresent(node, "voxel_neighborhood", local_map.voxel_neighborhood);
+    AssignIfPresent(node, "knn_num", local_map.knn_num);
+    AssignIfPresent(node, "min_knn_num", local_map.min_knn_num);
+    AssignIfPresent(node, "plane_threshold", local_map.plane_threshold);
 }
 
 inline void FillCameraParams(const YAML::Node& node, slam_core::CameraParams& camera)
@@ -321,12 +304,12 @@ inline bool LoadConfigFromFile(const std::string& yaml_path)
 
     config.common_params = {};
     config.mapping_params = {};
-    config.voxel_params = {};
+    config.localmap_params = {};
     config.camera_params = {};
 
     detail::FillCommonParams(root, config.common_params, config.camera_params);
     detail::FillMappingParams(root["mapping"], config.mapping_params);
-    detail::FillVoxelParams(root["voxel"], config.voxel_params);
+    detail::FillVoxelParams(root["localmap"], config.localmap_params);
     detail::FillCameraParams(root["camera"], config.camera_params);
 
     return true;
@@ -356,25 +339,18 @@ inline void LogConfig()
     spdlog::info("[Config] Common.dense_pc: {}", common.dense_pc);
 
     const auto& mapping = config.mapping_params;
-    spdlog::info("[Config] Mapping.non_station_start: {}", mapping.non_station_start);
-    spdlog::info("[Config] Mapping.extrinsic_est_en: {}", mapping.extrinsic_est_en);
+    spdlog::info("[Config] Mapping.down_size: {}", mapping.down_size);
     spdlog::info("[Config] Mapping.gravity_align: {}", mapping.gravity_align);
-    spdlog::info("[Config] Mapping.prop_at_freq_of_imu: {}", mapping.prop_at_freq_of_imu);
     spdlog::info("[Config] Mapping.check_satu: {}", mapping.check_satu);
-    spdlog::info("[Config] Mapping.init_map_size: {}", mapping.init_map_size);
-    spdlog::info("[Config] Mapping.imu_time_inte: {}", mapping.imu_time_inte);
     spdlog::info("[Config] Mapping.satu_acc: {}", mapping.satu_acc);
     spdlog::info("[Config] Mapping.satu_gyro: {}", mapping.satu_gyro);
     spdlog::info("[Config] Mapping.acc_norm: {}", mapping.acc_norm);
     spdlog::info("[Config] Mapping.laser_point_cov: {}", mapping.laser_point_cov);
     spdlog::info("[Config] Mapping.b_acc_cov: {}", mapping.b_acc_cov);
     spdlog::info("[Config] Mapping.b_gyr_cov: {}", mapping.b_gyr_cov);
-    spdlog::info("[Config] Mapping.imu_meas_acc_cov: {}", mapping.imu_meas_acc_cov);
-    spdlog::info("[Config] Mapping.imu_meas_omg_cov: {}", mapping.imu_meas_omg_cov);
     spdlog::info("[Config] Mapping.acc_cov: {}", mapping.acc_cov);
     spdlog::info("[Config] Mapping.gyr_cov: {}", mapping.gyr_cov);
     spdlog::info("[Config] Mapping.plane_thr: {}", mapping.plane_thr);
-    spdlog::info("[Config] Mapping.match_s: {}", mapping.match_s);
     spdlog::info("[Config] Mapping.fov_deg: {}", mapping.fov_deg);
     spdlog::info("[Config] Mapping.DET_RANGE: {}", mapping.DET_RANGE);
     spdlog::info("[Config] Mapping.gravity: {}", detail::FormatEigenMatrix(mapping.gravity));
@@ -383,26 +359,18 @@ inline void LogConfig()
     spdlog::info("[Config] Mapping.extrinR: {}", detail::FormatEigenMatrix(mapping.extrinR));
     spdlog::info("[Config] Mapping.keyframe_adding_dist_thres: {}", mapping.keyframe_adding_dist_thres);
     spdlog::info("[Config] Mapping.keyframe_adding_ang_thres: {}", mapping.keyframe_adding_ang_thres);
-    spdlog::info("[Config] Mapping.filter_size_surf_min: {}", mapping.filter_size_surf_min);
-    spdlog::info("[Config] Mapping.filter_size_map_min: {}", mapping.filter_size_map_min);
     spdlog::info("[Config] Mapping.cube_len: {}", mapping.cube_len);
     spdlog::info("[Config] Mapping.vel_cov: {}", mapping.vel_cov);
     spdlog::info("[Config] Mapping.save_in_advance: {}", mapping.save_in_advance);
 
-    const auto& voxel = config.voxel_params;
-    spdlog::info("[Config] Voxel.voxel_size: {}", voxel.voxel_size);
-    spdlog::info("[Config] Voxel.plannar_threshold: {}", voxel.plannar_threshold);
-    spdlog::info("[Config] Voxel.layer_point_size=[{}]", fmt::join(voxel.layer_point_size, ", "));
-    spdlog::info("[Config] Voxel.ranging_cov: {}", voxel.ranging_cov);
-    spdlog::info("[Config] Voxel.angle_cov: {}", voxel.angle_cov);
-    spdlog::info("[Config] Voxel.acc_cov: {}", voxel.acc_cov);
-    spdlog::info("[Config] Voxel.gyr_cov: {}", voxel.gyr_cov);
-    spdlog::info("[Config] Voxel.b_acc_cov: {}", voxel.b_acc_cov);
-    spdlog::info("[Config] Voxel.b_gyr_cov: {}", voxel.b_gyr_cov);
-    spdlog::info("[Config] Voxel.max_layer: {}", voxel.max_layer);
-    spdlog::info("[Config] Voxel.max_points_size: {}", voxel.max_points_size);
-    spdlog::info("[Config] Voxel.max_cov_points_size: {}", voxel.max_cov_points_size);
-    spdlog::info("[Config] Voxel.max_iteration: {}", voxel.max_iteration);
+    const auto& localmap = config.localmap_params;
+    spdlog::info("[Config] LocalMap.voxel_size: {}", localmap.voxel_size);
+    spdlog::info("[Config] LocalMap.map_clipping_distance: {}", localmap.map_clipping_distance);
+    spdlog::info("[Config] LocalMap.max_points_per_voxel: {}", localmap.max_points_per_voxel);
+    spdlog::info("[Config] LocalMap.voxel_neighborhood: {}", localmap.voxel_neighborhood);
+    spdlog::info("[Config] LocalMap.knn_num: {}", localmap.knn_num);
+    spdlog::info("[Config] LocalMap.min_knn_num: {}", localmap.min_knn_num);
+    spdlog::info("[Config] LocalMap.plane_threshold: {}", localmap.plane_threshold);
 
     const auto& camera = config.camera_params;
     spdlog::info("[Config] Camera.fisheye_en: {}", camera.fisheye_en);

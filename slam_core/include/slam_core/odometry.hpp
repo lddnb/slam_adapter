@@ -14,6 +14,7 @@
 #include "slam_core/point_cloud.hpp"
 #include "slam_core/image.hpp"
 #include "slam_core/state.hpp"
+#include "slam_core/config.hpp"
 #ifdef USE_IKDTREE
 #include "slam_core/ikd-Tree/ikd_Tree_impl.h"
 #elif defined(USE_VDB)
@@ -112,7 +113,7 @@ class Odometry
 #elif defined(USE_VDB)
     std::unique_ptr<VDBMap> local_map_;
 #elif defined(USE_HASHMAP)
-    std::unique_ptr<voxelHashMap> local_map_;  ///< 局部地图
+    std::unique_ptr<VoxelHashMap> local_map_;  ///< 局部地图
 #elif defined(USE_OCTREE)
     std::unique_ptr<LocalMap> local_map_;
 #elif defined(USE_VOXELMAP)
@@ -142,6 +143,8 @@ class Odometry
     std::size_t frame_index_;  ///< 帧索引
 
     double lidar_measurement_cov_;
+
+    LocalMapParams localmap_params_;  ///< knn搜索数
 
 #ifdef USE_PCL
     std::deque<PointCloudT::ConstPtr> pcl_lidar_buffer_;
