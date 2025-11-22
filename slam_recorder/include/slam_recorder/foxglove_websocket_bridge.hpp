@@ -231,6 +231,29 @@ class FoxgloveWebSocketBridge
      */
     static uint64_t GetCurrentTimestampNs();
 
+    /**
+     * @brief 从 flatbuffer 消息中提取时间戳
+     * @param schema Schema 名称
+     * @param data 消息数据指针
+     * @param size 消息长度
+     * @return 纳秒时间戳（若失败返回 0）
+     */
+    uint64_t ExtractTimestampNs(const std::string& schema, const uint8_t* data, size_t size) const;
+
+    /**
+     * @brief 将消息时间对齐到系统时间轴
+     * @param message_time_ns 消息自身时间（纳秒）
+     * @return 对齐后的纳秒时间戳
+     */
+    uint64_t AlignTimestamp(uint64_t message_time_ns);
+
+    /**
+     * @brief 确保全局时间戳严格递增（跨所有通道）
+     * @param timestamp_ns 当前时间戳
+     * @return 递增后的时间戳
+     */
+    uint64_t EnsureGlobalMonotonic(uint64_t timestamp_ns);
+
     // 配置
     Config config_;
 
@@ -257,6 +280,11 @@ class FoxgloveWebSocketBridge
     std::map<std::string, uint16_t> topic_to_channel_id_;  ///< Topic 名称到 MCAP channel ID
     uint16_t next_channel_id_ = 1;
     std::string current_output_file_;
+
+    std::atomic<uint64_t> last_message_time_ns_{0};
+    std::atomic<uint64_t> time_offset_ns_{0};
+    std::atomic<bool> time_sync_initialized_{false};
+    std::atomic<uint64_t> last_global_timestamp_ns_{0};
 
     // 线程控制
     std::atomic<bool> running_{false};

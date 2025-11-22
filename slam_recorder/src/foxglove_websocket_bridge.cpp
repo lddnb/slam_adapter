@@ -11,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 
+#include <flatbuffers/flatbuffers.h>
 #include <mcap/writer.hpp>
 
 namespace ms_slam::slam_recorder
@@ -290,7 +291,11 @@ void FoxgloveWebSocketBridge::Run()
             if (config_.websocket.enable && server_) {
                 auto now = std::chrono::steady_clock::now();
                 if (now - last_time_broadcast >= time_broadcast_interval) {
-                    uint64_t timestamp_ns = GetCurrentTimestampNs();
+                    uint64_t timestamp_ns = last_global_timestamp_ns_.load(std::memory_order_relaxed);
+                    if (timestamp_ns == 0U) {
+                        timestamp_ns = GetCurrentTimestampNs();
+                        last_global_timestamp_ns_.store(timestamp_ns, std::memory_order_relaxed);
+                    }
                     server_->broadcastTime(timestamp_ns);
                     last_time_broadcast = now;
                 }
@@ -325,7 +330,9 @@ void FoxgloveWebSocketBridge::PollAndForwardTopic(const std::string& topic_name,
         if (schema == "foxglove.PointCloud" && pc_subs_.count(topic_name)) {
             auto raw_samples = pc_subs_.at(topic_name)->receive_all_raw();
             for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = GetCurrentTimestampNs();
+                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
+                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
+                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
 
                 if (has_websocket_sinks) {
                     auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
@@ -344,7 +351,9 @@ void FoxgloveWebSocketBridge::PollAndForwardTopic(const std::string& topic_name,
         } else if (schema == "foxglove.CompressedImage" && img_subs_.count(topic_name)) {
             auto raw_samples = img_subs_.at(topic_name)->receive_all_raw();
             for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = GetCurrentTimestampNs();
+                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
+                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
+                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
 
                 if (has_websocket_sinks) {
                     auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
@@ -363,7 +372,9 @@ void FoxgloveWebSocketBridge::PollAndForwardTopic(const std::string& topic_name,
         } else if (schema == "foxglove.Imu" && imu_subs_.count(topic_name)) {
             auto raw_samples = imu_subs_.at(topic_name)->receive_all_raw();
             for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = GetCurrentTimestampNs();
+                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
+                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
+                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
 
                 if (has_websocket_sinks) {
                     auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
@@ -382,7 +393,9 @@ void FoxgloveWebSocketBridge::PollAndForwardTopic(const std::string& topic_name,
         } else if (schema == "foxglove.PoseInFrame" && pose_subs_.count(topic_name)) {
             auto raw_samples = pose_subs_.at(topic_name)->receive_all_raw();
             for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = GetCurrentTimestampNs();
+                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
+                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
+                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
 
                 if (has_websocket_sinks) {
                     auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
@@ -401,7 +414,9 @@ void FoxgloveWebSocketBridge::PollAndForwardTopic(const std::string& topic_name,
         } else if (schema == "foxglove.PosesInFrame" && poses_subs_.count(topic_name)) {
             auto raw_samples = poses_subs_.at(topic_name)->receive_all_raw();
             for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = GetCurrentTimestampNs();
+                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
+                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
+                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
 
                 if (has_websocket_sinks) {
                     auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
@@ -420,7 +435,9 @@ void FoxgloveWebSocketBridge::PollAndForwardTopic(const std::string& topic_name,
         } else if (schema == "foxglove.FrameTransforms" && frame_tf_subs_.count(topic_name)) {
             auto raw_samples = frame_tf_subs_.at(topic_name)->receive_all_raw();
             for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = GetCurrentTimestampNs();
+                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
+                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
+                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
 
                 if (has_websocket_sinks) {
                     auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
@@ -439,7 +456,9 @@ void FoxgloveWebSocketBridge::PollAndForwardTopic(const std::string& topic_name,
         } else if (schema == "foxglove.SceneUpdate" && frame_marker_subs_.count(topic_name)) {
             auto raw_samples = frame_marker_subs_.at(topic_name)->receive_all_raw();
             for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = GetCurrentTimestampNs();
+                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
+                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
+                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
 
                 if (has_websocket_sinks) {
                     auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
@@ -616,6 +635,104 @@ void FoxgloveWebSocketBridge::RecordToMcap(
 uint64_t FoxgloveWebSocketBridge::GetCurrentTimestampNs()
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+uint64_t FoxgloveWebSocketBridge::ExtractTimestampNs(const std::string& schema, const uint8_t* data, size_t size) const
+{
+    if (data == nullptr || size == 0U) {
+        return 0U;
+    }
+
+    constexpr uint64_t kNsPerSec = 1'000'000'000ULL;
+    const auto to_ns = [](const foxglove::Time* stamp) -> uint64_t {
+        if (stamp == nullptr) {
+            return 0U;
+        }
+        const int64_t sec = static_cast<int64_t>(stamp->sec());
+        const int64_t nsec = static_cast<int64_t>(stamp->nsec());
+        if (sec < 0 || nsec < 0) {
+            return 0U;
+        }
+        return static_cast<uint64_t>(sec) * kNsPerSec + static_cast<uint64_t>(nsec);
+    };
+
+    try {
+        if (schema == "foxglove.PointCloud") {
+            const auto* msg = flatbuffers::GetRoot<foxglove::PointCloud>(data);
+            return to_ns(msg->timestamp());
+        }
+        if (schema == "foxglove.CompressedImage") {
+            const auto* msg = flatbuffers::GetRoot<foxglove::CompressedImage>(data);
+            return to_ns(msg->timestamp());
+        }
+        if (schema == "foxglove.Imu") {
+            const auto* msg = flatbuffers::GetRoot<foxglove::Imu>(data);
+            return to_ns(msg->timestamp());
+        }
+        if (schema == "foxglove.PoseInFrame") {
+            const auto* msg = flatbuffers::GetRoot<foxglove::PoseInFrame>(data);
+            return to_ns(msg->timestamp());
+        }
+        if (schema == "foxglove.PosesInFrame") {
+            const auto* msg = flatbuffers::GetRoot<foxglove::PosesInFrame>(data);
+            return to_ns(msg->timestamp());
+        }
+        if (schema == "foxglove.FrameTransforms") {
+            const auto* msg = flatbuffers::GetRoot<foxglove::FrameTransforms>(data);
+            if (const auto* transforms = msg->transforms()) {
+                for (const auto* tf : *transforms) {
+                    const uint64_t ts = to_ns(tf->timestamp());
+                    if (ts != 0U) {
+                        return ts;
+                    }
+                }
+            }
+            return 0U;
+        }
+        if (schema == "foxglove.SceneUpdate") {
+            const auto* msg = flatbuffers::GetRoot<foxglove::SceneUpdate>(data);
+            if (const auto* entities = msg->entities()) {
+                for (const auto* entity : *entities) {
+                    const uint64_t ts = to_ns(entity->timestamp());
+                    if (ts != 0U) {
+                        return ts;
+                    }
+                }
+            }
+            return 0U;
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("Failed to extract timestamp for schema '{}': {}", schema, e.what());
+    }
+
+    return 0U;
+}
+
+uint64_t FoxgloveWebSocketBridge::AlignTimestamp(uint64_t message_time_ns)
+{
+    if (message_time_ns == 0U) {
+        return GetCurrentTimestampNs();
+    }
+
+    if (!time_sync_initialized_.load(std::memory_order_acquire)) {
+        const uint64_t now = GetCurrentTimestampNs();
+        const uint64_t offset = (now > message_time_ns) ? now - message_time_ns : 0U;
+        time_offset_ns_.store(offset, std::memory_order_release);
+        time_sync_initialized_.store(true, std::memory_order_release);
+        spdlog::info("Initialized timestamp offset: now={} message={} offset={}", now, message_time_ns, offset);
+    }
+
+    return message_time_ns + time_offset_ns_.load(std::memory_order_acquire);
+}
+
+uint64_t FoxgloveWebSocketBridge::EnsureGlobalMonotonic(uint64_t timestamp_ns)
+{
+    uint64_t current = last_global_timestamp_ns_.load(std::memory_order_relaxed);
+    while (timestamp_ns <= current) {
+        timestamp_ns = current + 1U;
+    }
+    last_global_timestamp_ns_.store(timestamp_ns, std::memory_order_relaxed);
+    return timestamp_ns;
 }
 
 /**
