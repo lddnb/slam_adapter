@@ -92,6 +92,9 @@ void CallbackDispatcher::poll_once()
     std::lock_guard<std::mutex> lock(mutex_);
 
     for (auto& entry : entries_) {
+        if (!entry.poll_func) {
+            continue;
+        }
         spdlog::stopwatch sw;
         bool processed = entry.poll_func();
         auto duration = duration_cast<std::chrono::nanoseconds>(sw.elapsed());
@@ -168,4 +171,3 @@ size_t CallbackDispatcher::size() const
 }
 
 }  // namespace ms_slam::slam_common
-

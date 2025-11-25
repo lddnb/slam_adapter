@@ -12,9 +12,15 @@
 
 #include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
-#include <flatbuffers/flatbuffers.h>
 #include <opencv2/imgcodecs.hpp>
 #include <spdlog/spdlog.h>
+
+#include <foxglove/CompressedImage.pb.h>
+#include <foxglove/FrameTransforms.pb.h>
+#include <foxglove/PointCloud.pb.h>
+#include <foxglove/PoseInFrame.pb.h>
+#include <foxglove/PosesInFrame.pb.h>
+#include <foxglove/SceneUpdate.pb.h>
 
 #include <slam_common/foxglove_messages.hpp>
 #include <slam_core/image.hpp>
@@ -24,9 +30,8 @@
 
 namespace ms_slam::slam_adapter
 {
-
 /**
- * @brief Foxglove坐标变换描述
+ * @brief Foxglove 坐标变换描述
  */
 struct FrameTransformData {
     double timestamp{0.0};                                        ///< 时间戳（秒）
@@ -38,17 +43,42 @@ struct FrameTransformData {
 
 namespace detail
 {
+/**
+ * @brief 将秒转换为 Protobuf Timestamp
+ * @param timestamp 输入的秒
+ * @param target 目标时间戳
+ */
+inline void FillTimestamp(const double timestamp, google::protobuf::Timestamp& target)
+{
+    const auto seconds = static_cast<std::int64_t>(timestamp);
+    const auto nanos = static_cast<std::int32_t>(std::round((timestamp - static_cast<double>(seconds)) * 1e9));
+    target.set_seconds(seconds);
+    target.set_nanos(nanos);
+}
 
 /**
- * @brief 将秒转换为Foxglove时间结构
- * @param timestamp 输入的秒
- * @return Foxglove时间结构
+ * @brief 填充向量字段
+ * @param vec Eigen 向量
+ * @param target Protobuf Vector3
  */
-inline foxglove::Time MakeFoxgloveTime(const double timestamp)
+inline void FillVector3(const Eigen::Vector3d& vec, foxglove::Vector3& target)
 {
-    const std::uint32_t sec32 = static_cast<std::uint32_t>(timestamp);
-    const std::uint32_t nsec32 = static_cast<std::uint32_t>(std::round((timestamp - sec32) * 1e9));
-    return foxglove::Time(sec32, nsec32);
+    target.set_x(vec.x());
+    target.set_y(vec.y());
+    target.set_z(vec.z());
+}
+
+/**
+ * @brief 填充四元数字段
+ * @param quat Eigen 四元数
+ * @param target Protobuf Quaternion
+ */
+inline void FillQuaternion(const Eigen::Quaterniond& quat, foxglove::Quaternion& target)
+{
+    target.set_x(quat.x());
+    target.set_y(quat.y());
+    target.set_z(quat.z());
+    target.set_w(quat.w());
 }
 
 /**
@@ -56,7 +86,7 @@ inline foxglove::Time MakeFoxgloveTime(const double timestamp)
  * @param position_cov 位置协方差
  * @param axes 输出椭球长轴
  * @param orientation 输出椭球朝向
- * @return 成功返回true
+ * @return 成功返回 true
  */
 inline bool ComputePositionCovarianceEllipsoid(const Eigen::Matrix3d& position_cov, Eigen::Vector3d& axes, Eigen::Quaterniond& orientation)
 {
@@ -83,19 +113,7 @@ inline bool ComputePositionCovarianceEllipsoid(const Eigen::Matrix3d& position_c
 }
 
 /**
- * @brief 生成身份姿态
- * @param builder FlatBuffer构造器
- * @return 身份姿态偏移量
- */
-inline flatbuffers::Offset<foxglove::Pose> CreateIdentityPose(flatbuffers::FlatBufferBuilder& builder)
-{
-    const auto zero = foxglove::CreateVector3(builder, 0.0, 0.0, 0.0);
-    const auto identity = foxglove::CreateQuaternion(builder, 0.0, 0.0, 0.0, 1.0);
-    return foxglove::CreatePose(builder, zero, identity);
-}
-
-/**
- * @brief 快速写入float数据
+ * @brief 写入 float 数据
  * @param destination 目标指针
  * @param value 写入值
  */
@@ -105,7 +123,7 @@ inline void StoreFloat(std::uint8_t* destination, const float value)
 }
 
 /**
- * @brief 快速写入double数据
+ * @brief 写入 double 数据
  * @param destination 目标指针
  * @param value 写入值
  */
@@ -115,7 +133,7 @@ inline void StoreDouble(std::uint8_t* destination, const double value)
 }
 
 /**
- * @brief 快速写入uint8_t数据
+ * @brief 写入 uint8_t 数据
  * @param destination 目标指针
  * @param value 写入值
  */
@@ -124,123 +142,115 @@ inline void StoreU8(std::uint8_t* destination, const std::uint8_t value)
     *destination = value;
 }
 
+/**
+ * @brief 填充单位姿态
+ * @param pose 目标 Pose
+ */
+inline void FillIdentityPose(foxglove::Pose& pose)
+{
+    auto* position = pose.mutable_position();
+    position->set_x(0.0);
+    position->set_y(0.0);
+    position->set_z(0.0);
+
+    auto* orientation = pose.mutable_orientation();
+    orientation->set_x(0.0);
+    orientation->set_y(0.0);
+    orientation->set_z(0.0);
+    orientation->set_w(1.0);
+}
+
 }  // namespace detail
 
 /**
- * @brief 将State转换为Foxglove PoseInFrame消息
+ * @brief 将 State 转换为 Foxglove PoseInFrame 消息
  * @param state 里程计状态
  * @param frame_id 坐标系名称
- * @param builder FlatBuffer构造器
- * @return 成功返回true
+ * @param message 目标消息
+ * @return 成功返回 true
  */
-inline bool BuildFoxglovePoseInFrame(const slam_core::State& state, std::string_view frame_id, flatbuffers::FlatBufferBuilder& builder)
+inline bool BuildFoxglovePoseInFrame(const slam_core::State& state, std::string_view frame_id, foxglove::PoseInFrame& message)
 {
-    builder.Clear();
+    message.Clear();
 
-    const Eigen::Vector3d position = state.p();
-    const Eigen::Quaterniond orientation = state.quat();
+    detail::FillTimestamp(state.timestamp(), *message.mutable_timestamp());
+    message.set_frame_id(frame_id.data(), static_cast<int>(frame_id.size()));
 
-    const foxglove::Time timestamp = detail::MakeFoxgloveTime(state.timestamp());
-    const auto frame_id_offset = builder.CreateString(frame_id.data(), frame_id.size());
-    const auto position_offset = foxglove::CreateVector3(builder, position.x(), position.y(), position.z());
-    const auto orientation_offset = foxglove::CreateQuaternion(builder, orientation.x(), orientation.y(), orientation.z(), orientation.w());
-    const auto pose_offset = foxglove::CreatePose(builder, position_offset, orientation_offset);
-
-    const auto pose_in_frame_offset = foxglove::CreatePoseInFrame(builder, &timestamp, frame_id_offset, pose_offset);
-    foxglove::FinishPoseInFrameBuffer(builder, pose_in_frame_offset);
+    auto* pose = message.mutable_pose();
+    detail::FillVector3(state.p(), *pose->mutable_position());
+    detail::FillQuaternion(state.quat(), *pose->mutable_orientation());
     return true;
 }
 
 /**
- * @brief 将状态序列转换为Foxglove PosesInFrame消息
+ * @brief 将状态序列转换为 Foxglove PosesInFrame 消息
  * @param states 状态序列
  * @param frame_id 坐标系名称
- * @param builder FlatBuffer构造器
- * @return 成功返回true
+ * @param message 目标消息
+ * @return 成功返回 true
  */
-inline bool BuildFoxglovePosesInFrame(const std::vector<slam_core::State>& states, std::string_view frame_id, flatbuffers::FlatBufferBuilder& builder)
+inline bool BuildFoxglovePosesInFrame(const std::vector<slam_core::State>& states, std::string_view frame_id, foxglove::PosesInFrame& message)
 {
-    builder.Clear();
+    message.Clear();
 
     if (states.empty()) {
-        // spdlog::warn("BuildFoxglovePosesInFrame: empty state sequence");
         return false;
     }
 
-    std::vector<flatbuffers::Offset<foxglove::Pose>> pose_offsets;
-    pose_offsets.reserve(states.size());
+    detail::FillTimestamp(states.back().timestamp(), *message.mutable_timestamp());
+    message.set_frame_id(frame_id.data(), static_cast<int>(frame_id.size()));
 
     for (const auto& state : states) {
-        const Eigen::Vector3d position = state.p();
-        const Eigen::Quaterniond orientation = state.quat().normalized();
-
-        const auto position_offset = foxglove::CreateVector3(builder, position.x(), position.y(), position.z());
-        const auto orientation_offset = foxglove::CreateQuaternion(builder, orientation.x(), orientation.y(), orientation.z(), orientation.w());
-        pose_offsets.emplace_back(foxglove::CreatePose(builder, position_offset, orientation_offset));
+        auto* pose = message.add_poses();
+        detail::FillVector3(state.p(), *pose->mutable_position());
+        detail::FillQuaternion(state.quat().normalized(), *pose->mutable_orientation());
     }
 
-    const auto poses_vector = builder.CreateVector(pose_offsets);
-    const foxglove::Time timestamp = detail::MakeFoxgloveTime(states.back().timestamp());
-    const auto frame_id_offset = builder.CreateString(frame_id.data(), frame_id.size());
-
-    // 使用最新状态的时间戳作为路径消息的时间标记
-    const auto poses_in_frame_offset = foxglove::CreatePosesInFrame(builder, &timestamp, frame_id_offset, poses_vector);
-    foxglove::FinishPosesInFrameBuffer(builder, poses_in_frame_offset);
     return true;
 }
 
 /**
- * @brief 构建Foxglove FrameTransforms消息
+ * @brief 构建 Foxglove FrameTransforms 消息
  * @param transforms 变换列表
- * @param builder FlatBuffer构造器
- * @return 成功返回true
+ * @param message 目标消息
+ * @return 成功返回 true
  */
-inline bool BuildFoxgloveFrameTransforms(std::span<const FrameTransformData> transforms, flatbuffers::FlatBufferBuilder& builder)
+inline bool BuildFoxgloveFrameTransforms(std::span<const FrameTransformData> transforms, foxglove::FrameTransforms& message)
 {
-    builder.Clear();
+    message.Clear();
 
     if (transforms.empty()) {
         spdlog::warn("BuildFoxgloveFrameTransforms: empty transform list");
         return false;
     }
 
-    std::vector<flatbuffers::Offset<foxglove::FrameTransform>> offsets;
-    offsets.reserve(transforms.size());
-
     for (const auto& transform : transforms) {
-        const Eigen::Quaterniond normalized = transform.rotation.normalized();
-        const foxglove::Time timestamp = detail::MakeFoxgloveTime(transform.timestamp);
-
-        const auto parent_offset = builder.CreateString(transform.parent_frame.data(), transform.parent_frame.size());
-        const auto child_offset = builder.CreateString(transform.child_frame.data(), transform.child_frame.size());
-        const auto translation_offset =
-            foxglove::CreateVector3(builder, transform.translation.x(), transform.translation.y(), transform.translation.z());
-        const auto rotation_offset = foxglove::CreateQuaternion(builder, normalized.x(), normalized.y(), normalized.z(), normalized.w());
-
-        offsets.emplace_back(foxglove::CreateFrameTransform(builder, &timestamp, parent_offset, child_offset, translation_offset, rotation_offset));
+        auto* tf = message.add_transforms();
+        detail::FillTimestamp(transform.timestamp, *tf->mutable_timestamp());
+        tf->set_parent_frame_id(transform.parent_frame.data(), static_cast<int>(transform.parent_frame.size()));
+        tf->set_child_frame_id(transform.child_frame.data(), static_cast<int>(transform.child_frame.size()));
+        detail::FillVector3(transform.translation, *tf->mutable_translation());
+        detail::FillQuaternion(transform.rotation.normalized(), *tf->mutable_rotation());
     }
 
-    const auto transforms_vector = builder.CreateVector(offsets);
-    const auto frame_transforms_offset = foxglove::CreateFrameTransforms(builder, transforms_vector);
-    foxglove::FinishFrameTransformsBuffer(builder, frame_transforms_offset);
     return true;
 }
 
 /**
- * @brief 基于State构建Foxglove SceneUpdate椭球消息
+ * @brief 基于 State 构建 Foxglove SceneUpdate 椭球消息
  * @param state 当前状态
  * @param frame_id 所属坐标系
- * @param entity_id 场景实体ID
- * @param builder FlatBuffer构造器
- * @return 成功返回true
+ * @param entity_id 场景实体 ID
+ * @param message 目标消息
+ * @return 成功返回 true
  */
 inline bool BuildFoxgloveSceneUpdateFromState(
     const slam_core::State& state,
     std::string_view frame_id,
     std::string_view entity_id,
-    flatbuffers::FlatBufferBuilder& builder)
+    foxglove::SceneUpdate& message)
 {
-    builder.Clear();
+    message.Clear();
 
     Eigen::Vector3d axes{Eigen::Vector3d::Zero()};
     Eigen::Quaterniond orientation{Eigen::Quaterniond::Identity()};
@@ -249,48 +259,38 @@ inline bool BuildFoxgloveSceneUpdateFromState(
         return false;
     }
 
-    const foxglove::Time timestamp = detail::MakeFoxgloveTime(state.timestamp());
-    const auto frame_id_offset = builder.CreateString(frame_id.data(), frame_id.size());
-    const auto entity_id_offset = builder.CreateString(entity_id.data(), entity_id.size());
+    auto* entity = message.add_entities();
+    detail::FillTimestamp(state.timestamp(), *entity->mutable_timestamp());
+    entity->set_frame_id(frame_id.data(), static_cast<int>(frame_id.size()));
+    entity->set_id(entity_id.data(), static_cast<int>(entity_id.size()));
 
-    const Eigen::Vector3d position = state.p();
-    const auto position_offset = foxglove::CreateVector3(builder, position.x(), position.y(), position.z());
-    const auto orientation_offset = foxglove::CreateQuaternion(builder, orientation.x(), orientation.y(), orientation.z(), orientation.w());
-    const auto pose_offset = foxglove::CreatePose(builder, position_offset, orientation_offset);
-    const auto axes_offset = foxglove::CreateVector3(builder, axes.x(), axes.y(), axes.z());
-    const auto color_offset = foxglove::CreateColor(builder, 0.2, 0.6, 0.9, 0.35);
+    auto* sphere = entity->add_spheres();
+    auto* pose = sphere->mutable_pose();
+    detail::FillVector3(state.p(), *pose->mutable_position());
+    detail::FillQuaternion(orientation, *pose->mutable_orientation());
+    detail::FillVector3(axes * 2.0, *sphere->mutable_size());
 
-    const auto sphere_offset = foxglove::CreateSpherePrimitive(builder, pose_offset, axes_offset, color_offset);
-    const auto spheres_vector = builder.CreateVector(&sphere_offset, 1);
+    auto* color = sphere->mutable_color();
+    color->set_r(0.2);
+    color->set_g(0.6);
+    color->set_b(0.9);
+    color->set_a(0.35);
 
-    foxglove::SceneEntityBuilder entity_builder(builder);
-    entity_builder.add_timestamp(&timestamp);
-    entity_builder.add_frame_id(frame_id_offset);
-    entity_builder.add_id(entity_id_offset);
-    entity_builder.add_spheres(spheres_vector);
-    const auto entity_offset = entity_builder.Finish();
-
-    const auto entities_vector = builder.CreateVector(&entity_offset, 1);
-    foxglove::SceneUpdateBuilder update_builder(builder);
-    update_builder.add_entities(entities_vector);
-    const auto update_offset = update_builder.Finish();
-
-    foxglove::FinishSceneUpdateBuffer(builder, update_offset);
     return true;
 }
 
 /**
- * @brief 将任意包含位置场的点云转换为Foxglove PointCloud消息
- * @tparam PointCloudT 点云类型，需符合slam_core::PointCloud接口
+ * @brief 将点云转换为 Foxglove PointCloud 消息
+ * @tparam PointCloudT 点云类型
  * @param cloud 点云数据
  * @param frame_id 坐标系名称
- * @param builder FlatBuffer构造器
- * @return 成功返回true
+ * @param message 目标消息
+ * @return 成功返回 true
  */
 template <typename PointCloudT>
-inline bool BuildFoxglovePointCloud(const PointCloudT& cloud, std::string_view frame_id, flatbuffers::FlatBufferBuilder& builder)
+inline bool BuildFoxglovePointCloud(const PointCloudT& cloud, std::string_view frame_id, foxglove::PointCloud& message)
 {
-    builder.Clear();
+    message.Clear();
 
     using Descriptor = typename PointCloudT::descriptor_type;
     static_assert(slam_core::has_field_v<slam_core::PositionTag, Descriptor>, "Point cloud descriptor must provide PositionTag");
@@ -303,7 +303,7 @@ inline bool BuildFoxglovePointCloud(const PointCloudT& cloud, std::string_view f
         const char* name;
         std::uint32_t offset;
         std::uint32_t size;
-        foxglove::NumericType numeric_type;
+        foxglove::PackedElementField::NumericType numeric_type;
     };
 
     constexpr std::size_t kFieldCount =
@@ -313,27 +313,27 @@ inline bool BuildFoxglovePointCloud(const PointCloudT& cloud, std::string_view f
     std::uint32_t current_offset = 0;
     std::size_t field_index = 0;
 
-    auto push_field = [&](const char* name, std::uint32_t size, foxglove::NumericType type) {
+    auto push_field = [&](const char* name, std::uint32_t size, foxglove::PackedElementField::NumericType type) {
         field_infos[field_index++] = FieldInfo{.name = name, .offset = current_offset, .size = size, .numeric_type = type};
         current_offset += size;
     };
 
-    push_field("x", sizeof(float), foxglove::NumericType_FLOAT32);
-    push_field("y", sizeof(float), foxglove::NumericType_FLOAT32);
-    push_field("z", sizeof(float), foxglove::NumericType_FLOAT32);
+    push_field("x", sizeof(float), foxglove::PackedElementField::FLOAT32);
+    push_field("y", sizeof(float), foxglove::PackedElementField::FLOAT32);
+    push_field("z", sizeof(float), foxglove::PackedElementField::FLOAT32);
 
     if constexpr (kHasIntensity) {
-        push_field("intensity", sizeof(float), foxglove::NumericType_FLOAT32);
+        push_field("intensity", sizeof(float), foxglove::PackedElementField::FLOAT32);
     }
 
     if constexpr (kHasRGB) {
-        push_field("red", sizeof(std::uint8_t), foxglove::NumericType_UINT8);
-        push_field("green", sizeof(std::uint8_t), foxglove::NumericType_UINT8);
-        push_field("blue", sizeof(std::uint8_t), foxglove::NumericType_UINT8);
+        push_field("red", sizeof(std::uint8_t), foxglove::PackedElementField::UINT8);
+        push_field("green", sizeof(std::uint8_t), foxglove::PackedElementField::UINT8);
+        push_field("blue", sizeof(std::uint8_t), foxglove::PackedElementField::UINT8);
     }
 
     if constexpr (kHasTimestamp) {
-        push_field("timestamp", sizeof(double), foxglove::NumericType_FLOAT64);
+        push_field("timestamp", sizeof(double), foxglove::PackedElementField::FLOAT64);
     }
 
     const std::uint32_t point_stride = current_offset;
@@ -373,42 +373,41 @@ inline bool BuildFoxglovePointCloud(const PointCloudT& cloud, std::string_view f
         message_time = point_count > 0 ? static_cast<double>(cloud.timestamp(0)) : 0.0;
     }
 
-    const foxglove::Time timestamp_struct = detail::MakeFoxgloveTime(message_time);
-    const auto frame_id_offset = builder.CreateString(frame_id.data(), frame_id.size());
+    detail::FillTimestamp(message_time, *message.mutable_timestamp());
+    message.set_frame_id(frame_id.data(), static_cast<int>(frame_id.size()));
+    message.set_point_stride(point_stride);
+    message.set_data(reinterpret_cast<const char*>(data.data()), static_cast<int>(data.size()));
 
-    std::vector<flatbuffers::Offset<foxglove::PackedElementField>> field_offsets;
-    field_offsets.reserve(field_infos.size());
+    auto* pose = message.mutable_pose();
+    detail::FillIdentityPose(*pose);
+
     for (const auto& field : field_infos) {
-        field_offsets.emplace_back(foxglove::CreatePackedElementField(builder, builder.CreateString(field.name), field.offset, field.numeric_type));
+        auto* proto_field = message.add_fields();
+        proto_field->set_name(field.name);
+        proto_field->set_offset(field.offset);
+        proto_field->set_type(field.numeric_type);
     }
 
-    const auto fields_vector = builder.CreateVector(field_offsets);
-    const auto data_vector = builder.CreateVector(data);
-    const auto pose_offset = detail::CreateIdentityPose(builder);
-
-    auto point_cloud_offset =
-        foxglove::CreatePointCloud(builder, &timestamp_struct, frame_id_offset, pose_offset, point_stride, fields_vector, data_vector);
-    foxglove::FinishPointCloudBuffer(builder, point_cloud_offset);
     return true;
 }
 
 /**
- * @brief 将图像转换为Foxglove CompressedImage消息
+ * @brief 将图像转换为 Foxglove CompressedImage 消息
  * @param image 图像数据
  * @param frame_id 坐标系名称
  * @param format 压缩格式（jpeg/png/webp）
  * @param quality 压缩质量
- * @param builder FlatBuffer构造器
- * @return 成功返回true
+ * @param message 目标消息
+ * @return 成功返回 true
  */
 inline bool BuildFoxgloveCompressedImage(
     const slam_core::Image& image,
     std::string_view frame_id,
     std::string_view format,
     int quality,
-    flatbuffers::FlatBufferBuilder& builder)
+    foxglove::CompressedImage& message)
 {
-    builder.Clear();
+    message.Clear();
 
     if (image.data().empty()) {
         spdlog::warn("BuildFoxgloveCompressedImage: empty image data");
@@ -436,13 +435,11 @@ inline bool BuildFoxgloveCompressedImage(
         return false;
     }
 
-    const foxglove::Time timestamp_struct = detail::MakeFoxgloveTime(image.timestamp());
-    const auto frame_id_offset = builder.CreateString(frame_id.data(), frame_id.size());
-    const auto format_offset = builder.CreateString(format.data(), format.size());
-    const auto data_offset = builder.CreateVector(compressed);
+    detail::FillTimestamp(image.timestamp(), *message.mutable_timestamp());
+    message.set_frame_id(frame_id.data(), static_cast<int>(frame_id.size()));
+    message.set_format(format.data(), static_cast<int>(format.size()));
+    message.set_data(reinterpret_cast<const char*>(compressed.data()), static_cast<int>(compressed.size()));
 
-    const auto compressed_image_offset = foxglove::CreateCompressedImage(builder, &timestamp_struct, frame_id_offset, data_offset, format_offset);
-    foxglove::FinishCompressedImageBuffer(builder, compressed_image_offset);
     return true;
 }
 

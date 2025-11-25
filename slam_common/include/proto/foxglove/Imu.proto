@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+import "foxglove/Vector3.proto";
+import "google/protobuf/timestamp.proto";
+
+package foxglove;
+
+message Imu {
+  // Timestamp of IMU data
+  google.protobuf.Timestamp timestamp = 1;
+
+  // Frame of reference
+  string frame_id = 2;
+
+  // Angular velocity in rad/s
+  foxglove.Vector3 angular_velocity = 3;
+
+  // Linear acceleration in m/s^2
+  foxglove.Vector3 linear_acceleration = 4;
+}

@@ -7,63 +7,38 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_BUILD_TYPE RelWithDebInfo)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-find_package(iceoryx2-cmake-modules REQUIRED)
-include(Iceoryx2PlatformSettings)
-
-string(JOIN " " ICEORYX2_C_FLAGS_STRING ${ICEORYX2_C_FLAGS})
-string(JOIN " " ICEORYX2_C_WARNINGS_STRING ${ICEORYX2_C_WARNINGS})
-string(JOIN " " ICEORYX2_CXX_FLAGS_STRING ${ICEORYX2_CXX_FLAGS})
-string(JOIN " " ICEORYX2_CXX_WARNINGS_STRING ${ICEORYX2_CXX_WARNINGS})
-string(JOIN " " ICEORYX2_SANITIZER_FLAGS_STRING ${ICEORYX2_SANITIZER_FLAGS})
-
-set(CMAKE_C_FLAGS "\
-    ${CMAKE_C_FLAGS} \
-    ${ICEORYX2_C_FLAGS_STRING} \
-    ${ICEORYX2_C_WARNINGS_STRING}\
-")
-set(CMAKE_CXX_FLAGS "\
-    ${CMAKE_CXX_FLAGS} \
-    ${ICEORYX2_CXX_FLAGS_STRING} \
-    ${ICEORYX2_CXX_WARNINGS_STRING} \
-    ${ICEORYX2_SANITIZER_FLAGS_STRING} \
-")
-
 # Dependencies
-find_package(iceoryx2-cxx REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(cpptrace REQUIRED)
-find_package(flatbuffers REQUIRED)
+find_package(Protobuf REQUIRED)
+find_package(eCAL REQUIRED)
 
-file(GLOB_RECURSE ALL_FBS CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/*/*.fbs")
-message(STATUS "FBS Source Files: ${ALL_FBS}")
-set(ALL_FBS_HDRS)
-foreach(ABS_FIL ${ALL_FBS})
-  file(RELATIVE_PATH REL_FIL ${PROJECT_SOURCE_DIR} ${ABS_FIL})
-  get_filename_component(DIR ${REL_FIL} DIRECTORY)
-  get_filename_component(FIL_WE ${REL_FIL} NAME_WE)
+set(PROTO_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include/proto")
+set(PROTO_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY ${PROTO_GEN_DIR})
 
-  # 生成两个头文件: *_generated.h 和 *_bfbs_generated.h
-  list(APPEND ALL_FBS_HDRS
-    "${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_generated.h"
-    "${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_bfbs_generated.h"
-  )
-
-  # 使用 --bfbs-gen-embed 生成嵌入式binary schema
-  add_custom_command(
-    OUTPUT
-      ${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_generated.h
-      ${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_bfbs_generated.h
-    COMMAND flatc --cpp --bfbs-gen-embed -o ${PROJECT_BINARY_DIR}/${DIR} ${ABS_FIL}
-    DEPENDS ${ABS_FIL}
-    COMMENT "Running C++ flatbuffers compiler with --bfbs-gen-embed on ${ABS_FIL}"
-  )
-  message("fbs source = ${ABS_FIL}")
-  message("fbs output = ${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_generated.h")
-  message("fbs bfbs   = ${PROJECT_BINARY_DIR}/${DIR}/${FIL_WE}_bfbs_generated.h")
+# 生成并追加 Protobuf 源文件
+file(GLOB_RECURSE SLAM_COMMON_PROTOS_REL RELATIVE ${PROTO_SRC_DIR} "${PROTO_SRC_DIR}/*.proto")
+set(PROTO_GENERATED_SRCS)
+foreach(PROTO_FILE ${SLAM_COMMON_PROTOS_REL})
+    get_filename_component(PROTO_DIR ${PROTO_FILE} DIRECTORY)
+    get_filename_component(PROTO_NAME_WE ${PROTO_FILE} NAME_WE)
+    set(OUT_DIR ${PROTO_GEN_DIR}/${PROTO_DIR})
+    file(MAKE_DIRECTORY ${OUT_DIR})
+    set(GEN_SRC ${OUT_DIR}/${PROTO_NAME_WE}.pb.cc)
+    set(GEN_HDR ${OUT_DIR}/${PROTO_NAME_WE}.pb.h)
+    add_custom_command(
+        OUTPUT ${GEN_SRC} ${GEN_HDR}
+        COMMAND ${Protobuf_PROTOC_EXECUTABLE}
+            --proto_path=${PROTO_SRC_DIR}
+            --cpp_out=${PROTO_GEN_DIR}
+            ${PROTO_FILE}
+        DEPENDS ${PROTO_SRC_DIR}/${PROTO_FILE}
+        COMMENT "Generating protobuf for ${PROTO_FILE}"
+        VERBATIM
+    )
+    list(APPEND PROTO_GENERATED_SRCS ${GEN_SRC})
 endforeach()
-
-# Create a custom target for flatbuffers generation
-add_custom_target(generate_flatbuffers DEPENDS ${ALL_FBS_HDRS})
 
 # =============================================================================
 # SLAM Common Library (Dynamic Library)
@@ -75,10 +50,11 @@ file(GLOB_RECURSE SLAM_COMMON_SOURCES CONFIGURE_DEPENDS
 )
 
 # 创建动态库
-add_library(${PROJECT_NAME} SHARED ${SLAM_COMMON_SOURCES})
+add_library(${PROJECT_NAME} SHARED
+    ${SLAM_COMMON_SOURCES}
+    ${PROTO_GENERATED_SRCS}
+)
 add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
-
-add_dependencies(${PROJECT_NAME} generate_flatbuffers)
 
 # 设置动态库属性
 set_target_properties(${PROJECT_NAME} PROPERTIES
@@ -91,7 +67,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 target_include_directories(${PROJECT_NAME}
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
+        $<BUILD_INTERFACE:${PROTO_GEN_DIR}>
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -102,8 +78,8 @@ target_link_libraries(${PROJECT_NAME}
     PUBLIC
         cpptrace::cpptrace
         spdlog::spdlog
-        iceoryx2-cxx::static-lib-cxx
-        flatbuffers::flatbuffers
+        protobuf::libprotobuf
+        eCAL::protobuf_core
 )
 
 # 编译定义
@@ -123,20 +99,11 @@ install(TARGETS ${PROJECT_NAME}
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin
-    INCLUDES DESTINATION include
 )
 
-# Install all headers
-install(DIRECTORY include/slam_common
-    DESTINATION include
-    FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h"
-)
-
-# Install generated FlatBuffers headers
-install(DIRECTORY ${PROJECT_BINARY_DIR}/include/fbs
-    DESTINATION include
-    FILES_MATCHING PATTERN "*.h"
-)
+# Install public headers
+install(DIRECTORY include/slam_common DESTINATION include FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h")
+install(DIRECTORY ${PROTO_GEN_DIR}/ DESTINATION include FILES_MATCHING PATTERN "*.pb.h")
 
 # Export configuration
 install(EXPORT slam_common-targets

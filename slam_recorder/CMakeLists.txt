@@ -15,7 +15,9 @@ find_package(slam_common REQUIRED)
 find_package(mcap REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
-add_executable(bag_tool src/bag_tool.cpp)
+add_executable(bag_tool
+    src/bag_tool.cpp
+)
 target_include_directories(bag_tool PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -25,10 +27,9 @@ target_link_libraries(bag_tool PRIVATE
     yaml-cpp
 )
 
-# Foxglove WebSocket Bridge (iceoryx2 → Foxglove Studio 实时可视化)
 add_executable(foxglove_bridge
-    src/foxglove_websocket_bridge.cpp
     src/foxglove_bridge_main.cpp
+    src/foxglove_websocket_bridge.cpp
 )
 target_include_directories(foxglove_bridge PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include

@@ -4,9 +4,11 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -15,6 +17,7 @@
 #include <thread>
 #include <vector>
 
+#include <ecal/msg/protobuf/subscriber.h>
 #include <spdlog/spdlog.h>
 
 namespace ms_slam::slam_common
@@ -45,38 +48,68 @@ class CallbackDispatcher
     uint64_t register_poller(std::function<bool()> poll_func, const std::string& name = "unnamed", int priority = 0);
 
     /**
-     * @brief 注册 subscriber 对象
-     * @tparam T 订阅器类型
-     * @param subscriber 订阅器实例
+     * @brief 注册 eCAL Protobuf 订阅者并记录回调耗时统计
+     * @tparam Msg 消息类型
+     * @param subscriber eCAL 订阅者
+     * @param callback 业务回调，参数为 topic 名称、消息体、发送时间与时钟
      * @param name 调试名称
-     * @param priority 调度优先级
+     * @param priority 调度优先级（仅用于统计展示）
      * @return 注册标识符
      */
-    template <typename T>
-    uint64_t register_subscriber(std::shared_ptr<T> subscriber, const std::string& name = "subscriber", int priority = 0)
+    template <typename Msg>
+    uint64_t RegisterEcalSubscriber(
+        const std::shared_ptr<eCAL::protobuf::CSubscriber<Msg>>& subscriber,
+        std::function<void(const std::string&, const Msg&, long long, long long)> callback,
+        const std::string& name = "ecal_subscriber",
+        int priority = 0)
     {
-        auto poll_func = [subscriber, name]() -> bool {
-            auto sample = subscriber->receive_once();
-            return sample.has_value();
+        struct QueuedMessage {
+            std::string topic;  ///< 消息所属话题
+            Msg message;        ///< 消息副本
+            long long send_time;
+            long long send_clock;
+        };
+        auto queue = std::make_shared<std::deque<QueuedMessage>>();
+        auto queue_mutex = std::make_shared<std::mutex>();
+
+        // 在 dispatcher 线程中消费队列，实现单线程处理
+        auto poller = [queue, queue_mutex, callback]() -> bool {
+            QueuedMessage queued{};
+            {
+                std::lock_guard<std::mutex> lock(*queue_mutex);
+                if (queue->empty()) {
+                    return false;
+                }
+                queued = std::move(queue->front());
+                queue->pop_front();
+            }
+            try {
+                if (callback) {
+                    callback(queued.topic, queued.message, queued.send_time, queued.send_clock);
+                }
+            } catch (const std::exception& e) {
+                spdlog::error("CallbackDispatcher queued callback threw exception: {}", e.what());
+            }
+            return true;
         };
 
-        return register_poller(poll_func, name, priority);
-    }
+        std::lock_guard<std::mutex> lock(mutex_);
+        uint64_t id = next_id_++;
+        entries_.push_back({id, std::move(poller), priority, name, 0, std::chrono::nanoseconds(0)});
+        std::sort(entries_.begin(), entries_.end(), [](const CallbackEntry& a, const CallbackEntry& b) { return a.priority > b.priority; });
 
-    /**
-     * @brief 注册 RPC server 对象
-     * @tparam ServerType 服务类型
-     * @param server 服务实例
-     * @param name 调试名称
-     * @param priority 调度优先级
-     * @return 注册标识符
-     */
-    template <typename ServerType>
-    uint64_t register_server(std::shared_ptr<ServerType> server, const std::string& name = "rpc_server", int priority = 0)
-    {
-        auto poll_func = [server, name]() -> bool { return server->receive_and_respond(); };
+        subscriber->SetReceiveCallback(
+            [queue, queue_mutex, name](const eCAL::STopicId& topic_id, const Msg& msg, long long send_time, long long send_clock) {
+                std::lock_guard<std::mutex> lock(*queue_mutex);
+                try {
+                    queue->push_back(QueuedMessage{topic_id.topic_name, msg, send_time, send_clock});
+                } catch (const std::exception& e) {
+                    spdlog::error("CallbackDispatcher subscriber '{}' enqueue failed: {}", name, e.what());
+                }
+            });
 
-        return register_poller(poll_func, name, priority);
+        spdlog::debug("Registered eCAL subscriber '{}' with id {}", name, id);
+        return id;
     }
 
     /**

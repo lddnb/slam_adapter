@@ -1,12 +1,16 @@
 #include <atomic>
 #include <csignal>
+#include <chrono>
+#include <mutex>
 
 #include <easy/profiler.h>
 #include <easy/arbitrary_value.h>
+#include <ecal/ecal.h>
+#include <ecal/msg/protobuf/publisher.h>
+#include <ecal/msg/protobuf/subscriber.h>
+#include <spdlog/spdlog.h>
 #include <spdlog/stopwatch.h>
-#include <slam_common/callback_dispatcher.hpp>
 #include <slam_common/crash_logger.hpp>
-#include <slam_common/flatbuffers_pub_sub.hpp>
 #include <slam_common/foxglove_messages.hpp>
 #include <slam_core/odometry.hpp>
 
@@ -63,11 +67,10 @@ int main()
     }
     spdlog::info("Crash logger initialized successfully");
 
-    // Create unique node for subscriber
-    auto node =
-        std::make_shared<iox2::Node<iox2::ServiceType::Ipc>>(iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("successful node creation"));
-
-    spdlog::info("Creating generic publishers and subscribers...");
+    if (eCAL::Initialize("slam_adapter_sub_demo") != 0) {
+        spdlog::warn("eCAL already initialized, continue with existing context");
+    }
+    spdlog::info("eCAL initialized, creating publishers and subscribers...");
 
     LoadConfigFromFile("../config/test.yaml");
     LogConfig();
@@ -75,20 +78,26 @@ int main()
     const double blind_dist = config_inst.common_params.blind;
     const bool use_img = config_inst.common_params.render_en;
 
-    auto odom = std::make_unique<Odometry>();
-    auto processed_image_pub = std::make_shared<FBSPublisher<FoxgloveCompressedImage>>(node, "/camera/image_processed");
+    auto odom = std::make_shared<Odometry>();
+
+    eCAL::protobuf::CPublisher<FoxgloveCompressedImage> processed_image_pub("/camera/image_processed");
+    eCAL::protobuf::CPublisher<FoxglovePoseInFrame> odom_pub("/odom");
+    eCAL::protobuf::CPublisher<FoxgloveFrameTransforms> tf_pub("/tf");
+    eCAL::protobuf::CPublisher<FoxgloveSceneUpdate> scene_pub("/marker");
+    eCAL::protobuf::CPublisher<FoxglovePointCloud> map_cloud_pub("/cloud_registered");
+    eCAL::protobuf::CPublisher<FoxglovePointCloud> local_map_pub("/local_map");
+    eCAL::protobuf::CPublisher<FoxglovePosesInFrame> path_pub("/path");
 
     std::atomic<int> pc_received_count{0};
-    auto pc_callback = [&pc_received_count, &odom, blind_dist](const FoxglovePointCloud& pc_wrapper) {
+    auto pc_subscriber = std::make_shared<eCAL::protobuf::CSubscriber<FoxglovePointCloud>>(config_inst.common_params.lid_topic);
+    pc_subscriber->SetReceiveCallback([&pc_received_count, &odom, blind_dist](
+                                          const eCAL::STopicId&, const FoxglovePointCloud& pc_msg, long long, long long) {
         EASY_BLOCK("pc_cb", profiler::colors::Green);
         pc_received_count++;
 
-        // Get native Foxglove PointCloud pointer (zero-copy)
-        const foxglove::PointCloud* pc = pc_wrapper.get();
-
 #ifdef USE_PCL
         auto pcl_cloud = std::make_shared<PointCloudT>();
-        if (!ConvertLivoxPointCloudMessagePCL(*pc, *pcl_cloud)) {
+        if (!ConvertLivoxPointCloudMessagePCL(pc_msg, *pcl_cloud)) {
             spdlog::warn("Failed to convert point cloud message to PCL cloud");
             return;
         }
@@ -96,140 +105,90 @@ int main()
 #endif
 
         auto cloud = std::make_shared<PointCloud<PointXYZITDescriptor>>();
-        if (!ConvertLivoxPointCloudMessage(*pc, cloud, blind_dist)) {
+        if (!ConvertLivoxPointCloudMessage(pc_msg, cloud, blind_dist)) {
             spdlog::warn("Failed to convert point cloud message");
             return;
         }
 
         odom->AddLidarData(cloud);
-        // spdlog::info(
-        //     "✓ Received PointCloud #{}: timestamp={:.3f}, point_stride={}, data_size={}, points={}",
-        //     pc_received_count.load(),
-        //     cloud->timestamp(0),
-        //     pc->point_stride(),
-        //     pc->data()->size(),
-        //     cloud->size());
-    };
-
-    auto pc_subscriber = std::make_shared<FBSSubscriber<FoxglovePointCloud>>(node, config_inst.common_params.lid_topic, pc_callback);
-    spdlog::info("Starting pointcloud threaded_subscriber...");
+    });
+    spdlog::info("PointCloud subscriber started on topic {}", config_inst.common_params.lid_topic);
 
     std::atomic<int> received_count{0};
-    auto img_callback = [&received_count, &odom, processed_image_pub, use_img](const FoxgloveCompressedImage& img_wrapper) {
-        EASY_BLOCK("img_cb", profiler::colors::Coral);
-        received_count++;
+    std::shared_ptr<eCAL::protobuf::CSubscriber<FoxgloveCompressedImage>> img_subscriber;
+    if (!config_inst.common_params.img_topics.empty()) {
+        img_subscriber = std::make_shared<eCAL::protobuf::CSubscriber<FoxgloveCompressedImage>>(config_inst.common_params.img_topics[0]);
+        img_subscriber->SetReceiveCallback([&received_count, &odom, use_img, &processed_image_pub](
+                                               const eCAL::STopicId&, const FoxgloveCompressedImage& img_msg, long long, long long) {
+            EASY_BLOCK("img_cb", profiler::colors::Coral);
+            received_count++;
 
-        spdlog::stopwatch ws;
-        const foxglove::CompressedImage* img = img_wrapper.get();
-        Image image;
-        // if (!DecodeCompressedImageMessage(*img, image)) {
-        //     spdlog::warn("Failed to decode compressed image");
-        //     return;
-        // }
-
-        if (use_img) {
-            odom->AddImageData(image);
-        }
-
-        if (processed_image_pub) {
-            flatbuffers::FlatBufferBuilder image_builder(512 * 1024);
-            const std::string frame_id = img->frame_id() ? img->frame_id()->str() : "camera";
-            if (BuildFoxgloveCompressedImage(image, frame_id, "jpeg", 90, image_builder)) {
-                processed_image_pub->publish_from_builder(image_builder);
+            spdlog::stopwatch ws;
+            Image image;
+            if (!DecodeCompressedImageMessage(img_msg, image)) {
+                spdlog::warn("Failed to decode compressed image");
+                return;
             }
-        }
 
-        // spdlog::info(
-        //     "✓ Received Image #{}: timestamp={:.3f}, {} bytes, mat size: {}x{}",
-        //     received_count.load(),
-        //     image.timestamp(),
-        //     img->data()->size(),
-        //     image.data().size().width,
-        //     image.data().size().height);
+            if (use_img) {
+                odom->AddImageData(image);
+            }
 
-        // spdlog::warn("  Decoding time: {} us", std::chrono::duration_cast<std::chrono::microseconds>(ws.elapsed()).count());
+            FoxgloveCompressedImage processed_msg;
+            const std::string frame_id = img_msg.frame_id().empty() ? "camera" : img_msg.frame_id();
+            if (BuildFoxgloveCompressedImage(image, frame_id, "jpeg", 90, processed_msg)) {
+                processed_image_pub.Send(processed_msg);
+            }
 
-        // std::string filename = "received_image.jpg";
-        // cv::imwrite(filename, mat);
-        // spdlog::info("  Saved to {}", filename);
-    };
-
-    auto img_subscriber = std::make_shared<FBSSubscriber<FoxgloveCompressedImage>>(node, config_inst.common_params.img_topics[0], img_callback);
-    spdlog::info("Starting image threaded_subscriber...");
+            spdlog::debug("Image cb elapsed {} us", std::chrono::duration_cast<std::chrono::microseconds>(ws.elapsed()).count());
+        });
+        spdlog::info("Image subscriber started on topic {}", config_inst.common_params.img_topics[0]);
+    } else {
+        spdlog::warn("No image topic configured, skip image subscriber");
+    }
 
     std::atomic<int> imu_received_count{0};
-    auto imu_callback = [&imu_received_count, &odom](const FoxgloveImu& imu_wrapper) {
-        EASY_BLOCK("imu_cb", profiler::colors::Brown);
+    auto imu_subscriber = std::make_shared<eCAL::protobuf::CSubscriber<FoxgloveImu>>(config_inst.common_params.imu_topic);
+    imu_subscriber->SetReceiveCallback([&imu_received_count, &odom](const eCAL::STopicId&, const FoxgloveImu& imu_msg, long long, long long) {
         imu_received_count++;
 
-        const foxglove::Imu* imu = imu_wrapper.get();
         IMU cur_imu;
-        if (!ConvertImuMessage(*imu, cur_imu, false)) {
+        if (!ConvertImuMessage(imu_msg, cur_imu, false)) {
             spdlog::warn("Failed to convert IMU message");
             return;
         }
 
         odom->AddIMUData(cur_imu);
-
-        // if (imu_received_count.load() % 50 == 0) {
-        //     spdlog::info(
-        //         "✓ Received Imu #{}: timestamp={:.3f}, angular_velocity=({:.3f}, {:.3f}, {:.3f}), linear_acceleration=({:.3f}, {:.3f}, {:.3f})",
-        //         imu_received_count.load(),
-        //         cur_imu.timestamp(),
-        //         cur_imu.angular_velocity().x(),
-        //         cur_imu.angular_velocity().y(),
-        //         cur_imu.angular_velocity().z(),
-        //         cur_imu.linear_acceleration().x(),
-        //         cur_imu.linear_acceleration().y(),
-        //         cur_imu.linear_acceleration().z());
-        // }
-    };
-
-    auto imu_subscriber =
-        std::make_shared<FBSSubscriber<FoxgloveImu>>(node, config_inst.common_params.imu_topic, imu_callback, PubSubConfig{.subscriber_max_buffer_size = 300});
-    spdlog::info("Starting imu threaded_subscriber...");
-
-    CallbackDispatcher dispatcher;
-    dispatcher.set_poll_interval(std::chrono::milliseconds(1));
-    dispatcher.register_subscriber<FBSSubscriber<FoxglovePointCloud>>(pc_subscriber, "PointCloud_Subscriber", 5);
-    dispatcher.register_subscriber<FBSSubscriber<FoxgloveCompressedImage>>(img_subscriber, "Image_Subscriber", 5);
-    dispatcher.register_subscriber<FBSSubscriber<FoxgloveImu>>(imu_subscriber, "Imu_Subscriber", 10);
-    dispatcher.start();
+    });
+    spdlog::info("IMU subscriber started on topic {}", config_inst.common_params.imu_topic);
 
     States lidar_states_buffer;
-    auto odom_pub = std::make_shared<FBSPublisher<FoxglovePoseInFrame>>(node, "/odom");
-    flatbuffers::FlatBufferBuilder fbb(1024 * 1024);
-
-    auto tf_pub = std::make_shared<FBSPublisher<FoxgloveFrameTransforms>>(node, "/tf");
-    auto scene_pub = std::make_shared<FBSPublisher<FoxgloveSceneUpdate>>(node, "/marker");
-
-    std::vector<PointCloudType::Ptr> deskewed_clouds;
-    auto map_cloud_pub = std::make_shared<FBSPublisher<FoxglovePointCloud>>(node, "/cloud_registered");
-
-    PointCloud<PointXYZDescriptor>::Ptr local_map;
-    local_map = std::make_shared<PointCloud<PointXYZDescriptor>>();
-    auto local_map_pub = std::make_shared<FBSPublisher<FoxglovePointCloud>>(node, "/local_map");
-
     std::vector<State> states_buffer;
-    auto path_pub = std::make_shared<FBSPublisher<FoxglovePosesInFrame>>(node, "/path");
+    std::vector<PointCloudType::Ptr> deskewed_clouds;
+    PointCloud<PointXYZDescriptor>::Ptr local_map = std::make_shared<PointCloud<PointXYZDescriptor>>();
+
+    FoxglovePoseInFrame odom_msg;
+    FoxgloveSceneUpdate scene_msg;
+    FoxgloveFrameTransforms tf_msg;
+    FoxglovePointCloud cloud_msg;
+    FoxglovePosesInFrame path_msg;
 
     while (!shouldExit.load()) {
         EASY_BLOCK("Adapter Publish", profiler::colors::Orange);
-        // Get latest states from the odometry
         odom->GetLidarState(lidar_states_buffer);
 
         std::vector<FrameTransformData> transform_data;
         transform_data.reserve(lidar_states_buffer.size() * 2);
 
         for (const auto& state : lidar_states_buffer) {
-            if (!BuildFoxglovePoseInFrame(state, "odom", fbb)) {
+            if (!BuildFoxglovePoseInFrame(state, "odom", odom_msg)) {
                 spdlog::warn("BuildFoxglovePoseInFrame failed");
                 continue;
             }
-            odom_pub->publish_from_builder(fbb);
+            odom_pub.Send(odom_msg);
 
-            if (BuildFoxgloveSceneUpdateFromState(state, "odom", "odom_covariance", fbb)) {
-                scene_pub->publish_from_builder(fbb);
+            if (BuildFoxgloveSceneUpdateFromState(state, "odom", "odom_covariance", scene_msg)) {
+                scene_pub.Send(scene_msg);
             }
 
             const auto& position = state.p();
@@ -253,8 +212,8 @@ int main()
         }
 
         if (!transform_data.empty()) {
-            if (BuildFoxgloveFrameTransforms(transform_data, fbb)) {
-                tf_pub->publish_from_builder(fbb);
+            if (BuildFoxgloveFrameTransforms(transform_data, tf_msg)) {
+                tf_pub.Send(tf_msg);
             }
         }
 
@@ -264,18 +223,18 @@ int main()
             if (!cloud) {
                 continue;
             }
-            if (BuildFoxglovePointCloud(*cloud, "odom", fbb)) {
-                map_cloud_pub->publish_from_builder(fbb);
+            if (BuildFoxglovePointCloud(*cloud, "odom", cloud_msg)) {
+                map_cloud_pub.Send(cloud_msg);
             }
         }
 
         odom->GetLocalMap(local_map);
-        if (local_map && BuildFoxglovePointCloud(*local_map, "odom", fbb)) {
-            local_map_pub->publish_from_builder(fbb);
+        if (local_map && BuildFoxglovePointCloud(*local_map, "odom", cloud_msg)) {
+            local_map_pub.Send(cloud_msg);
         }
 
-        if (states_buffer.size() % 10 == 0 && BuildFoxglovePosesInFrame(states_buffer, "odom", fbb)) {
-            path_pub->publish_from_builder(fbb);
+        if (states_buffer.size() % 10 == 0 && BuildFoxglovePosesInFrame(states_buffer, "odom", path_msg)) {
+            path_pub.Send(path_msg);
         }
 
         EASY_END_BLOCK;
@@ -285,8 +244,7 @@ int main()
 
     spdlog::info("接收到退出信号，正在收尾");
 
-    dispatcher.stop();
-    dispatcher.print_statistics();
+    eCAL::Finalize();
     odom->Stop();
 
     const auto dumped_blocks = profiler::dumpBlocksToFile(kProfileDumpPath);

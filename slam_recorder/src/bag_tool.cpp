@@ -1,6 +1,7 @@
 #include "slam_recorder/bag_tool.hpp"
 
 #include <poll.h>
+#include <csignal>
 #include <termios.h>
 #include <unistd.h>
 
@@ -8,28 +9,34 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cstdint>
 #include <cmath>
 #include <ctime>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
-#include <flatbuffers/flatbuffers.h>
+#include <ecal/ecal.h>
+#include <ecal/msg/protobuf/publisher.h>
+#include <google/protobuf/descriptor.h>
+#include <google/protobuf/descriptor.pb.h>
+#include <google/protobuf/message.h>
 #include <mcap/reader.hpp>
 #include <mcap/writer.hpp>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 #include <yaml-cpp/yaml.h>
-#include <iox2/iceoryx2.hpp>
 
-#include <slam_common/flatbuffers_pub_sub.hpp>
 #include <slam_common/foxglove_messages.hpp>
 
 #include "slam_recorder/ros1_msg.hpp"
@@ -40,7 +47,6 @@ namespace ms_slam::slam_recorder
 namespace
 {
 
-using ms_slam::slam_common::FBSPublisher;
 using ms_slam::slam_common::FoxgloveCompressedImage;
 using ms_slam::slam_common::FoxgloveFrameTransforms;
 using ms_slam::slam_common::FoxgloveImu;
@@ -59,7 +65,7 @@ enum class MessageKind { PointCloud, CompressedImage, Imu, PoseInFrame, PosesInF
 struct MessageDescriptor {
     MessageKind kind{MessageKind::Unsupported};
     bool is_ros{false};
-    bool is_flatbuffer{false};
+    bool is_protobuf{false};
     bool is_livox{false};
 };
 
@@ -86,8 +92,12 @@ InputType ParseInputType(const std::string& value)
     if (lowered == "ros1_mcap" || lowered == "ros1-mcap") {
         return InputType::Ros1Mcap;
     }
-    if (lowered == "flatbuffer_mcap" || lowered == "flatbuffers_mcap" || lowered == "foxglove_mcap") {
-        return InputType::FlatbufferMcap;
+    if (lowered == "protobuf_mcap" || lowered == "protobuf" || lowered == "foxglove_mcap") {
+        return InputType::ProtobufMcap;
+    }
+    if (lowered == "flatbuffer_mcap" || lowered == "flatbuffers_mcap" || lowered == "foxglove_flatbuffer_mcap") {
+        spdlog::warn("Deprecated input type flatbuffer_mcap, fallback to protobuf");
+        return InputType::ProtobufMcap;
     }
     if (lowered == "rosbag" || lowered == "ros1_bag") {
         return InputType::Rosbag;
@@ -141,35 +151,35 @@ MessageDescriptor DescribeMessage(const mcap::MessageView& view)
         return descriptor;
     }
 
-    if (encoding == "flatbuffer") {
+    if (encoding == "protobuf") {
         if (schema_name == "foxglove.PointCloud") {
             descriptor.kind = MessageKind::PointCloud;
-            descriptor.is_flatbuffer = true;
+            descriptor.is_protobuf = true;
             return descriptor;
         }
         if (schema_name == "foxglove.CompressedImage") {
             descriptor.kind = MessageKind::CompressedImage;
-            descriptor.is_flatbuffer = true;
+            descriptor.is_protobuf = true;
             return descriptor;
         }
         if (schema_name == "foxglove.Imu") {
             descriptor.kind = MessageKind::Imu;
-            descriptor.is_flatbuffer = true;
+            descriptor.is_protobuf = true;
             return descriptor;
         }
         if (schema_name == "foxglove.PoseInFrame") {
             descriptor.kind = MessageKind::PoseInFrame;
-            descriptor.is_flatbuffer = true;
+            descriptor.is_protobuf = true;
             return descriptor;
         }
         if (schema_name == "foxglove.PosesInFrame") {
             descriptor.kind = MessageKind::PosesInFrame;
-            descriptor.is_flatbuffer = true;
+            descriptor.is_protobuf = true;
             return descriptor;
         }
         if (schema_name == "foxglove.FrameTransforms") {
             descriptor.kind = MessageKind::FrameTransforms;
-            descriptor.is_flatbuffer = true;
+            descriptor.is_protobuf = true;
             return descriptor;
         }
     }
@@ -190,14 +200,12 @@ TopicSettings ResolveTopic(const ToolConfig& config, const std::string& topic)
     resolved.playback = config.playback_enabled && config.default_playback;
     resolved.record = config.record_enabled && config.default_record;
     resolved.publish_service = topic;
-    resolved.queue_depth = config.playback_queue_depth;
 
     const auto it = config.topics.find(topic);
     if (it != config.topics.end()) {
         if (!it->second.publish_service.empty()) {
             resolved.publish_service = it->second.publish_service;
         }
-        resolved.queue_depth = it->second.queue_depth == 0 ? config.playback_queue_depth : it->second.queue_depth;
         resolved.playback = config.playback_enabled && it->second.playback;
         resolved.record = config.record_enabled && it->second.record;
     }
@@ -218,6 +226,39 @@ struct SchemaCache {
 };
 
 /**
+ * @brief 构造包含依赖的 Protobuf 描述符集
+ * @param descriptor 顶层描述符
+ * @return 序列化后的描述符集
+ */
+std::string BuildDescriptorSetString(const google::protobuf::Descriptor* descriptor)
+{
+    if (descriptor == nullptr) {
+        return {};
+    }
+
+    google::protobuf::FileDescriptorSet descriptor_set;
+    std::queue<const google::protobuf::FileDescriptor*> pending;
+    std::unordered_set<std::string> visited;
+
+    pending.push(descriptor->file());
+    visited.insert(descriptor->file()->name());
+
+    while (!pending.empty()) {
+        const auto* file = pending.front();
+        pending.pop();
+        file->CopyTo(descriptor_set.add_file());
+        for (int i = 0; i < file->dependency_count(); ++i) {
+            const auto* dependency = file->dependency(i);
+            if (visited.insert(dependency->name()).second) {
+                pending.push(dependency);
+            }
+        }
+    }
+
+    return descriptor_set.SerializeAsString();
+}
+
+/**
  * @brief 录制上下文信息，封装 writer 与 channel 管理
  */
 struct RecorderContext {
@@ -230,16 +271,16 @@ struct RecorderContext {
 };
 
 /**
- * @brief 回放发布器基类，提供统一的 raw publish 接口
+ * @brief 回放发布器基类，提供统一的 Protobuf 发布接口
  */
 struct PlaybackPublisherBase {
     virtual ~PlaybackPublisherBase() = default;
-    virtual bool Publish(const std::byte* data, size_t size) = 0;
+    virtual bool Publish(const google::protobuf::Message& message) = 0;
 };
 
 /**
- * @brief 模板化的回放发布器，实现针对不同消息类型的 raw publish
- * @tparam MessageType FlatBuffer 消息类型
+ * @brief 模板化的回放发布器，封装 eCAL Protobuf 发布
+ * @tparam MessageType Protobuf 消息类型
  */
 template <typename MessageType>
 class PlaybackPublisher final : public PlaybackPublisherBase
@@ -247,25 +288,31 @@ class PlaybackPublisher final : public PlaybackPublisherBase
   public:
     /**
      * @brief 构造函数
-     * @param node iceoryx2 节点
      * @param service_name 服务名称
-     * @param queue_depth 队列深度
      */
-    PlaybackPublisher(std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node, const std::string& service_name, uint32_t queue_depth)
-    : publisher_(std::move(node), service_name, slam_common::PubSubConfig{.subscriber_max_buffer_size = queue_depth})
-    {
-    }
+    explicit PlaybackPublisher(const std::string& service_name) : publisher_(service_name) {}
 
     /**
-     * @brief 发布原始 FlatBuffer 数据
-     * @param data 数据指针
-     * @param size 数据长度
+     * @brief 发布 Protobuf 消息
+     * @param message 待发布的消息
      * @return 发布成功返回 true
      */
-    bool Publish(const std::byte* data, size_t size) override { return publisher_.publish_raw(reinterpret_cast<const uint8_t*>(data), size); }
+    bool Publish(const google::protobuf::Message& message) override
+    {
+        const auto* typed_message = dynamic_cast<const MessageType*>(&message);
+        if (typed_message == nullptr) {
+            spdlog::error("Publish failed: message type mismatch");
+            return false;
+        }
+        if (publisher_.GetSubscriberCount() == 0) {
+            // 无订阅者时跳过发送，避免误报失败
+            return true;
+        }
+        return publisher_.Send(*typed_message);
+    }
 
   private:
-    FBSPublisher<MessageType> publisher_;
+    eCAL::protobuf::CPublisher<MessageType> publisher_;
 };
 
 /**
@@ -275,8 +322,8 @@ struct PlaybackContext {
     bool enabled{false};
     bool sync_time{true};
     double rate{1.0};
-    uint32_t default_queue_depth{10};
-    std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node;
+    bool ecal_initialized{false};
+    bool owns_ecal{false};
     std::unordered_map<std::string, std::unique_ptr<PlaybackPublisherBase>> publishers;
     std::optional<uint64_t> first_timestamp;
     std::chrono::steady_clock::time_point start_wall_time{};
@@ -310,6 +357,20 @@ struct MessageStats {
 };
 
 /**
+ * @brief 可复用的 Protobuf 消息缓存，减少重复分配
+ */
+struct MessageCache {
+    FoxglovePointCloud pointcloud;
+    FoxgloveCompressedImage compressed_image;
+    FoxgloveImu imu;
+    FoxglovePoseInFrame pose_in_frame;
+    FoxglovePosesInFrame poses_in_frame;
+    FoxgloveFrameTransforms frame_transforms;
+};
+
+std::atomic<bool> g_interrupted{false};  ///< SIGINT 退出标志
+
+/**
  * @brief 确保对应类型的 Schema 已注册至 MCAP writer
  * @param recorder 录制上下文
  * @param kind 消息类型
@@ -317,9 +378,11 @@ struct MessageStats {
  */
 mcap::SchemaId EnsureSchema(RecorderContext& recorder, MessageKind kind)
 {
-    auto add_schema = [&](auto& cached, auto&& schema_factory) -> mcap::SchemaId {
+    auto add_schema = [&](auto& cached, const google::protobuf::Descriptor* descriptor) -> mcap::SchemaId {
         if (!cached.has_value()) {
-            mcap::Schema schema = schema_factory();
+            const std::string schema_name = descriptor ? descriptor->full_name() : "";
+            const std::string schema_data = BuildDescriptorSetString(descriptor);
+            mcap::Schema schema(schema_name, "protobuf", schema_data);
             if (!recorder.writer) {
                 throw std::runtime_error("recorder writer is not initialized");
             }
@@ -331,53 +394,17 @@ mcap::SchemaId EnsureSchema(RecorderContext& recorder, MessageKind kind)
 
     switch (kind) {
         case MessageKind::PointCloud:
-            return add_schema(recorder.schemas.pointcloud, [] {
-                foxglove::PointCloudBinarySchema schema_buffer;
-                return mcap::Schema(
-                    "foxglove.PointCloud",
-                    "flatbuffer",
-                    std::string(reinterpret_cast<const char*>(schema_buffer.data()), schema_buffer.size()));
-            });
+            return add_schema(recorder.schemas.pointcloud, FoxglovePointCloud::descriptor());
         case MessageKind::CompressedImage:
-            return add_schema(recorder.schemas.compressed_image, [] {
-                foxglove::CompressedImageBinarySchema schema_buffer;
-                return mcap::Schema(
-                    "foxglove.CompressedImage",
-                    "flatbuffer",
-                    std::string(reinterpret_cast<const char*>(schema_buffer.data()), schema_buffer.size()));
-            });
+            return add_schema(recorder.schemas.compressed_image, FoxgloveCompressedImage::descriptor());
         case MessageKind::Imu:
-            return add_schema(recorder.schemas.imu, [] {
-                foxglove::ImuBinarySchema schema_buffer;
-                return mcap::Schema(
-                    "foxglove.Imu",
-                    "flatbuffer",
-                    std::string(reinterpret_cast<const char*>(schema_buffer.data()), schema_buffer.size()));
-            });
+            return add_schema(recorder.schemas.imu, FoxgloveImu::descriptor());
         case MessageKind::PoseInFrame:
-            return add_schema(recorder.schemas.pose_in_frame, [] {
-                foxglove::PoseInFrameBinarySchema schema_buffer;
-                return mcap::Schema(
-                    "foxglove.PoseInFrame",
-                    "flatbuffer",
-                    std::string(reinterpret_cast<const char*>(schema_buffer.data()), schema_buffer.size()));
-            });
+            return add_schema(recorder.schemas.pose_in_frame, FoxglovePoseInFrame::descriptor());
         case MessageKind::PosesInFrame:
-            return add_schema(recorder.schemas.poses_in_frame, [] {
-                foxglove::PosesInFrameBinarySchema schema_buffer;
-                return mcap::Schema(
-                    "foxglove.PosesInFrame",
-                    "flatbuffer",
-                    std::string(reinterpret_cast<const char*>(schema_buffer.data()), schema_buffer.size()));
-            });
+            return add_schema(recorder.schemas.poses_in_frame, FoxglovePosesInFrame::descriptor());
         case MessageKind::FrameTransforms:
-            return add_schema(recorder.schemas.frame_transforms, [] {
-                foxglove::FrameTransformsBinarySchema schema_buffer;
-                return mcap::Schema(
-                    "foxglove.FrameTransforms",
-                    "flatbuffer",
-                    std::string(reinterpret_cast<const char*>(schema_buffer.data()), schema_buffer.size()));
-            });
+            return add_schema(recorder.schemas.frame_transforms, FoxgloveFrameTransforms::descriptor());
         case MessageKind::Unsupported:
         default:
             throw std::runtime_error("unsupported message kind for schema");
@@ -399,7 +426,7 @@ uint16_t EnsureChannel(RecorderContext& recorder, const std::string& topic, Mess
     }
 
     const mcap::SchemaId schema_id = EnsureSchema(recorder, kind);
-    mcap::Channel channel(topic, "flatbuffer", schema_id, {});
+    mcap::Channel channel(topic, "protobuf", schema_id, {});
     if (!recorder.writer) {
         throw std::runtime_error("recorder writer is not initialized");
     }
@@ -418,11 +445,10 @@ uint16_t EnsureChannel(RecorderContext& recorder, const std::string& topic, Mess
  * @param topic 话题名称
  * @param kind 消息类型
  * @param timestamp_ns 时间戳（纳秒）
- * @param data 消息数据指针
- * @param size 数据大小
+ * @param data 序列化后的消息数据
  * @return 成功写入返回 true
  */
-bool WriteRecord(RecorderContext& recorder, const std::string& topic, MessageKind kind, uint64_t timestamp_ns, const std::byte* data, size_t size)
+bool WriteRecord(RecorderContext& recorder, const std::string& topic, MessageKind kind, uint64_t timestamp_ns, const std::string& data)
 {
     if (!recorder.enabled || !recorder.writer) {
         return true;
@@ -436,8 +462,8 @@ bool WriteRecord(RecorderContext& recorder, const std::string& topic, MessageKin
     msg.sequence = sequence;
     msg.logTime = timestamp_ns;
     msg.publishTime = timestamp_ns;
-    msg.data = data;
-    msg.dataSize = static_cast<uint64_t>(size);
+    msg.data = reinterpret_cast<const std::byte*>(data.data());
+    msg.dataSize = static_cast<uint64_t>(data.size());
 
     const auto status = recorder.writer->write(msg);
     if (!status.ok()) {
@@ -461,27 +487,26 @@ PlaybackPublisherBase* EnsurePublisher(PlaybackContext& ctx, const TopicSettings
         return it->second.get();
     }
 
-    const uint32_t queue_depth = topic_settings.queue_depth == 0 ? ctx.default_queue_depth : topic_settings.queue_depth;
     std::unique_ptr<PlaybackPublisherBase> publisher;
 
     switch (kind) {
         case MessageKind::PointCloud:
-            publisher = std::make_unique<PlaybackPublisher<FoxglovePointCloud>>(ctx.node, topic_settings.publish_service, queue_depth);
+            publisher = std::make_unique<PlaybackPublisher<FoxglovePointCloud>>(topic_settings.publish_service);
             break;
         case MessageKind::CompressedImage:
-            publisher = std::make_unique<PlaybackPublisher<FoxgloveCompressedImage>>(ctx.node, topic_settings.publish_service, queue_depth);
+            publisher = std::make_unique<PlaybackPublisher<FoxgloveCompressedImage>>(topic_settings.publish_service);
             break;
         case MessageKind::Imu:
-            publisher = std::make_unique<PlaybackPublisher<FoxgloveImu>>(ctx.node, topic_settings.publish_service, queue_depth);
+            publisher = std::make_unique<PlaybackPublisher<FoxgloveImu>>(topic_settings.publish_service);
             break;
         case MessageKind::PoseInFrame:
-            publisher = std::make_unique<PlaybackPublisher<FoxglovePoseInFrame>>(ctx.node, topic_settings.publish_service, queue_depth);
+            publisher = std::make_unique<PlaybackPublisher<FoxglovePoseInFrame>>(topic_settings.publish_service);
             break;
         case MessageKind::PosesInFrame:
-            publisher = std::make_unique<PlaybackPublisher<FoxglovePosesInFrame>>(ctx.node, topic_settings.publish_service, queue_depth);
+            publisher = std::make_unique<PlaybackPublisher<FoxglovePosesInFrame>>(topic_settings.publish_service);
             break;
         case MessageKind::FrameTransforms:
-            publisher = std::make_unique<PlaybackPublisher<FoxgloveFrameTransforms>>(ctx.node, topic_settings.publish_service, queue_depth);
+            publisher = std::make_unique<PlaybackPublisher<FoxgloveFrameTransforms>>(topic_settings.publish_service);
             break;
         case MessageKind::Unsupported:
         default:
@@ -521,85 +546,121 @@ void PlaybackSleep(PlaybackContext& ctx, uint64_t timestamp_ns)
 }
 
 /**
- * @brief 将 ROS PointCloud2 转换为 Foxglove PointCloud 消息
- * @param view MCAP 消息视图
- * @param fbb FlatBufferBuilder 实例
- * @return 转换成功返回 true
+ * @brief 填充 Protobuf 时间戳
+ * @param seconds 秒
+ * @param nanoseconds 纳秒
+ * @param target 目标时间戳
  */
-bool ConvertPointCloud(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+void FillTimestamp(uint32_t seconds, uint32_t nanoseconds, google::protobuf::Timestamp& target)
 {
-    ROS1PointCloud2 pc2;
-    if (!pc2.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
-        spdlog::error("Failed to parse sensor_msgs/PointCloud2 at topic {}", view.channel->topic);
+    target.set_seconds(static_cast<std::int64_t>(seconds));
+    target.set_nanos(static_cast<std::int32_t>(nanoseconds));
+}
+
+/**
+ * @brief 将位姿重置为单位姿态
+ * @param pose 目标位姿
+ */
+void FillIdentityPose(foxglove::Pose& pose)
+{
+    auto* position = pose.mutable_position();
+    position->set_x(0.0);
+    position->set_y(0.0);
+    position->set_z(0.0);
+
+    auto* orientation = pose.mutable_orientation();
+    orientation->set_x(0.0);
+    orientation->set_y(0.0);
+    orientation->set_z(0.0);
+    orientation->set_w(1.0);
+}
+
+/**
+ * @brief 将 ROS PointField 类型映射到 Foxglove 数值枚举
+ * @param datatype ROS 数据类型编码
+ * @return 对应的枚举值
+ */
+foxglove::PackedElementField_NumericType ToNumericType(uint8_t datatype)
+{
+    switch (datatype) {
+        case 1:
+            return foxglove::PackedElementField_NumericType_UINT8;
+        case 2:
+            return foxglove::PackedElementField_NumericType_UINT16;
+        case 3:
+            return foxglove::PackedElementField_NumericType_UINT32;
+        case 4:
+            return foxglove::PackedElementField_NumericType_INT8;
+        case 5:
+            return foxglove::PackedElementField_NumericType_INT16;
+        case 6:
+            return foxglove::PackedElementField_NumericType_INT32;
+        case 7:
+            return foxglove::PackedElementField_NumericType_FLOAT32;
+        case 8:
+            return foxglove::PackedElementField_NumericType_FLOAT64;
+        default:
+            return foxglove::PackedElementField_NumericType_FLOAT32;
+    }
+}
+
+/**
+ * @brief 解析 MCAP 中的 Protobuf 消息
+ * @tparam MessageType 目标消息类型
+ * @param view MCAP 消息视图
+ * @param message 输出 Protobuf 对象
+ * @return 解析成功返回 true
+ */
+template <typename MessageType>
+bool ParseProtobufMessage(const mcap::MessageView& view, MessageType& message)
+{
+    message.Clear();
+    if (view.message.dataSize > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+        spdlog::error("Protobuf message too large to parse: {} bytes", view.message.dataSize);
         return false;
     }
-
-    fbb.Clear();
-    foxglove::Time timestamp(pc2.header.stamp_sec, pc2.header.stamp_nsec);
-    auto frame_id = fbb.CreateString(pc2.header.frame_id);
-
-    std::vector<flatbuffers::Offset<foxglove::PackedElementField>> fields;
-    fields.reserve(pc2.fields.size());
-    for (const auto& field : pc2.fields) {
-        foxglove::NumericType numeric_type;
-        switch (field.datatype) {
-            case 1:
-                numeric_type = foxglove::NumericType_UINT8;
-                break;
-            case 2:
-                numeric_type = foxglove::NumericType_UINT16;
-                break;
-            case 3:
-                numeric_type = foxglove::NumericType_UINT32;
-                break;
-            case 4:
-                numeric_type = foxglove::NumericType_INT8;
-                break;
-            case 5:
-                numeric_type = foxglove::NumericType_INT16;
-                break;
-            case 6:
-                numeric_type = foxglove::NumericType_INT32;
-                break;
-            case 7:
-                numeric_type = foxglove::NumericType_FLOAT32;
-                break;
-            case 8:
-                numeric_type = foxglove::NumericType_FLOAT64;
-                break;
-            default:
-                numeric_type = foxglove::NumericType_FLOAT32;
-                break;
-        }
-        // 将 ROS PointField 元信息映射成 Foxglove 的 PackedElementField 描述
-        fields.emplace_back(foxglove::CreatePackedElementField(fbb, fbb.CreateString(field.name), field.offset, numeric_type));
+    if (!message.ParseFromArray(view.message.data, static_cast<int>(view.message.dataSize))) {
+        const std::string topic = view.channel ? view.channel->topic : "<unknown>";
+        spdlog::error("Failed to parse protobuf message on topic {}", topic);
+        return false;
     }
-
-    auto data_vector = fbb.CreateVector(pc2.data);
-    auto fields_vector = fbb.CreateVector(fields);
-
-    auto pointcloud = foxglove::CreatePointCloud(fbb, &timestamp, frame_id, 0, pc2.point_step, fields_vector, data_vector);
-    fbb.Finish(pointcloud);
     return true;
 }
 
 /**
- * @brief 将 Livox 自定义点云转换为 Foxglove PointCloud
+ * @brief 序列化 Protobuf 消息
+ * @param message 待序列化的消息
+ * @param buffer 输出缓冲
+ * @return 成功返回 true
+ */
+bool SerializeMessage(const google::protobuf::Message& message, std::string& buffer)
+{
+    buffer.clear();
+    if (!message.SerializeToString(&buffer)) {
+        spdlog::error("Failed to serialize protobuf message: {}", message.GetTypeName());
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief 将 Livox 点云转换为 Foxglove Protobuf
  * @param view MCAP 消息视图
- * @param fbb FlatBufferBuilder 实例
+ * @param message 目标点云消息
  * @return 转换成功返回 true
  */
-bool ConvertLivoxPointCloud(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+bool ConvertLivoxPointCloud(const mcap::MessageView& view, FoxglovePointCloud& message)
 {
     ROS1LivoxCustomMsg livox_msg;
     if (!livox_msg.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
-        spdlog::error("Failed to parse Livox CustomMsg at topic {}", view.channel->topic);
+        const std::string topic = view.channel ? view.channel->topic : "<unknown>";
+        spdlog::error("Failed to parse Livox CustomMsg at topic {}", topic);
         return false;
     }
 
-    const uint32_t point_step = 20;
+    constexpr uint32_t kPointStride = 20;
     std::vector<uint8_t> data;
-    data.reserve(livox_msg.points.size() * point_step);
+    data.reserve(livox_msg.points.size() * kPointStride);
 
     auto append_scalar = [&data](auto value) {
         const uint8_t* ptr = reinterpret_cast<const uint8_t*>(&value);
@@ -607,7 +668,6 @@ bool ConvertLivoxPointCloud(const mcap::MessageView& view, flatbuffers::FlatBuff
     };
 
     for (const auto& point : livox_msg.points) {
-        // Livox 点云字段布局固定，直接串联各标量字段生成连续存储
         append_scalar(point.x);
         append_scalar(point.y);
         append_scalar(point.z);
@@ -618,207 +678,265 @@ bool ConvertLivoxPointCloud(const mcap::MessageView& view, flatbuffers::FlatBuff
         append_scalar(point.offset_time);
     }
 
-    fbb.Clear();
-    foxglove::Time timestamp(livox_msg.header.stamp_sec, livox_msg.header.stamp_nsec);
-    auto frame_id = fbb.CreateString(livox_msg.header.frame_id);
+    message.Clear();
+    FillTimestamp(livox_msg.header.stamp_sec, livox_msg.header.stamp_nsec, *message.mutable_timestamp());
+    message.set_frame_id(livox_msg.header.frame_id);
+    FillIdentityPose(*message.mutable_pose());
+    message.set_point_stride(kPointStride);
 
-    std::vector<flatbuffers::Offset<foxglove::PackedElementField>> fields;
-    fields.reserve(7);
-    fields.emplace_back(foxglove::CreatePackedElementField(fbb, fbb.CreateString("x"), 0, foxglove::NumericType_FLOAT32));
-    fields.emplace_back(foxglove::CreatePackedElementField(fbb, fbb.CreateString("y"), 4, foxglove::NumericType_FLOAT32));
-    fields.emplace_back(foxglove::CreatePackedElementField(fbb, fbb.CreateString("z"), 8, foxglove::NumericType_FLOAT32));
-    fields.emplace_back(foxglove::CreatePackedElementField(fbb, fbb.CreateString("reflectivity"), 12, foxglove::NumericType_UINT8));
-    fields.emplace_back(foxglove::CreatePackedElementField(fbb, fbb.CreateString("tag"), 13, foxglove::NumericType_UINT8));
-    fields.emplace_back(foxglove::CreatePackedElementField(fbb, fbb.CreateString("line"), 14, foxglove::NumericType_UINT8));
-    fields.emplace_back(foxglove::CreatePackedElementField(fbb, fbb.CreateString("offset_time"), 16, foxglove::NumericType_UINT32));
+    message.mutable_fields()->Reserve(7);
+    auto* x_field = message.add_fields();
+    x_field->set_name("x");
+    x_field->set_offset(0);
+    x_field->set_type(foxglove::PackedElementField_NumericType_FLOAT32);
 
-    auto fields_vector = fbb.CreateVector(fields);
-    auto data_vector = fbb.CreateVector(data);
-    auto pointcloud = foxglove::CreatePointCloud(fbb, &timestamp, frame_id, 0, point_step, fields_vector, data_vector);
-    fbb.Finish(pointcloud);
+    auto* y_field = message.add_fields();
+    y_field->set_name("y");
+    y_field->set_offset(4);
+    y_field->set_type(foxglove::PackedElementField_NumericType_FLOAT32);
+
+    auto* z_field = message.add_fields();
+    z_field->set_name("z");
+    z_field->set_offset(8);
+    z_field->set_type(foxglove::PackedElementField_NumericType_FLOAT32);
+
+    auto* reflectivity_field = message.add_fields();
+    reflectivity_field->set_name("reflectivity");
+    reflectivity_field->set_offset(12);
+    reflectivity_field->set_type(foxglove::PackedElementField_NumericType_UINT8);
+
+    auto* tag_field = message.add_fields();
+    tag_field->set_name("tag");
+    tag_field->set_offset(13);
+    tag_field->set_type(foxglove::PackedElementField_NumericType_UINT8);
+
+    auto* line_field = message.add_fields();
+    line_field->set_name("line");
+    line_field->set_offset(14);
+    line_field->set_type(foxglove::PackedElementField_NumericType_UINT8);
+
+    auto* offset_time_field = message.add_fields();
+    offset_time_field->set_name("offset_time");
+    offset_time_field->set_offset(16);
+    offset_time_field->set_type(foxglove::PackedElementField_NumericType_UINT32);
+
+    message.set_data(reinterpret_cast<const char*>(data.data()), data.size());
     return true;
 }
 
 /**
- * @brief 转换压缩图像消息
+ * @brief 转换 ROS PointCloud2 或直接解析 Protobuf 点云
  * @param view MCAP 消息视图
- * @param fbb FlatBufferBuilder 实例
+ * @param descriptor 消息描述
+ * @param message 目标点云消息
  * @return 转换成功返回 true
  */
-bool ConvertImage(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+bool ConvertPointCloud(const mcap::MessageView& view, const MessageDescriptor& descriptor, FoxglovePointCloud& message)
 {
+    if (descriptor.is_protobuf) {
+        return ParseProtobufMessage(view, message);
+    }
+    if (descriptor.is_livox) {
+        return ConvertLivoxPointCloud(view, message);
+    }
+
+    ROS1PointCloud2 pc2;
+    if (!pc2.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
+        const std::string topic = view.channel ? view.channel->topic : "<unknown>";
+        spdlog::error("Failed to parse sensor_msgs/PointCloud2 at topic {}", topic);
+        return false;
+    }
+
+    message.Clear();
+    FillTimestamp(pc2.header.stamp_sec, pc2.header.stamp_nsec, *message.mutable_timestamp());
+    message.set_frame_id(pc2.header.frame_id);
+    FillIdentityPose(*message.mutable_pose());
+    message.set_point_stride(pc2.point_step);
+
+    for (const auto& field : pc2.fields) {
+        auto* field_out = message.add_fields();
+        field_out->set_name(field.name);
+        field_out->set_offset(field.offset);
+        field_out->set_type(ToNumericType(field.datatype));
+    }
+
+    message.set_data(reinterpret_cast<const char*>(pc2.data.data()), pc2.data.size());
+    return true;
+}
+
+/**
+ * @brief 转换压缩图像或解析 Protobuf 图像
+ * @param view MCAP 消息视图
+ * @param descriptor 消息描述
+ * @param message 目标图像消息
+ * @return 转换成功返回 true
+ */
+bool ConvertImage(const mcap::MessageView& view, const MessageDescriptor& descriptor, FoxgloveCompressedImage& message)
+{
+    if (descriptor.is_protobuf) {
+        return ParseProtobufMessage(view, message);
+    }
+
     ROS1CompressedImage image;
     if (!image.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
-        spdlog::error("Failed to parse sensor_msgs/CompressedImage at topic {}", view.channel->topic);
+        const std::string topic = view.channel ? view.channel->topic : "<unknown>";
+        spdlog::error("Failed to parse sensor_msgs/CompressedImage at topic {}", topic);
         return false;
     }
 
-    fbb.Clear();
-    foxglove::Time timestamp(image.header.stamp_sec, image.header.stamp_nsec);
-    auto frame_id = fbb.CreateString(image.header.frame_id);
-    auto format = fbb.CreateString(image.format);
-    auto data = fbb.CreateVector(image.data);
-
-    auto compressed = foxglove::CreateCompressedImage(fbb, &timestamp, frame_id, data, format);
-    fbb.Finish(compressed);
+    message.Clear();
+    FillTimestamp(image.header.stamp_sec, image.header.stamp_nsec, *message.mutable_timestamp());
+    message.set_frame_id(image.header.frame_id);
+    message.set_format(image.format);
+    message.set_data(reinterpret_cast<const char*>(image.data.data()), image.data.size());
     return true;
 }
 
 /**
- * @brief 转换 IMU 消息
+ * @brief 转换 IMU 或解析 Protobuf IMU
  * @param view MCAP 消息视图
- * @param fbb FlatBufferBuilder 实例
+ * @param descriptor 消息描述
+ * @param message 目标 IMU 消息
  * @return 转换成功返回 true
  */
-bool ConvertImu(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+bool ConvertImu(const mcap::MessageView& view, const MessageDescriptor& descriptor, FoxgloveImu& message)
 {
+    if (descriptor.is_protobuf) {
+        return ParseProtobufMessage(view, message);
+    }
+
     ROS1Imu imu;
     if (!imu.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
-        spdlog::error("Failed to parse sensor_msgs/Imu at topic {}", view.channel->topic);
+        const std::string topic = view.channel ? view.channel->topic : "<unknown>";
+        spdlog::error("Failed to parse sensor_msgs/Imu at topic {}", topic);
         return false;
     }
 
-    fbb.Clear();
-    foxglove::Time timestamp(imu.header.stamp_sec, imu.header.stamp_nsec);
-    auto frame_id = fbb.CreateString(imu.header.frame_id);
-    auto angular_velocity = foxglove::CreateVector3(fbb, imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z);
-    auto linear_acceleration = foxglove::CreateVector3(fbb, imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z);
+    message.Clear();
+    FillTimestamp(imu.header.stamp_sec, imu.header.stamp_nsec, *message.mutable_timestamp());
+    message.set_frame_id(imu.header.frame_id);
 
-    auto imu_fb = foxglove::CreateImu(fbb, &timestamp, frame_id, angular_velocity, linear_acceleration);
-    fbb.Finish(imu_fb);
+    auto* angular_velocity = message.mutable_angular_velocity();
+    angular_velocity->set_x(imu.angular_velocity.x);
+    angular_velocity->set_y(imu.angular_velocity.y);
+    angular_velocity->set_z(imu.angular_velocity.z);
+
+    auto* linear_acceleration = message.mutable_linear_acceleration();
+    linear_acceleration->set_x(imu.linear_acceleration.x);
+    linear_acceleration->set_y(imu.linear_acceleration.y);
+    linear_acceleration->set_z(imu.linear_acceleration.z);
     return true;
 }
 
 /**
- * @brief 转换 Path 消息
+ * @brief 转换 Path 或解析 Protobuf PosesInFrame
  * @param view MCAP 消息视图
- * @param fbb FlatBufferBuilder 实例
+ * @param descriptor 消息描述
+ * @param message 目标轨迹消息
  * @return 转换成功返回 true
  */
-bool ConvertPath(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+bool ConvertPath(const mcap::MessageView& view, const MessageDescriptor& descriptor, FoxglovePosesInFrame& message)
 {
+    if (descriptor.is_protobuf) {
+        return ParseProtobufMessage(view, message);
+    }
+
     ROS1Path path;
     if (!path.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
-        spdlog::error("Failed to parse nav_msgs/Path at topic {}", view.channel->topic);
+        const std::string topic = view.channel ? view.channel->topic : "<unknown>";
+        spdlog::error("Failed to parse nav_msgs/Path at topic {}", topic);
         return false;
     }
 
-    fbb.Clear();
-    foxglove::Time timestamp(path.header.stamp_sec, path.header.stamp_nsec);
-    auto frame_id = fbb.CreateString(path.header.frame_id);
+    message.Clear();
+    FillTimestamp(path.header.stamp_sec, path.header.stamp_nsec, *message.mutable_timestamp());
+    message.set_frame_id(path.header.frame_id);
 
-    std::vector<flatbuffers::Offset<foxglove::Pose>> pose_offsets;
-    pose_offsets.reserve(path.poses.size());
     for (const auto& pose_stamped : path.poses) {
-        const auto& pose = pose_stamped.pose;
-        auto position = foxglove::CreateVector3(fbb, pose.position.x, pose.position.y, pose.position.z);
-        auto orientation = foxglove::CreateQuaternion(fbb, pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w);
-        pose_offsets.emplace_back(foxglove::CreatePose(fbb, position, orientation));
+        auto* pose_out = message.add_poses();
+        pose_out->mutable_position()->set_x(pose_stamped.pose.position.x);
+        pose_out->mutable_position()->set_y(pose_stamped.pose.position.y);
+        pose_out->mutable_position()->set_z(pose_stamped.pose.position.z);
+        pose_out->mutable_orientation()->set_x(pose_stamped.pose.orientation.x);
+        pose_out->mutable_orientation()->set_y(pose_stamped.pose.orientation.y);
+        pose_out->mutable_orientation()->set_z(pose_stamped.pose.orientation.z);
+        pose_out->mutable_orientation()->set_w(pose_stamped.pose.orientation.w);
     }
 
-    auto poses_vector = fbb.CreateVector(pose_offsets);
-    auto poses_in_frame = foxglove::CreatePosesInFrame(fbb, &timestamp, frame_id, poses_vector);
-    fbb.Finish(poses_in_frame);
     return true;
 }
 
 /**
- * @brief 转换 Odometry 消息
+ * @brief 转换 Odometry 或解析 Protobuf PoseInFrame
  * @param view MCAP 消息视图
- * @param fbb FlatBufferBuilder 实例
+ * @param descriptor 消息描述
+ * @param message 目标位姿消息
  * @return 转换成功返回 true
  */
-bool ConvertOdometry(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+bool ConvertOdometry(const mcap::MessageView& view, const MessageDescriptor& descriptor, FoxglovePoseInFrame& message)
 {
+    if (descriptor.is_protobuf) {
+        return ParseProtobufMessage(view, message);
+    }
+
     ROS1Odometry odom;
     if (!odom.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
-        spdlog::error("Failed to parse nav_msgs/Odometry at topic {}", view.channel->topic);
+        const std::string topic = view.channel ? view.channel->topic : "<unknown>";
+        spdlog::error("Failed to parse nav_msgs/Odometry at topic {}", topic);
         return false;
     }
 
-    fbb.Clear();
-    foxglove::Time timestamp(odom.header.stamp_sec, odom.header.stamp_nsec);
-    const std::string& frame_source = odom.header.frame_id;
-    auto frame_id = fbb.CreateString(frame_source);
+    message.Clear();
+    FillTimestamp(odom.header.stamp_sec, odom.header.stamp_nsec, *message.mutable_timestamp());
+    message.set_frame_id(odom.header.frame_id);
 
-    auto position = foxglove::CreateVector3(fbb, odom.pose.position.x, odom.pose.position.y, odom.pose.position.z);
-    auto orientation =
-        foxglove::CreateQuaternion(fbb, odom.pose.orientation.x, odom.pose.orientation.y, odom.pose.orientation.z, odom.pose.orientation.w);
-    auto pose = foxglove::CreatePose(fbb, position, orientation);
-    auto pose_in_frame = foxglove::CreatePoseInFrame(fbb, &timestamp, frame_id, pose);
-    fbb.Finish(pose_in_frame);
+    auto* pose = message.mutable_pose();
+    pose->mutable_position()->set_x(odom.pose.position.x);
+    pose->mutable_position()->set_y(odom.pose.position.y);
+    pose->mutable_position()->set_z(odom.pose.position.z);
+    pose->mutable_orientation()->set_x(odom.pose.orientation.x);
+    pose->mutable_orientation()->set_y(odom.pose.orientation.y);
+    pose->mutable_orientation()->set_z(odom.pose.orientation.z);
+    pose->mutable_orientation()->set_w(odom.pose.orientation.w);
     return true;
 }
 
 /**
- * @brief 转换 TF 消息
+ * @brief 转换 TF 消息或解析 Protobuf FrameTransforms
  * @param view MCAP 消息视图
- * @param fbb FlatBufferBuilder 实例
+ * @param descriptor 消息描述
+ * @param message 目标 TF 消息
  * @return 转换成功返回 true
  */
-bool ConvertTfMessage(const mcap::MessageView& view, flatbuffers::FlatBufferBuilder& fbb)
+bool ConvertTfMessage(const mcap::MessageView& view, const MessageDescriptor& descriptor, FoxgloveFrameTransforms& message)
 {
+    if (descriptor.is_protobuf) {
+        return ParseProtobufMessage(view, message);
+    }
+
     ROS1TFMessage tf;
     if (!tf.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
-        spdlog::error("Failed to parse tf2_msgs/TFMessage at topic {}", view.channel->topic);
+        const std::string topic = view.channel ? view.channel->topic : "<unknown>";
+        spdlog::error("Failed to parse tf2_msgs/TFMessage at topic {}", topic);
         return false;
     }
 
-    fbb.Clear();
-    std::vector<flatbuffers::Offset<foxglove::FrameTransform>> transform_offsets;
-    transform_offsets.reserve(tf.transforms.size());
-
+    message.Clear();
     for (const auto& transform_stamped : tf.transforms) {
-        foxglove::Time timestamp(transform_stamped.header.stamp_sec, transform_stamped.header.stamp_nsec);
-        auto parent = fbb.CreateString(transform_stamped.header.frame_id);
-        auto child = fbb.CreateString(transform_stamped.child_frame_id);
-        auto translation = foxglove::CreateVector3(
-            fbb,
-            transform_stamped.transform.translation.x,
-            transform_stamped.transform.translation.y,
-            transform_stamped.transform.translation.z);
-        auto rotation = foxglove::CreateQuaternion(
-            fbb,
-            transform_stamped.transform.rotation.x,
-            transform_stamped.transform.rotation.y,
-            transform_stamped.transform.rotation.z,
-            transform_stamped.transform.rotation.w);
-
-        transform_offsets.emplace_back(foxglove::CreateFrameTransform(fbb, &timestamp, parent, child, translation, rotation));
+        auto* tf_out = message.add_transforms();
+        FillTimestamp(transform_stamped.header.stamp_sec, transform_stamped.header.stamp_nsec, *tf_out->mutable_timestamp());
+        tf_out->set_parent_frame_id(transform_stamped.header.frame_id);
+        tf_out->set_child_frame_id(transform_stamped.child_frame_id);
+        tf_out->mutable_translation()->set_x(transform_stamped.transform.translation.x);
+        tf_out->mutable_translation()->set_y(transform_stamped.transform.translation.y);
+        tf_out->mutable_translation()->set_z(transform_stamped.transform.translation.z);
+        tf_out->mutable_rotation()->set_x(transform_stamped.transform.rotation.x);
+        tf_out->mutable_rotation()->set_y(transform_stamped.transform.rotation.y);
+        tf_out->mutable_rotation()->set_z(transform_stamped.transform.rotation.z);
+        tf_out->mutable_rotation()->set_w(transform_stamped.transform.rotation.w);
     }
 
-    auto transforms_vector = fbb.CreateVector(transform_offsets);
-    auto frame_transforms = foxglove::CreateFrameTransforms(fbb, transforms_vector);
-    fbb.Finish(frame_transforms);
     return true;
-}
-
-/**
- * @brief 统一处理 ROS 类型消息的转换
- * @param view MCAP 消息视图
- * @param descriptor 消息描述信息
- * @param fbb FlatBufferBuilder 实例
- * @return 转换成功返回 true
- */
-bool ConvertRosMessage(const mcap::MessageView& view, const MessageDescriptor& descriptor, flatbuffers::FlatBufferBuilder& fbb)
-{
-    switch (descriptor.kind) {
-        case MessageKind::PointCloud:
-            return descriptor.is_livox ? ConvertLivoxPointCloud(view, fbb) : ConvertPointCloud(view, fbb);
-        case MessageKind::CompressedImage:
-            return ConvertImage(view, fbb);
-        case MessageKind::Imu:
-            return ConvertImu(view, fbb);
-        case MessageKind::PoseInFrame:
-            return ConvertOdometry(view, fbb);
-        case MessageKind::PosesInFrame:
-            return ConvertPath(view, fbb);
-        case MessageKind::FrameTransforms:
-            return ConvertTfMessage(view, fbb);
-        case MessageKind::Unsupported:
-        default:
-            return false;
-    }
 }
 
 /**
@@ -857,7 +975,7 @@ RecorderContext CreateRecorder(const ToolConfig& config)
 
     auto writer = std::make_unique<mcap::McapWriter>();
 
-    mcap::McapWriterOptions options("flatbuffers");
+    mcap::McapWriterOptions options("protobuf");
     if (config.record_compression == "zstd") {
         options.compression = mcap::Compression::Zstd;
     } else if (config.record_compression == "lz4") {
@@ -903,12 +1021,23 @@ PlaybackContext CreatePlaybackContext(const ToolConfig& config)
     ctx.enabled = config.playback_enabled;
     ctx.sync_time = config.playback_sync_time;
     ctx.rate = config.playback_rate <= 0.0 ? 1.0 : config.playback_rate;
-    ctx.default_queue_depth = config.playback_queue_depth;
     if (!ctx.enabled) {
         return ctx;
     }
 
-    ctx.node = std::make_shared<iox2::Node<iox2::ServiceType::Ipc>>(iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("create IPC node"));
+    const int init_code = eCAL::Initialize("slam_recorder_bag_tool");
+    if (init_code < 0) {
+        spdlog::error("Failed to initialize eCAL, playback disabled (code {})", init_code);
+        ctx.enabled = false;
+        return ctx;
+    }
+
+    ctx.ecal_initialized = true;
+    ctx.owns_ecal = (init_code == 0);
+    if (init_code != 0) {
+        spdlog::warn("eCAL already initialized, reuse existing context (code {})", init_code);
+    }
+
     spdlog::info("Playback enabled (rate {:.3f}, sync_time={})", ctx.rate, ctx.sync_time);
     return ctx;
 }
@@ -987,16 +1116,14 @@ void StopKeyboardControl(KeyboardControl& control)
  * @param topic_settings 话题配置
  * @param kind 消息类型
  * @param timestamp_ns 消息时间戳
- * @param data 消息数据
- * @param size 数据长度
+ * @param message Protobuf 消息体
  */
 void PublishPlayback(
     PlaybackContext& ctx,
     const TopicSettings& topic_settings,
     MessageKind kind,
     uint64_t timestamp_ns,
-    const std::byte* data,
-    size_t size)
+    const google::protobuf::Message& message)
 {
     if (!ctx.enabled || !topic_settings.playback) {
         return;
@@ -1008,7 +1135,7 @@ void PublishPlayback(
         return;
     }
 
-    if (!publisher->Publish(data, size)) {
+    if (!publisher->Publish(message)) {
         spdlog::warn("Failed to publish message on {}", topic_settings.publish_service);
     }
 }
@@ -1079,8 +1206,9 @@ int RunToolImpl(const ToolConfig& config)
 
     ToolRuntime runtime{config, CreateRecorder(config), CreatePlaybackContext(config)};
     MessageStats stats;
-    flatbuffers::FlatBufferBuilder fbb(1024 * 1024);
-    // 预分配 1MB 缓冲区，避免频繁扩容带来的重新分配开销
+    MessageCache message_cache;
+    std::string serialized_buffer;
+    serialized_buffer.reserve(1024 * 1024);  // 预留缓冲区降低重复分配
     KeyboardControl keyboard;
     StartKeyboardControl(keyboard);
     if (keyboard.paused.load()) {
@@ -1138,6 +1266,10 @@ int RunToolImpl(const ToolConfig& config)
             spdlog::info("Processing window reached end timestamp, stopping");
             break;
         }
+        if (g_interrupted.load(std::memory_order_relaxed)) {
+            spdlog::warn("SIGINT received, stopping gracefully...");
+            break;
+        }
 
         const MessageDescriptor descriptor = DescribeMessage(view);
         if (descriptor.kind == MessageKind::Unsupported) {
@@ -1151,30 +1283,58 @@ int RunToolImpl(const ToolConfig& config)
             continue;
         }
 
-        const std::byte* payload = nullptr;
-        size_t payload_size = 0;
+        google::protobuf::Message* message_ptr = nullptr;
+        bool conversion_ok = false;
 
-        // 按消息类型选择直接使用原始数据或先转换再回放
-        if (descriptor.is_flatbuffer) {
-            payload = view.message.data;
-            payload_size = view.message.dataSize;
-        } else if (descriptor.is_ros) {
-            if (!ConvertRosMessage(view, descriptor, fbb)) {
-                ++stats.skipped;
-                continue;
-            }
-            payload = reinterpret_cast<const std::byte*>(fbb.GetBufferPointer());
-            payload_size = fbb.GetSize();
-        } else {
+        switch (descriptor.kind) {
+            case MessageKind::PointCloud:
+                conversion_ok = ConvertPointCloud(view, descriptor, message_cache.pointcloud);
+                message_ptr = &message_cache.pointcloud;
+                break;
+            case MessageKind::CompressedImage:
+                conversion_ok = ConvertImage(view, descriptor, message_cache.compressed_image);
+                message_ptr = &message_cache.compressed_image;
+                break;
+            case MessageKind::Imu:
+                conversion_ok = ConvertImu(view, descriptor, message_cache.imu);
+                message_ptr = &message_cache.imu;
+                break;
+            case MessageKind::PoseInFrame:
+                conversion_ok = ConvertOdometry(view, descriptor, message_cache.pose_in_frame);
+                message_ptr = &message_cache.pose_in_frame;
+                break;
+            case MessageKind::PosesInFrame:
+                conversion_ok = ConvertPath(view, descriptor, message_cache.poses_in_frame);
+                message_ptr = &message_cache.poses_in_frame;
+                break;
+            case MessageKind::FrameTransforms:
+                conversion_ok = ConvertTfMessage(view, descriptor, message_cache.frame_transforms);
+                message_ptr = &message_cache.frame_transforms;
+                break;
+            case MessageKind::Unsupported:
+            default:
+                conversion_ok = false;
+                break;
+        }
+
+        if (!conversion_ok || message_ptr == nullptr) {
             ++stats.skipped;
             continue;
         }
 
         if (topic_settings.record) {
-            WriteRecord(runtime.recorder, topic, descriptor.kind, timestamp_ns, payload, payload_size);
+            if (descriptor.is_protobuf) {
+                serialized_buffer.assign(reinterpret_cast<const char*>(view.message.data), view.message.dataSize);
+            } else {
+                if (!SerializeMessage(*message_ptr, serialized_buffer)) {
+                    ++stats.skipped;
+                    continue;
+                }
+            }
+            WriteRecord(runtime.recorder, topic, descriptor.kind, timestamp_ns, serialized_buffer);
         }
 
-        PublishPlayback(runtime.playback, topic_settings, descriptor.kind, timestamp_ns, payload, payload_size);
+        PublishPlayback(runtime.playback, topic_settings, descriptor.kind, timestamp_ns, *message_ptr);
 
         switch (descriptor.kind) {
             case MessageKind::PointCloud:
@@ -1214,6 +1374,9 @@ int RunToolImpl(const ToolConfig& config)
     reader.close();
     FinalizeRecorder(runtime.recorder);
     StopKeyboardControl(keyboard);
+    if (runtime.playback.ecal_initialized && runtime.playback.owns_ecal) {
+        eCAL::Finalize();
+    }
 
     spdlog::info("PointCloud messages: {}", stats.pointcloud);
     spdlog::info("CompressedImage messages: {}", stats.compressed_image);
@@ -1260,7 +1423,6 @@ ToolConfig LoadBagToolConfig(const std::string& yaml_path)
         config.playback_enabled = playback_node["enable"].as<bool>(false);
         config.playback_rate = playback_node["rate"].as<double>(1.0);
         config.playback_sync_time = playback_node["synchronize_time"].as<bool>(true);
-        config.playback_queue_depth = playback_node["default_queue_depth"].as<uint32_t>(10);
     }
 
     const auto window_node = bag_node["time_window"];
@@ -1297,7 +1459,6 @@ ToolConfig LoadBagToolConfig(const std::string& yaml_path)
                 }
                 settings.playback = entry["playback_enabled"].as<bool>(true);
                 settings.record = entry["record_enabled"].as<bool>(true);
-                settings.queue_depth = entry["queue_depth"].as<uint32_t>(config.playback_queue_depth);
                 config.topics.emplace(name, settings);
             }
         }
@@ -1327,6 +1488,11 @@ int RunTool(const ToolConfig& config)
 int main(int argc, char** argv)
 {
     try {
+        std::signal(SIGINT, [](int) {
+            ms_slam::slam_recorder::g_interrupted.store(true, std::memory_order_relaxed);
+            spdlog::warn("SIGINT captured, finishing current writes then exit");
+        });
+
         const std::string config_path = (argc > 1) ? argv[1] : "../config/config.yaml";
         auto logger = spdlog::get("bag_tool");
         if (!logger) {

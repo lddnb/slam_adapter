@@ -44,7 +44,7 @@ Odometry::Odometry()
     spdlog::info("!!! Using HashMap !!!");
 #elif defined(USE_OCTREE)
     local_map_ = std::make_unique<thuni::Octree>();
-    local_map_->set_min_extent(localmap_params_.voxel_size);
+    local_map_->set_min_extent(localmap_params_.voxel_size / 2);
     local_map_->set_bucket_size(static_cast<size_t>(std::max(localmap_params_.max_points_per_voxel, 1)));
     local_map_->set_down_size(true);
     spdlog::info("!!! Using Octree map !!!");
@@ -327,6 +327,9 @@ void Odometry::Initialize(const SyncData& sync_data)
 void Odometry::ProcessImuData(const SyncData& sync_data)
 {
     EASY_FUNCTION(profiler::colors::Pink300);
+    if (sync_data.imu_data.size() < 10) {
+        spdlog::error("!!!!! lost IMU data, size {} !!!!!", sync_data.imu_data.size());
+    }
     IMU last_imu(Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), 0.0);
     Eigen::Vector3d gyro = Eigen::Vector3d::Zero();
     Eigen::Vector3d acc = Eigen::Vector3d::Zero();

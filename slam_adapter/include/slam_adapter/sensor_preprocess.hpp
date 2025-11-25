@@ -3,7 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
+#include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <Eigen/Core>
@@ -29,9 +31,9 @@ inline bool ConvertHesaiPointCloudMessage(
         return false;
     }
 
-    const auto data_buffer = message.data();
+    const std::string& data_buffer = message.data();
     const std::uint32_t stride = message.point_stride();
-    if (!data_buffer || stride == 0) {
+    if (data_buffer.empty() || stride == 0) {
         cloud->clear();
         return false;
     }
@@ -47,18 +49,19 @@ inline bool ConvertHesaiPointCloudMessage(
         return false;
     }
 
-    const std::size_t data_size = data_buffer->size();
-    if (data_size % message.point_stride() != 0) {
+    const std::size_t data_size = data_buffer.size();
+    if (data_size % stride != 0) {
         cloud->clear();
         return false;
     }
 
-    const std::size_t num_points = data_size / message.point_stride();
+    const std::size_t num_points = data_size / stride;
     cloud->clear();
     cloud->reserve(num_points);
 
+    const auto* buffer_ptr = reinterpret_cast<const std::uint8_t*>(data_buffer.data());
     for (std::size_t i = 0; i < num_points; ++i) {
-        const auto* data = data_buffer->Data() + i * stride;
+        const auto* data = buffer_ptr + i * stride;
 
         const float x = *reinterpret_cast<const float*>(data + x_offset);
         const float y = *reinterpret_cast<const float*>(data + y_offset);
@@ -77,14 +80,14 @@ inline bool ConvertLivoxPointCloudMessage(
     const std::shared_ptr<slam_core::PointCloud<slam_core::PointXYZITDescriptor>>& cloud,
     const double blind_dist = 0.5)
 {
+    static double last_tail_timestamp = -std::numeric_limits<double>::infinity();  ///< 上一帧最后一个点时间
     if (!cloud) {
         return false;
     }
 
-    const auto data_buffer = message.data();
+    const std::string& data_buffer = message.data();
     const std::uint32_t stride = message.point_stride();
-    const auto* stamp = message.timestamp();
-    if (!data_buffer || stride == 0 || !stamp) {
+    if (data_buffer.empty() || stride == 0 || !message.has_timestamp()) {
         cloud->clear();
         return false;
     }
@@ -102,19 +105,23 @@ inline bool ConvertLivoxPointCloudMessage(
         return false;
     }
 
-    const std::size_t data_size = data_buffer->size();
-    if (data_size % message.point_stride() != 0) {
+    const std::size_t data_size = data_buffer.size();
+    if (data_size % stride != 0) {
         cloud->clear();
         return false;
     }
 
-    const std::size_t num_points = data_size / message.point_stride();
+    const std::size_t num_points = data_size / stride;
     cloud->clear();
     cloud->reserve(num_points);
 
-    const double timestamp = stamp->sec() + stamp->nsec() * 1e-9;
+    const auto& stamp = message.timestamp();
+    const double timestamp = static_cast<double>(stamp.seconds()) + static_cast<double>(stamp.nanos()) * 1e-9;
+    const double prev_tail = last_tail_timestamp;
+    double current_tail = -std::numeric_limits<double>::infinity();
+    const auto* buffer_ptr = reinterpret_cast<const std::uint8_t*>(data_buffer.data());
     for (std::size_t i = 0; i < num_points; ++i) {
-        const auto* data = data_buffer->Data() + i * stride;
+        const auto* data = buffer_ptr + i * stride;
 
         const float x = *reinterpret_cast<const float*>(data + x_offset);
         const float y = *reinterpret_cast<const float*>(data + y_offset);
@@ -123,15 +130,20 @@ inline bool ConvertLivoxPointCloudMessage(
         const uint8_t tag = *reinterpret_cast<const uint8_t*>(data + tag_offset);
         const uint8_t line = *reinterpret_cast<const uint8_t*>(data + line_offset);
         const double offset_time = static_cast<double>(*reinterpret_cast<const uint32_t*>(data + timestamp_offset)) / 1e9;
+        const double point_ts = timestamp + offset_time;
 
         if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) || !std::isfinite(intensity) ||
-            (x * x + y * y + z * z < blind_dist * blind_dist)) {
+            (x * x + y * y + z * z < blind_dist * blind_dist) || (point_ts < prev_tail)) {
             continue;
         }
 
-        cloud->push_back(slam_core::PointXYZIT(x, y, z, intensity, timestamp + offset_time));
+        current_tail = std::max(current_tail, point_ts);
+        cloud->push_back(slam_core::PointXYZIT(x, y, z, intensity, point_ts));
     }
     cloud->sort();
+    if (!cloud->empty()) {
+        last_tail_timestamp = current_tail;
+    }
 
     return true;
 }
@@ -151,22 +163,22 @@ static_assert(sizeof(LivoxPointRaw) == 20, "Unexpected Livox point size");
 
 inline bool ConvertLivoxPointCloudMessagePCL(const foxglove::PointCloud& msg, PointCloudT& cloud)
 {
-    const auto* data = msg.data();
+    const std::string& data = msg.data();
     const uint32_t stride = msg.point_stride();
-    if (!data || stride == 0) {
+    if (data.empty() || stride == 0 || !msg.has_timestamp()) {
         return false;
     }
 
-    const std::size_t point_count = data->size() / stride;
+    const std::size_t point_count = data.size() / stride;
     cloud.clear();
     cloud.reserve(point_count);
-    cloud.header.frame_id = msg.frame_id() ? msg.frame_id()->str() : "";
+    cloud.header.frame_id = msg.frame_id();
     cloud.width = static_cast<uint32_t>(point_count);
     cloud.height = 1;
     cloud.is_dense = false;
 
-    const std::uint8_t* raw_ptr = data->Data();
-    const double timestamp = msg.timestamp()->sec() + msg.timestamp()->nsec() * 1e-9;
+    const auto* raw_ptr = reinterpret_cast<const std::uint8_t*>(data.data());
+    const double timestamp = static_cast<double>(msg.timestamp().seconds()) + static_cast<double>(msg.timestamp().nanos()) * 1e-9;
     for (std::size_t i = 0; i < point_count; ++i) {
         LivoxPointRaw point{};
         std::memcpy(&point, raw_ptr + i * stride, sizeof(LivoxPointRaw));
@@ -204,16 +216,15 @@ inline bool ConvertLivoxPointCloudMessagePCL(const foxglove::PointCloud& msg, Po
 
 inline bool DecodeCompressedImageMessage(const foxglove::CompressedImage& message, slam_core::Image& image_out)
 {
-    const auto* raw = message.data();
-    const auto* stamp = message.timestamp();
-    if (!raw || !stamp) {
+    const std::string& raw = message.data();
+    if (raw.empty() || !message.has_timestamp()) {
         image_out = slam_core::Image();
         return false;
     }
 
-    const double timestamp = stamp->sec() + stamp->nsec() * 1e-9;
+    const double timestamp = static_cast<double>(message.timestamp().seconds()) + static_cast<double>(message.timestamp().nanos()) * 1e-9;
 
-    std::vector<std::uint8_t> buffer(raw->begin(), raw->end());
+    std::vector<std::uint8_t> buffer(raw.begin(), raw.end());
     const auto decoded_mat = cv::imdecode(buffer, cv::IMREAD_COLOR);
     if (decoded_mat.empty()) {
         image_out = slam_core::Image();
@@ -226,22 +237,21 @@ inline bool DecodeCompressedImageMessage(const foxglove::CompressedImage& messag
 
 inline bool ConvertImuMessage(const foxglove::Imu& message, slam_core::IMU& imu_out, const bool g_unit = true)
 {
-    const auto* angular_velocity = message.angular_velocity();
-    const auto* linear_acceleration = message.linear_acceleration();
-    const auto* stamp = message.timestamp();
-    if (!angular_velocity || !linear_acceleration || !stamp) {
+    if (!message.has_angular_velocity() || !message.has_linear_acceleration() || !message.has_timestamp()) {
         imu_out = slam_core::IMU();
         return false;
     }
 
-    const double timestamp = stamp->sec() + stamp->nsec() * 1e-9;
+    const double timestamp = static_cast<double>(message.timestamp().seconds()) + static_cast<double>(message.timestamp().nanos()) * 1e-9;
 
-    Eigen::Vector3d angular_velocity_vec(angular_velocity->x(), angular_velocity->y(), angular_velocity->z());
+    Eigen::Vector3d angular_velocity_vec(message.angular_velocity().x(), message.angular_velocity().y(), message.angular_velocity().z());
     Eigen::Vector3d linear_acceleration_vec(0.0, 0.0, 0.0);
     if (g_unit) {
-        linear_acceleration_vec = Eigen::Vector3d(linear_acceleration->x(), linear_acceleration->y(), linear_acceleration->z());
+        linear_acceleration_vec =
+            Eigen::Vector3d(message.linear_acceleration().x(), message.linear_acceleration().y(), message.linear_acceleration().z());
     } else {
-        linear_acceleration_vec = Eigen::Vector3d(linear_acceleration->x(), linear_acceleration->y(), linear_acceleration->z());
+        linear_acceleration_vec =
+            Eigen::Vector3d(message.linear_acceleration().x(), message.linear_acceleration().y(), message.linear_acceleration().z());
     }
 
     imu_out = slam_core::IMU(angular_velocity_vec, linear_acceleration_vec, timestamp);

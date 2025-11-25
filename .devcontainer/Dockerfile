@@ -97,7 +97,13 @@ RUN apt-get update && \
     python3-pip \
     libspdlog-dev \
     libopencv-dev \
-    libyaml-cpp-dev
+    libyaml-cpp-dev \
+    libprotobuf-dev \
+    protobuf-compiler
+
+RUN add-apt-repository ppa:ecal/ecal-latest && \
+    apt-get update && \
+    apt-get install ecal
 
 # 清除apt缓存
 RUN apt autoremove -y \

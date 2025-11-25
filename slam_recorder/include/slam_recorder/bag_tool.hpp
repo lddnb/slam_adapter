@@ -13,7 +13,7 @@ namespace ms_slam::slam_recorder
  */
 enum class InputType {
     Ros1Mcap,
-    FlatbufferMcap,
+    ProtobufMcap,
     Rosbag,
 };
 
@@ -24,7 +24,6 @@ struct TopicSettings {
     bool playback{true};          ///< 是否启用回放
     bool record{true};            ///< 是否启用录制
     std::string publish_service;  ///< 回放时映射的服务名称
-    uint32_t queue_depth{10};     ///< 回放消息队列深度
 };
 
 /**
@@ -40,7 +39,6 @@ struct ToolConfig {
     bool playback_enabled{false};                           ///< 是否启用回放功能
     bool playback_sync_time{true};                          ///< 回放是否同步时间
     double playback_rate{1.0};                              ///< 回放倍率
-    uint32_t playback_queue_depth{10};                      ///< 默认回放队列深度
     bool record_enabled{false};                             ///< 是否启用录制功能
     std::string record_output_dir{"./output"};              ///< 录制输出目录
     std::string record_prefix{"recording"};                 ///< 录制文件名前缀

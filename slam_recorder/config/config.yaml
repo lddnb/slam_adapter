@@ -59,7 +59,6 @@ BagTool:
     enable: true
     rate: 1.0
     synchronize_time: true
-    default_queue_depth: 10
 
   time_window:
     start_seconds: 0.0
@@ -82,34 +81,28 @@ BagTool:
         playback_enabled: true
         record_enabled: true
         publish_service: /livox/lidar
-        queue_depth: 10
       - name: /camera/image_raw/compressed
         schema: sensor_msgs/CompressedImage
         playback_enabled: true
         record_enabled: true
         publish_service: /camera/image_raw
-        queue_depth: 10
       - name: /livox/imu
         schema: sensor_msgs/Imu
         playback_enabled: true
         record_enabled: true
         publish_service: /livox/imu
-        queue_depth: 300
       - name: /path
         schema: nav_msgs/Path
         playback_enabled: true
         record_enabled: true
         publish_service: /path
-        queue_depth: 10
       - name: /Odometry
         schema: nav_msgs/Odometry
         playback_enabled: true
         record_enabled: true
         publish_service: /odom
-        queue_depth: 10
       - name: /tf
         schema: tf2_msgs/TFMessage
         playback_enabled: true
         record_enabled: true
         publish_service: /tf
-        queue_depth: 10

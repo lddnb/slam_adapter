@@ -8,25 +8,24 @@
 #include <atomic>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
+#include <ecal/ecal.h>
+#include <ecal/msg/protobuf/subscriber.h>
+#include <google/protobuf/descriptor.h>
+#include <google/protobuf/descriptor.pb.h>
+#include <google/protobuf/message.h>
+#include <google/protobuf/timestamp.pb.h>
 #include <foxglove/channel.hpp>
 #include <foxglove/foxglove.hpp>
 #include <foxglove/server.hpp>
-#include <iox2/iceoryx2.hpp>
 #include <mcap/writer.hpp>
 #include <spdlog/spdlog.h>
-#include <slam_common/flatbuffers_pub_sub.hpp>
 #include <slam_common/foxglove_messages.hpp>
-#include <fbs/CompressedImage_generated.h>
-#include <fbs/Imu_generated.h>
-#include <fbs/PointCloud_generated.h>
-#include <fbs/PoseInFrame_generated.h>
-#include <fbs/PosesInFrame_generated.h>
-#include <fbs/FrameTransforms_generated.h>
-#include <fbs/SceneUpdate_generated.h>
 
 namespace ms_slam::slam_recorder
 {
@@ -53,7 +52,7 @@ class FoxgloveWebSocketBridge
      */
     struct TopicConfig {
         std::string name;     ///< Topic 名称
-        std::string schema;   ///< FlatBuffers Schema 名称
+        std::string schema;   ///< Protobuf Schema 名称
         bool enabled = true;  ///< 是否启用
     };
 
@@ -219,11 +218,10 @@ class FoxgloveWebSocketBridge
      * @brief 将数据写入 MCAP 文件
      * @param topic_name Topic 名称
      * @param schema Schema 名称
-     * @param data 数据指针
-     * @param size 数据长度
+     * @param data 数据缓冲
      * @param timestamp_ns 时间戳（纳秒）
      */
-    void RecordToMcap(const std::string& topic_name, const std::string& schema, const uint8_t* data, size_t size, uint64_t timestamp_ns);
+    void RecordToMcap(const std::string& topic_name, const std::string& schema, const std::string& data, uint64_t timestamp_ns);
 
     /**
      * @brief 获取当前时间戳（纳秒）
@@ -232,13 +230,12 @@ class FoxgloveWebSocketBridge
     static uint64_t GetCurrentTimestampNs();
 
     /**
-     * @brief 从 flatbuffer 消息中提取时间戳
+     * @brief 从 Protobuf 消息中提取时间戳
      * @param schema Schema 名称
-     * @param data 消息数据指针
-     * @param size 消息长度
+     * @param message 消息体
      * @return 纳秒时间戳（若失败返回 0）
      */
-    uint64_t ExtractTimestampNs(const std::string& schema, const uint8_t* data, size_t size) const;
+    uint64_t ExtractTimestampNs(const std::string& schema, const google::protobuf::Message& message) const;
 
     /**
      * @brief 将消息时间对齐到系统时间轴
@@ -254,6 +251,45 @@ class FoxgloveWebSocketBridge
      */
     uint64_t EnsureGlobalMonotonic(uint64_t timestamp_ns);
 
+    /**
+     * @brief 为 Topic 创建 WebSocket schema
+     * @param schema_name Schema 名称
+     * @return 构造好的 Schema
+     */
+    foxglove::Schema BuildWsSchema(const std::string& schema_name);
+
+    /**
+     * @brief 基于 Protobuf 描述符构建 MCAP / WebSocket 描述符数据
+     * @param descriptor 描述符指针
+     * @return 序列化后的描述符集
+     */
+    static std::string BuildDescriptorSet(const google::protobuf::Descriptor* descriptor);
+
+    /**
+     * @brief 将 google::protobuf::Timestamp 转为纳秒
+     * @param stamp 时间戳
+     * @return 纳秒
+     */
+    static uint64_t ToNanoseconds(const google::protobuf::Timestamp& stamp);
+
+    /**
+     * @brief 序列化 Protobuf 消息
+     * @param message 输入消息
+     * @param buffer 输出缓冲
+     * @return 成功返回 true
+     */
+    static bool SerializeMessage(const google::protobuf::Message& message, std::string& buffer);
+
+    /**
+     * @brief 注册 eCAL 订阅与回调
+     * @tparam MessageType 消息类型
+     * @param topic_name 话题名称
+     * @param schema_name Schema 名称
+     * @return 创建好的订阅者
+     */
+    template <typename MessageType>
+    std::shared_ptr<eCAL::protobuf::CSubscriber<MessageType>> RegisterSubscriber(const std::string& topic_name, const std::string& schema_name);
+
     // 配置
     Config config_;
 
@@ -264,22 +300,35 @@ class FoxgloveWebSocketBridge
     std::unique_ptr<foxglove::WebSocketServer> server_;
     std::map<std::string, std::unique_ptr<foxglove::RawChannel>> channels_;
 
-    // iceoryx2 node 和订阅者（topic_name -> subscriber）
-    // 使用 void* 存储不同类型的 subscriber，实际类型由 schema 决定
-    std::shared_ptr<iox2::Node<iox2::ServiceType::Ipc>> node_;
-    std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxglovePointCloud>>> pc_subs_;
-    std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxgloveCompressedImage>>> img_subs_;
-    std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxgloveImu>>> imu_subs_;
-    std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxglovePoseInFrame>>> pose_subs_;
-    std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxglovePosesInFrame>>> poses_subs_;
-    std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxgloveFrameTransforms>>> frame_tf_subs_;
-    std::map<std::string, std::unique_ptr<slam_common::FBSSubscriber<slam_common::FoxgloveSceneUpdate>>> frame_marker_subs_;
+    // eCAL 状态
+    bool ecal_initialized_{false};
+    bool owns_ecal_{false};
+
+    // Protobuf 订阅者（topic_name -> subscriber）
+    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxglovePointCloud>>> pc_subs_;
+    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveCompressedImage>>> img_subs_;
+    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveImu>>> imu_subs_;
+    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxglovePoseInFrame>>> pose_subs_;
+    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxglovePosesInFrame>>> poses_subs_;
+    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveFrameTransforms>>> frame_tf_subs_;
+    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveSceneUpdate>>> frame_marker_subs_;
+
+    struct PendingPacket {
+        std::string data;
+        uint64_t timestamp_ns{0};
+    };
+
+    // 待转发缓存与互斥
+    std::unordered_map<std::string, std::vector<PendingPacket>> pending_packets_;
+    std::mutex pending_mutex_;
 
     // MCAP 录制器
     std::unique_ptr<mcap::McapWriter> mcap_writer_;
     std::map<std::string, uint16_t> topic_to_channel_id_;  ///< Topic 名称到 MCAP channel ID
     uint16_t next_channel_id_ = 1;
     std::string current_output_file_;
+    std::unordered_map<std::string, std::string> schema_descriptor_cache_;
+    std::unordered_map<std::string, mcap::SchemaId> mcap_schema_cache_;
 
     std::atomic<uint64_t> last_message_time_ns_{0};
     std::atomic<uint64_t> time_offset_ns_{0};

@@ -1,24 +1,53 @@
-/**
- * @file foxglove_websocket_bridge.cpp
- * @brief Foxglove WebSocket 桥接器实现
- */
-
 #include "slam_recorder/foxglove_websocket_bridge.hpp"
 
 #include <chrono>
 #include <filesystem>
 #include <iomanip>
+#include <queue>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
-#include <flatbuffers/flatbuffers.h>
-#include <mcap/writer.hpp>
+#include <spdlog/spdlog.h>
 
 namespace ms_slam::slam_recorder
 {
+namespace
+{
+/**
+ * @brief 根据 schema 名称获取对应的 Protobuf 描述符
+ * @param schema_name Schema 名称
+ * @return 描述符指针，未知返回 nullptr
+ */
+const google::protobuf::Descriptor* ResolveDescriptor(const std::string& schema_name)
+{
+    if (schema_name == "foxglove.PointCloud") {
+        return slam_common::FoxglovePointCloud::descriptor();
+    }
+    if (schema_name == "foxglove.CompressedImage") {
+        return slam_common::FoxgloveCompressedImage::descriptor();
+    }
+    if (schema_name == "foxglove.Imu") {
+        return slam_common::FoxgloveImu::descriptor();
+    }
+    if (schema_name == "foxglove.PoseInFrame") {
+        return slam_common::FoxglovePoseInFrame::descriptor();
+    }
+    if (schema_name == "foxglove.PosesInFrame") {
+        return slam_common::FoxglovePosesInFrame::descriptor();
+    }
+    if (schema_name == "foxglove.FrameTransforms") {
+        return slam_common::FoxgloveFrameTransforms::descriptor();
+    }
+    if (schema_name == "foxglove.SceneUpdate") {
+        return slam_common::FoxgloveSceneUpdate::descriptor();
+    }
+    return nullptr;
+}
+}  // namespace
 
 /**
- * @brief 构造函数，完成 iceoryx2 节点与 WebSocket 服务初始化
+ * @brief 构造函数，完成 eCAL 初始化与 WebSocket 准备
  */
 FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config) : config_(config), context_(foxglove::Context::create())
 {
@@ -26,16 +55,16 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config) : config_
     spdlog::info("  WebSocket enabled: {}", config_.websocket.enable);
     spdlog::info("  Recorder enabled: {}", config_.recorder.enable);
 
-    // 创建 iceoryx2 node
-    try {
-        node_ = std::make_shared<iox2::Node<iox2::ServiceType::Ipc>>(
-            iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("Failed to create iceoryx2 node"));
-        spdlog::info("✓ iceoryx2 node created");
-    } catch (const std::exception& e) {
-        throw std::runtime_error(std::string("Failed to create iceoryx2 node: ") + e.what());
+    const int init_code = eCAL::Initialize("foxglove_websocket_bridge");
+    if (init_code < 0) {
+        throw std::runtime_error("Failed to initialize eCAL");
+    }
+    ecal_initialized_ = true;
+    owns_ecal_ = (init_code == 0);
+    if (!owns_ecal_) {
+        spdlog::warn("eCAL already initialized, reuse existing context");
     }
 
-    // 创建 WebSocket 服务器（如果启用）
     if (config_.websocket.enable) {
         foxglove::WebSocketServerOptions options;
         options.context = context_;
@@ -43,7 +72,7 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config) : config_
         options.host = config_.websocket.host;
         options.port = config_.websocket.port;
         options.capabilities = foxglove::WebSocketServerCapabilities::Time;
-        options.supported_encodings = {"flatbuffer"};
+        options.supported_encodings = {"protobuf"};
 
         options.callbacks.onSubscribe = [](uint64_t channel_id, const foxglove::ClientMetadata& client) {
             spdlog::info("Client {} subscribed to channel {}", client.id, channel_id);
@@ -62,78 +91,42 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config) : config_
         spdlog::info("WebSocket server disabled");
     }
 
-    // 根据配置初始化 Topics
     spdlog::info("Configuring topics...");
     for (const auto& topic : config_.topics) {
         if (!topic.enabled) {
             continue;
         }
 
-        spdlog::info("  - Enabling topic: {} ({})", topic.name, topic.schema);
-
-        // 初始化统计计数器
         forwarded_count_[topic.name] = 0;
         recorded_count_[topic.name] = 0;
         error_count_[topic.name] = 0;
+        pending_packets_[topic.name] = {};
 
-        foxglove::Schema schema;
-        schema.encoding = "flatbuffer";
-
-        // 根据 schema 类型创建 channel 和 subscriber
-        if (topic.schema == "foxglove.PointCloud") {
-            schema.name = "foxglove.PointCloud";
-            schema.data = reinterpret_cast<const std::byte*>(foxglove::PointCloudBinarySchema::data());
-            schema.data_len = foxglove::PointCloudBinarySchema::size();
-            pc_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxglovePointCloud>>(node_, topic.name);
-
-        } else if (topic.schema == "foxglove.CompressedImage") {
-            schema.name = "foxglove.CompressedImage";
-            schema.data = reinterpret_cast<const std::byte*>(foxglove::CompressedImageBinarySchema::data());
-            schema.data_len = foxglove::CompressedImageBinarySchema::size();
-            img_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxgloveCompressedImage>>(node_, topic.name);
-
-        } else if (topic.schema == "foxglove.Imu") {
-            schema.name = "foxglove.Imu";
-            schema.data = reinterpret_cast<const std::byte*>(foxglove::ImuBinarySchema::data());
-            schema.data_len = foxglove::ImuBinarySchema::size();
-            imu_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxgloveImu>>(
-                node_,
-                topic.name,
-                nullptr,
-                slam_common::PubSubConfig{.subscriber_max_buffer_size = 300});
-        } else if (topic.schema == "foxglove.PoseInFrame") {
-            schema.name = "foxglove.PoseInFrame";
-            schema.data = reinterpret_cast<const std::byte*>(foxglove::PoseInFrameBinarySchema::data());
-            schema.data_len = foxglove::PoseInFrameBinarySchema::size();
-            pose_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxglovePoseInFrame>>(node_, topic.name);
-        } else if (topic.schema == "foxglove.PosesInFrame") {
-            schema.name = "foxglove.PosesInFrame";
-            schema.data = reinterpret_cast<const std::byte*>(foxglove::PosesInFrameBinarySchema::data());
-            schema.data_len = foxglove::PosesInFrameBinarySchema::size();
-            poses_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxglovePosesInFrame>>(node_, topic.name);
-        } else if (topic.schema == "foxglove.FrameTransforms") {
-            schema.name = "foxglove.FrameTransforms";
-            schema.data = reinterpret_cast<const std::byte*>(foxglove::FrameTransformsBinarySchema::data());
-            schema.data_len = foxglove::FrameTransformsBinarySchema::size();
-            frame_tf_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxgloveFrameTransforms>>(node_, topic.name);
-        } else if (topic.schema == "foxglove.SceneUpdate") {
-            schema.name = "foxglove.SceneUpdate";
-            schema.data = reinterpret_cast<const std::byte*>(foxglove::SceneUpdateBinarySchema::data());
-            schema.data_len = foxglove::SceneUpdateBinarySchema::size();
-            frame_marker_subs_[topic.name] = std::make_unique<slam_common::FBSSubscriber<slam_common::FoxgloveSceneUpdate>>(node_, topic.name);
-        } else {
-            spdlog::warn("  - Unsupported schema type '{}' for topic '{}'", topic.schema, topic.name);
-            continue;
-        }
-
-        // 如果 WebSocket 启用，则创建 channel
         if (config_.websocket.enable) {
-            auto channel_result = foxglove::RawChannel::create(topic.name, "flatbuffer", std::move(schema), context_);
+            const auto schema = BuildWsSchema(topic.schema);
+            auto channel_result = foxglove::RawChannel::create(topic.name, "protobuf", schema, context_);
             if (!channel_result.has_value()) {
                 throw std::runtime_error("Failed to create channel for topic " + topic.name + ": " + foxglove::strerror(channel_result.error()));
             }
             channels_[topic.name] = std::make_unique<foxglove::RawChannel>(std::move(channel_result.value()));
-            spdlog::info("    ✓ WebSocket channel created");
+        }
+
+        if (topic.schema == "foxglove.PointCloud") {
+            pc_subs_[topic.name] = RegisterSubscriber<slam_common::FoxglovePointCloud>(topic.name, topic.schema);
+        } else if (topic.schema == "foxglove.CompressedImage") {
+            img_subs_[topic.name] = RegisterSubscriber<slam_common::FoxgloveCompressedImage>(topic.name, topic.schema);
+        } else if (topic.schema == "foxglove.Imu") {
+            imu_subs_[topic.name] = RegisterSubscriber<slam_common::FoxgloveImu>(topic.name, topic.schema);
+        } else if (topic.schema == "foxglove.PoseInFrame") {
+            pose_subs_[topic.name] = RegisterSubscriber<slam_common::FoxglovePoseInFrame>(topic.name, topic.schema);
+        } else if (topic.schema == "foxglove.PosesInFrame") {
+            poses_subs_[topic.name] = RegisterSubscriber<slam_common::FoxglovePosesInFrame>(topic.name, topic.schema);
+        } else if (topic.schema == "foxglove.FrameTransforms") {
+            frame_tf_subs_[topic.name] = RegisterSubscriber<slam_common::FoxgloveFrameTransforms>(topic.name, topic.schema);
+        } else if (topic.schema == "foxglove.SceneUpdate") {
+            frame_marker_subs_[topic.name] = RegisterSubscriber<slam_common::FoxgloveSceneUpdate>(topic.name, topic.schema);
+        } else {
+            spdlog::warn("Unsupported schema '{}' for topic '{}', skip", topic.schema, topic.name);
         }
     }
 
@@ -147,6 +140,9 @@ FoxgloveWebSocketBridge::~FoxgloveWebSocketBridge()
 {
     spdlog::info("Destroying FoxgloveWebSocketBridge...");
     Stop();
+    if (ecal_initialized_ && owns_ecal_) {
+        eCAL::Finalize();
+    }
     spdlog::info("✓ FoxgloveWebSocketBridge destroyed");
 }
 
@@ -160,24 +156,15 @@ void FoxgloveWebSocketBridge::Start()
         return;
     }
 
-    spdlog::info("Starting FoxgloveWebSocketBridge...");
     running_.store(true);
 
-    // 如果启用录制且设置为自动开始，则初始化 MCAP writer
     if (config_.recorder.enable && config_.recorder.auto_start) {
         StartRecording();
     }
 
-    // 在独立线程中运行主循环
     worker_thread_ = std::make_unique<std::thread>(&FoxgloveWebSocketBridge::Run, this);
 
-    spdlog::info("✓ FoxgloveWebSocketBridge started");
-    if (config_.websocket.enable) {
-        spdlog::info("  WebSocket: ws://{}:{}", config_.websocket.host, config_.websocket.port);
-    }
-    if (config_.recorder.enable) {
-        spdlog::info("  Recorder: {}", recording_.load() ? "RECORDING" : "Standby");
-    }
+    spdlog::info("FoxgloveWebSocketBridge started");
 }
 
 /**
@@ -189,20 +176,15 @@ void FoxgloveWebSocketBridge::Stop()
         return;
     }
 
-    spdlog::info("Stopping FoxgloveWebSocketBridge...");
     running_.store(false);
-
-    // 等待工作线程退出
     if (worker_thread_ && worker_thread_->joinable()) {
         worker_thread_->join();
     }
 
-    // 停止录制
     if (recording_.load()) {
         StopRecording();
     }
 
-    // 停止 WebSocket 服务器
     if (server_) {
         auto result = server_->stop();
         if (result != foxglove::FoxgloveError::Ok) {
@@ -210,19 +192,10 @@ void FoxgloveWebSocketBridge::Stop()
         }
     }
 
-    spdlog::info("✓ FoxgloveWebSocketBridge stopped");
-
-    // 输出统计信息
     auto stats = GetStatistics();
     spdlog::info("Final Statistics:");
     for (const auto& [topic_name, topic_stats] : stats.topics) {
-        spdlog::info("  - Topic [{}]:", topic_name);
-        if (config_.websocket.enable) {
-            spdlog::info("    Forwarded: {}, Errors: {}", topic_stats.forwarded, topic_stats.errors);
-        }
-        if (config_.recorder.enable) {
-            spdlog::info("    Recorded: {}", topic_stats.recorded);
-        }
+        spdlog::info("  - {} | forwarded:{} recorded:{} errors:{}", topic_name, topic_stats.forwarded, topic_stats.recorded, topic_stats.errors);
     }
 }
 
@@ -232,19 +205,18 @@ void FoxgloveWebSocketBridge::Stop()
 void FoxgloveWebSocketBridge::StartRecording()
 {
     if (!config_.recorder.enable) {
-        spdlog::warn("Recorder is disabled in config");
+        spdlog::warn("Recorder disabled in config");
         return;
     }
-
     if (recording_.load()) {
-        spdlog::warn("Already recording");
+        spdlog::warn("Recorder already running");
         return;
     }
 
     try {
         InitMcapWriter();
         recording_.store(true);
-        spdlog::info("✓ Recording started: {}", current_output_file_);
+        spdlog::info("Recording started: {}", current_output_file_);
     } catch (const std::exception& e) {
         spdlog::error("Failed to start recording: {}", e.what());
     }
@@ -258,36 +230,29 @@ void FoxgloveWebSocketBridge::StopRecording()
     if (!recording_.load()) {
         return;
     }
-
-    spdlog::info("Stopping recording...");
     recording_.store(false);
-
     CloseMcapWriter();
-
-    spdlog::info("✓ Recording stopped: {}", current_output_file_);
+    spdlog::info("Recording stopped: {}", current_output_file_);
 }
 
 /**
- * @brief 主循环，负责轮询并处理数据
+ * @brief 主循环，处理缓存并推送
  */
 void FoxgloveWebSocketBridge::Run()
 {
-    spdlog::info("Main loop started (poll interval: {} ms)", config_.websocket.poll_interval_ms);
-
     const auto poll_interval = std::chrono::milliseconds(config_.websocket.poll_interval_ms);
     auto last_time_broadcast = std::chrono::steady_clock::now();
     const auto time_broadcast_interval = std::chrono::milliseconds(100);
+    spdlog::info("Bridge main loop running, poll {} ms", config_.websocket.poll_interval_ms);
 
     while (running_.load()) {
         try {
-            // 轮询并处理所有 topic
             for (const auto& topic : config_.topics) {
                 if (topic.enabled) {
                     PollAndForwardTopic(topic.name, topic.schema);
                 }
             }
 
-            // 定期广播服务器时间（如果 WebSocket 启用）
             if (config_.websocket.enable && server_) {
                 auto now = std::chrono::steady_clock::now();
                 if (now - last_time_broadcast >= time_broadcast_interval) {
@@ -301,184 +266,14 @@ void FoxgloveWebSocketBridge::Run()
                 }
             }
 
-            // 休眠以避免 CPU 空转
             std::this_thread::sleep_for(poll_interval);
         } catch (const std::exception& e) {
             spdlog::error("Error in main loop: {}", e.what());
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
 
-    spdlog::info("Main loop exited");
-}
-
-/**
- * @brief 轮询指定 Topic 并执行转发与录制
- * @param topic_name Topic 名称
- * @param schema Schema 名称
- */
-void FoxgloveWebSocketBridge::PollAndForwardTopic(const std::string& topic_name, const std::string& schema)
-{
-    // 检查是否有 WebSocket 客户端订阅或是否正在录制
-    bool has_websocket_sinks = config_.websocket.enable && channels_.count(topic_name) && channels_.at(topic_name)->has_sinks();
-    if (!has_websocket_sinks && !recording_.load()) {
-        return;
-    }
-
-    try {
-        // 根据 schema 类型选择正确的订阅者并处理数据
-        if (schema == "foxglove.PointCloud" && pc_subs_.count(topic_name)) {
-            auto raw_samples = pc_subs_.at(topic_name)->receive_all_raw();
-            for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
-                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
-                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
-
-                if (has_websocket_sinks) {
-                    auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
-                    if (result == foxglove::FoxgloveError::Ok) {
-                        forwarded_count_.at(topic_name)++;
-                    } else {
-                        error_count_.at(topic_name)++;
-                        spdlog::error("Failed to forward PointCloud on '{}': {}", topic_name, foxglove::strerror(result));
-                    }
-                }
-
-                if (recording_.load()) {
-                    RecordToMcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
-                }
-            }
-        } else if (schema == "foxglove.CompressedImage" && img_subs_.count(topic_name)) {
-            auto raw_samples = img_subs_.at(topic_name)->receive_all_raw();
-            for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
-                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
-                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
-
-                if (has_websocket_sinks) {
-                    auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
-                    if (result == foxglove::FoxgloveError::Ok) {
-                        forwarded_count_.at(topic_name)++;
-                    } else {
-                        error_count_.at(topic_name)++;
-                        spdlog::error("Failed to forward CompressedImage on '{}': {}", topic_name, foxglove::strerror(result));
-                    }
-                }
-
-                if (recording_.load()) {
-                    RecordToMcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
-                }
-            }
-        } else if (schema == "foxglove.Imu" && imu_subs_.count(topic_name)) {
-            auto raw_samples = imu_subs_.at(topic_name)->receive_all_raw();
-            for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
-                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
-                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
-
-                if (has_websocket_sinks) {
-                    auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
-                    if (result == foxglove::FoxgloveError::Ok) {
-                        forwarded_count_.at(topic_name)++;
-                    } else {
-                        error_count_.at(topic_name)++;
-                        spdlog::error("Failed to forward IMU on '{}': {}", topic_name, foxglove::strerror(result));
-                    }
-                }
-
-                if (recording_.load()) {
-                    RecordToMcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
-                }
-            }
-        } else if (schema == "foxglove.PoseInFrame" && pose_subs_.count(topic_name)) {
-            auto raw_samples = pose_subs_.at(topic_name)->receive_all_raw();
-            for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
-                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
-                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
-
-                if (has_websocket_sinks) {
-                    auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
-                    if (result == foxglove::FoxgloveError::Ok) {
-                        forwarded_count_.at(topic_name)++;
-                    } else {
-                        error_count_.at(topic_name)++;
-                        spdlog::error("Failed to forward PoseInFrame on '{}': {}", topic_name, foxglove::strerror(result));
-                    }
-                }
-
-                if (recording_.load()) {
-                    RecordToMcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
-                }
-            }
-        } else if (schema == "foxglove.PosesInFrame" && poses_subs_.count(topic_name)) {
-            auto raw_samples = poses_subs_.at(topic_name)->receive_all_raw();
-            for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
-                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
-                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
-
-                if (has_websocket_sinks) {
-                    auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
-                    if (result == foxglove::FoxgloveError::Ok) {
-                        forwarded_count_.at(topic_name)++;
-                    } else {
-                        error_count_.at(topic_name)++;
-                        spdlog::error("Failed to forward PosesInFrame on '{}': {}", topic_name, foxglove::strerror(result));
-                    }
-                }
-
-                if (recording_.load()) {
-                    RecordToMcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
-                }
-            }
-        } else if (schema == "foxglove.FrameTransforms" && frame_tf_subs_.count(topic_name)) {
-            auto raw_samples = frame_tf_subs_.at(topic_name)->receive_all_raw();
-            for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
-                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
-                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
-
-                if (has_websocket_sinks) {
-                    auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
-                    if (result == foxglove::FoxgloveError::Ok) {
-                        forwarded_count_.at(topic_name)++;
-                    } else {
-                        error_count_.at(topic_name)++;
-                        spdlog::error("Failed to forward FrameTransforms on '{}': {}", topic_name, foxglove::strerror(result));
-                    }
-                }
-
-                if (recording_.load()) {
-                    RecordToMcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
-                }
-            }
-        } else if (schema == "foxglove.SceneUpdate" && frame_marker_subs_.count(topic_name)) {
-            auto raw_samples = frame_marker_subs_.at(topic_name)->receive_all_raw();
-            for (const auto& raw_data : raw_samples) {
-                uint64_t timestamp_ns = AlignTimestamp(ExtractTimestampNs(schema, raw_data.data(), raw_data.size()));
-                timestamp_ns = EnsureGlobalMonotonic(timestamp_ns);
-                last_message_time_ns_.store(timestamp_ns, std::memory_order_relaxed);
-
-                if (has_websocket_sinks) {
-                    auto result = channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(raw_data.data()), raw_data.size(), timestamp_ns);
-                    if (result == foxglove::FoxgloveError::Ok) {
-                        forwarded_count_.at(topic_name)++;
-                    } else {
-                        error_count_.at(topic_name)++;
-                        spdlog::error("Failed to forward SceneUpdate on '{}': {}", topic_name, foxglove::strerror(result));
-                    }
-                }
-
-                if (recording_.load()) {
-                    RecordToMcap(topic_name, schema, raw_data.data(), raw_data.size(), timestamp_ns);
-                }
-            }
-        }
-    } catch (const std::exception& e) {
-        error_count_.at(topic_name)++;
-        spdlog::error("Error polling topic '{}': {}", topic_name, e.what());
-    }
+    spdlog::info("Bridge main loop exited");
 }
 
 /**
@@ -486,17 +281,11 @@ void FoxgloveWebSocketBridge::PollAndForwardTopic(const std::string& topic_name,
  */
 void FoxgloveWebSocketBridge::InitMcapWriter()
 {
-    // 创建输出目录
     std::filesystem::create_directories(config_.recorder.output_dir);
-
-    // 生成文件名
     current_output_file_ = GenerateOutputFilename();
 
-    // 创建 MCAP writer
     mcap_writer_ = std::make_unique<mcap::McapWriter>();
-
-    // 设置压缩
-    mcap::McapWriterOptions opts("flatbuffers");
+    mcap::McapWriterOptions opts("protobuf");
     if (config_.recorder.compression == "zstd") {
         opts.compression = mcap::Compression::Zstd;
     } else if (config_.recorder.compression == "lz4") {
@@ -511,13 +300,9 @@ void FoxgloveWebSocketBridge::InitMcapWriter()
         throw std::runtime_error("Failed to create MCAP file: " + status.message);
     }
 
-    // 重置计数器
     topic_to_channel_id_.clear();
+    mcap_schema_cache_.clear();
     next_channel_id_ = 1;
-
-    spdlog::info("MCAP writer initialized");
-    spdlog::info("  Output file: {}", current_output_file_);
-    spdlog::info("  Compression: {}", config_.recorder.compression);
 }
 
 /**
@@ -532,92 +317,66 @@ void FoxgloveWebSocketBridge::CloseMcapWriter()
 }
 
 /**
- * @brief 生成 MCAP 输出文件名
- * @return 文件路径
+ * @brief 生成输出文件名
  */
 std::string FoxgloveWebSocketBridge::GenerateOutputFilename() const
 {
-    // 生成时间戳：recording_20251011_143020.mcap
     auto now = std::chrono::system_clock::now();
     auto now_t = std::chrono::system_clock::to_time_t(now);
-
     std::ostringstream oss;
     oss << config_.recorder.output_dir << "/" << config_.recorder.filename_prefix << "_" << std::put_time(std::localtime(&now_t), "%Y%m%d_%H%M%S")
         << ".mcap";
-
     return oss.str();
 }
 
 /**
- * @brief 将消息写入 MCAP 文件
- * @param topic_name Topic 名称
- * @param schema_name Schema 名称
- * @param data 数据指针
- * @param size 数据长度
- * @param timestamp_ns 时间戳（纳秒）
+ * @brief 将数据写入 MCAP 文件
  */
 void FoxgloveWebSocketBridge::RecordToMcap(
     const std::string& topic_name,
     const std::string& schema_name,
-    const uint8_t* data,
-    size_t size,
+    const std::string& data,
     uint64_t timestamp_ns)
 {
     if (!mcap_writer_) {
         return;
     }
 
-    // 创建/获取 channel
+    mcap::SchemaId schema_id;
+    auto schema_it = mcap_schema_cache_.find(schema_name);
+    if (schema_it == mcap_schema_cache_.end()) {
+        const auto* descriptor = ResolveDescriptor(schema_name);
+        if (descriptor == nullptr) {
+            spdlog::warn("Skip recording for unknown schema {}", schema_name);
+            return;
+        }
+        const std::string descriptor_set = BuildDescriptorSet(descriptor);
+        mcap::Schema schema(schema_name, "protobuf", descriptor_set);
+        mcap_writer_->addSchema(schema);
+        schema_id = schema.id;
+        mcap_schema_cache_[schema_name] = schema_id;
+    } else {
+        schema_id = schema_it->second;
+    }
+
     uint16_t channel_id;
     auto it = topic_to_channel_id_.find(topic_name);
     if (it == topic_to_channel_id_.end()) {
         channel_id = next_channel_id_++;
-        topic_to_channel_id_[topic_name] = channel_id;
-
-        // 根据 schema 名称添加 schema
-        mcap::Schema mcap_schema;
-        if (schema_name == "foxglove.PointCloud") {
-            foxglove::PointCloudBinarySchema schema_data;
-            mcap_schema = mcap::Schema(schema_name, "flatbuffer", std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size()));
-        } else if (schema_name == "foxglove.CompressedImage") {
-            foxglove::CompressedImageBinarySchema schema_data;
-            mcap_schema = mcap::Schema(schema_name, "flatbuffer", std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size()));
-        } else if (schema_name == "foxglove.Imu") {
-            foxglove::ImuBinarySchema schema_data;
-            mcap_schema = mcap::Schema(schema_name, "flatbuffer", std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size()));
-        } else if (schema_name == "foxglove.PoseInFrame") {
-            foxglove::PoseInFrameBinarySchema schema_data;
-            mcap_schema = mcap::Schema(schema_name, "flatbuffer", std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size()));
-        } else if (schema_name == "foxglove.PosesInFrame") {
-            foxglove::PosesInFrameBinarySchema schema_data;
-            mcap_schema = mcap::Schema(schema_name, "flatbuffer", std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size()));
-        } else if (schema_name == "foxglove.FrameTransforms") {
-            foxglove::FrameTransformsBinarySchema schema_data;
-            mcap_schema = mcap::Schema(schema_name, "flatbuffer", std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size()));
-        } else if (schema_name == "foxglove.SceneUpdate") {
-            foxglove::SceneUpdateBinarySchema schema_data;
-            mcap_schema = mcap::Schema(schema_name, "flatbuffer", std::string(reinterpret_cast<const char*>(schema_data.data()), schema_data.size()));
-        } else {
-            // 不支持的 schema，不录制
-            return;
-        }
-        mcap_writer_->addSchema(mcap_schema);
-
-        // 添加 channel
-        mcap::Channel channel(topic_name, "flatbuffer", mcap_schema.id, {});
+        mcap::Channel channel(topic_name, "protobuf", schema_id, {});
         mcap_writer_->addChannel(channel);
+        topic_to_channel_id_[topic_name] = channel_id;
     } else {
         channel_id = it->second;
     }
 
-    // 写入消息
     mcap::Message msg;
     msg.channelId = channel_id;
     msg.sequence = recorded_count_.at(topic_name).load();
     msg.logTime = timestamp_ns;
     msg.publishTime = timestamp_ns;
-    msg.data = reinterpret_cast<const std::byte*>(data);
-    msg.dataSize = size;
+    msg.data = reinterpret_cast<const std::byte*>(data.data());
+    msg.dataSize = data.size();
 
     auto status = mcap_writer_->write(msg);
     if (status.ok()) {
@@ -628,83 +387,49 @@ void FoxgloveWebSocketBridge::RecordToMcap(
     }
 }
 
-/**
- * @brief 获取当前系统时间戳（纳秒）
- * @return 当前时间戳
- */
 uint64_t FoxgloveWebSocketBridge::GetCurrentTimestampNs()
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-uint64_t FoxgloveWebSocketBridge::ExtractTimestampNs(const std::string& schema, const uint8_t* data, size_t size) const
+uint64_t FoxgloveWebSocketBridge::ExtractTimestampNs(const std::string& schema, const google::protobuf::Message& message) const
 {
-    if (data == nullptr || size == 0U) {
-        return 0U;
+    if (schema == "foxglove.PointCloud") {
+        const auto* msg = dynamic_cast<const slam_common::FoxglovePointCloud*>(&message);
+        if (msg != nullptr) {
+            return ToNanoseconds(msg->timestamp());
+        }
+    } else if (schema == "foxglove.CompressedImage") {
+        const auto* msg = dynamic_cast<const slam_common::FoxgloveCompressedImage*>(&message);
+        if (msg != nullptr) {
+            return ToNanoseconds(msg->timestamp());
+        }
+    } else if (schema == "foxglove.Imu") {
+        const auto* msg = dynamic_cast<const slam_common::FoxgloveImu*>(&message);
+        if (msg != nullptr) {
+            return ToNanoseconds(msg->timestamp());
+        }
+    } else if (schema == "foxglove.PoseInFrame") {
+        const auto* msg = dynamic_cast<const slam_common::FoxglovePoseInFrame*>(&message);
+        if (msg != nullptr) {
+            return ToNanoseconds(msg->timestamp());
+        }
+    } else if (schema == "foxglove.PosesInFrame") {
+        const auto* msg = dynamic_cast<const slam_common::FoxglovePosesInFrame*>(&message);
+        if (msg != nullptr) {
+            return ToNanoseconds(msg->timestamp());
+        }
+    } else if (schema == "foxglove.FrameTransforms") {
+        const auto* msg = dynamic_cast<const slam_common::FoxgloveFrameTransforms*>(&message);
+        if (msg != nullptr && msg->transforms_size() > 0) {
+            return ToNanoseconds(msg->transforms(0).timestamp());
+        }
+    } else if (schema == "foxglove.SceneUpdate") {
+        const auto* msg = dynamic_cast<const slam_common::FoxgloveSceneUpdate*>(&message);
+        if (msg != nullptr && msg->entities_size() > 0) {
+            return ToNanoseconds(msg->entities(0).timestamp());
+        }
     }
-
-    constexpr uint64_t kNsPerSec = 1'000'000'000ULL;
-    const auto to_ns = [](const foxglove::Time* stamp) -> uint64_t {
-        if (stamp == nullptr) {
-            return 0U;
-        }
-        const int64_t sec = static_cast<int64_t>(stamp->sec());
-        const int64_t nsec = static_cast<int64_t>(stamp->nsec());
-        if (sec < 0 || nsec < 0) {
-            return 0U;
-        }
-        return static_cast<uint64_t>(sec) * kNsPerSec + static_cast<uint64_t>(nsec);
-    };
-
-    try {
-        if (schema == "foxglove.PointCloud") {
-            const auto* msg = flatbuffers::GetRoot<foxglove::PointCloud>(data);
-            return to_ns(msg->timestamp());
-        }
-        if (schema == "foxglove.CompressedImage") {
-            const auto* msg = flatbuffers::GetRoot<foxglove::CompressedImage>(data);
-            return to_ns(msg->timestamp());
-        }
-        if (schema == "foxglove.Imu") {
-            const auto* msg = flatbuffers::GetRoot<foxglove::Imu>(data);
-            return to_ns(msg->timestamp());
-        }
-        if (schema == "foxglove.PoseInFrame") {
-            const auto* msg = flatbuffers::GetRoot<foxglove::PoseInFrame>(data);
-            return to_ns(msg->timestamp());
-        }
-        if (schema == "foxglove.PosesInFrame") {
-            const auto* msg = flatbuffers::GetRoot<foxglove::PosesInFrame>(data);
-            return to_ns(msg->timestamp());
-        }
-        if (schema == "foxglove.FrameTransforms") {
-            const auto* msg = flatbuffers::GetRoot<foxglove::FrameTransforms>(data);
-            if (const auto* transforms = msg->transforms()) {
-                for (const auto* tf : *transforms) {
-                    const uint64_t ts = to_ns(tf->timestamp());
-                    if (ts != 0U) {
-                        return ts;
-                    }
-                }
-            }
-            return 0U;
-        }
-        if (schema == "foxglove.SceneUpdate") {
-            const auto* msg = flatbuffers::GetRoot<foxglove::SceneUpdate>(data);
-            if (const auto* entities = msg->entities()) {
-                for (const auto* entity : *entities) {
-                    const uint64_t ts = to_ns(entity->timestamp());
-                    if (ts != 0U) {
-                        return ts;
-                    }
-                }
-            }
-            return 0U;
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("Failed to extract timestamp for schema '{}': {}", schema, e.what());
-    }
-
     return 0U;
 }
 
@@ -735,10 +460,107 @@ uint64_t FoxgloveWebSocketBridge::EnsureGlobalMonotonic(uint64_t timestamp_ns)
     return timestamp_ns;
 }
 
-/**
- * @brief 汇总 Topic 统计数据
- * @return Statistics 结构体
- */
+foxglove::Schema FoxgloveWebSocketBridge::BuildWsSchema(const std::string& schema_name)
+{
+    auto& buffer = schema_descriptor_cache_[schema_name];
+    if (buffer.empty()) {
+        const auto* descriptor = ResolveDescriptor(schema_name);
+        if (descriptor == nullptr) {
+            throw std::runtime_error("Unknown schema for WebSocket: " + schema_name);
+        }
+        buffer = BuildDescriptorSet(descriptor);
+    }
+
+    foxglove::Schema schema;
+    schema.name = schema_name;
+    schema.encoding = "protobuf";
+    schema.data = reinterpret_cast<const std::byte*>(buffer.data());
+    schema.data_len = buffer.size();
+    return schema;
+}
+
+std::string FoxgloveWebSocketBridge::BuildDescriptorSet(const google::protobuf::Descriptor* descriptor)
+{
+    if (descriptor == nullptr) {
+        return {};
+    }
+    google::protobuf::FileDescriptorSet descriptor_set;
+    std::queue<const google::protobuf::FileDescriptor*> pending;
+    std::unordered_set<std::string> visited;
+    pending.push(descriptor->file());
+    visited.insert(descriptor->file()->name());
+
+    while (!pending.empty()) {
+        const auto* file = pending.front();
+        pending.pop();
+        file->CopyTo(descriptor_set.add_file());
+        for (int i = 0; i < file->dependency_count(); ++i) {
+            const auto* dependency = file->dependency(i);
+            if (visited.insert(dependency->name()).second) {
+                pending.push(dependency);
+            }
+        }
+    }
+
+    return descriptor_set.SerializeAsString();
+}
+
+uint64_t FoxgloveWebSocketBridge::ToNanoseconds(const google::protobuf::Timestamp& stamp)
+{
+    if (stamp.seconds() < 0 || stamp.nanos() < 0) {
+        return 0U;
+    }
+    constexpr uint64_t kNsPerSec = 1'000'000'000ULL;
+    return static_cast<uint64_t>(stamp.seconds()) * kNsPerSec + static_cast<uint64_t>(stamp.nanos());
+}
+
+bool FoxgloveWebSocketBridge::SerializeMessage(const google::protobuf::Message& message, std::string& buffer)
+{
+    buffer.clear();
+    if (!message.SerializeToString(&buffer)) {
+        spdlog::error("Failed to serialize message {}", message.GetTypeName());
+        return false;
+    }
+    return true;
+}
+
+void FoxgloveWebSocketBridge::PollAndForwardTopic(const std::string& topic_name, const std::string& schema)
+{
+    std::vector<PendingPacket> packets;
+    {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        auto it = pending_packets_.find(topic_name);
+        if (it != pending_packets_.end()) {
+            packets.swap(it->second);
+        }
+    }
+
+    if (packets.empty()) {
+        return;
+    }
+
+    const bool has_websocket_sinks = config_.websocket.enable && channels_.count(topic_name) && channels_.at(topic_name)->has_sinks();
+
+    for (const auto& packet : packets) {
+        if (has_websocket_sinks) {
+            auto result =
+                channels_.at(topic_name)->log(reinterpret_cast<const std::byte*>(packet.data.data()), packet.data.size(), packet.timestamp_ns);
+            if (result == foxglove::FoxgloveError::Ok) {
+                forwarded_count_.at(topic_name)++;
+            } else {
+                error_count_.at(topic_name)++;
+                spdlog::error("Failed to forward {} on '{}': {}", schema, topic_name, foxglove::strerror(result));
+            }
+        }
+
+        if (recording_.load()) {
+            RecordToMcap(topic_name, schema, packet.data, packet.timestamp_ns);
+        }
+
+        last_message_time_ns_.store(packet.timestamp_ns, std::memory_order_relaxed);
+    }
+}
+
 FoxgloveWebSocketBridge::Statistics FoxgloveWebSocketBridge::GetStatistics() const
 {
     Statistics stats;
@@ -752,5 +574,52 @@ FoxgloveWebSocketBridge::Statistics FoxgloveWebSocketBridge::GetStatistics() con
     }
     return stats;
 }
+
+/**
+ * @brief 模板化订阅注册
+ */
+template <typename MessageType>
+std::shared_ptr<eCAL::protobuf::CSubscriber<MessageType>> FoxgloveWebSocketBridge::RegisterSubscriber(
+    const std::string& topic_name,
+    const std::string& schema_name)
+{
+    auto subscriber = std::make_shared<eCAL::protobuf::CSubscriber<MessageType>>(topic_name);
+    subscriber->SetReceiveCallback([this, topic_name, schema_name](const eCAL::STopicId&, const MessageType& msg, long long send_time, long long) {
+        const uint64_t message_ts = ExtractTimestampNs(schema_name, msg);
+        const uint64_t fallback_ts = (send_time > 0) ? static_cast<uint64_t>(send_time) * 1000ULL : GetCurrentTimestampNs();
+        const uint64_t aligned_ts = EnsureGlobalMonotonic(AlignTimestamp(message_ts == 0U ? fallback_ts : message_ts));
+
+        std::string buffer;
+        if (!SerializeMessage(msg, buffer)) {
+            error_count_.at(topic_name)++;
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(pending_mutex_);
+            pending_packets_[topic_name].push_back({std::move(buffer), aligned_ts});
+        }
+    });
+
+    spdlog::info("eCAL subscriber created for topic {} ({})", topic_name, schema_name);
+    return subscriber;
+}
+
+// 显式实例化
+template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxglovePointCloud>>
+FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxglovePointCloud>(const std::string&, const std::string&);
+template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveCompressedImage>>
+FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxgloveCompressedImage>(const std::string&, const std::string&);
+template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveImu>> FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxgloveImu>(
+    const std::string&,
+    const std::string&);
+template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxglovePoseInFrame>>
+FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxglovePoseInFrame>(const std::string&, const std::string&);
+template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxglovePosesInFrame>>
+FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxglovePosesInFrame>(const std::string&, const std::string&);
+template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveFrameTransforms>>
+FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxgloveFrameTransforms>(const std::string&, const std::string&);
+template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveSceneUpdate>>
+FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxgloveSceneUpdate>(const std::string&, const std::string&);
 
 }  // namespace ms_slam::slam_recorder

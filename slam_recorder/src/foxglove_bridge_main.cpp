@@ -133,7 +133,7 @@ int main(int argc, char** argv)
             spdlog::info("  Recorder: DISABLED");
         }
         spdlog::info("");
-        spdlog::info("Subscribed to iceoryx2 topics:");
+        spdlog::info("Subscribed to eCAL Protobuf topics:");
         for (const auto& topic : config.topics) {
             if (topic.enabled) {
                 spdlog::info("  - {} ({})", topic.name, topic.schema);
