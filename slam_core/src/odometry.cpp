@@ -123,6 +123,7 @@ void Odometry::AddImageData(const Image& image_data)
 std::vector<SyncData> Odometry::SyncPackages()
 {
     EASY_FUNCTION(profiler::colors::Cyan);
+    LOG_EVERY_N(info, 1000, "buff size: lidar {}, imu {}, image {}", lidar_buffer_.size(), imu_buffer_.size(), image_buffer_.size());
     std::vector<SyncData> sync_data_list;
     constexpr double kImageSyncTolerance = 0.02;  // 20 ms 容忍度
 
@@ -671,7 +672,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_
         if (chosen[i]) obs_matches.emplace_back(matches[i]);
     }
 
-    spdlog::info("osb matches size: {}", obs_matches.size());
+    spdlog::debug("osb matches size: {}", obs_matches.size());
 
     H = Eigen::MatrixXd::Zero(obs_matches.size() * State::DoFRes, State::DoFObs);
     z = Eigen::VectorXd::Zero(obs_matches.size() * State::DoFRes);
@@ -703,7 +704,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_
     const double base_cov_inv = 1.0 / lidar_measurement_cov_;
     noise_inv = State::NoiseDiag::Constant(obs_matches.size() * State::DoFRes, base_cov_inv);
     EASY_END_BLOCK;
-    spdlog::info("Avg. Residual: {:.4f}", residual_sum.load() / obs_matches.size());
+    spdlog::debug("Avg. Residual: {:.4f}", residual_sum.load() / obs_matches.size());
 }
 
 #ifdef USE_VOXELMAP
@@ -747,7 +748,7 @@ void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag
 
     int effct_feat_num = ptpl_list.size();
 
-    spdlog::info("osb matches size: {}", effct_feat_num);
+    spdlog::debug("osb matches size: {}", effct_feat_num);
 
     H = Eigen::MatrixXd::Zero(effct_feat_num * State::DoFRes, State::DoFObs);
     z = Eigen::VectorXd::Zero(effct_feat_num * State::DoFRes);
@@ -798,7 +799,7 @@ void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag
         residual_sum.fetch_add(fabs(z(i * State::DoFRes)), std::memory_order_relaxed);
     });  // end for_each
     EASY_END_BLOCK;
-    spdlog::info("Avg. Residual: {:.4f}", residual_sum.load() / effct_feat_num);
+    spdlog::debug("Avg. Residual: {:.4f}", residual_sum.load() / effct_feat_num);
 }
 #endif
 
@@ -817,10 +818,11 @@ void Odometry::RunOdometry()
             EASY_VALUE("frame_index", static_cast<int>(frame_index_));
             EASY_BLOCK("ProcessSyncData", profiler::colors::Lime500);
             spdlog::info(
-                "Frame [{}]: PC start ts: {:.3f}, PC end ts: {:.3f}, IMU start ts: {:.3f}, IMU end ts: {:.3f}, size: {}",
+                "Frame [{}]: PC ts: {:.3f} --> {:.3f}, size: {}, IMU ts: {:.3f} --> {:.3f}, size: {}",
                 frame_index_,
                 sync_data.lidar_beg_time,
                 sync_data.lidar_end_time,
+                sync_data.lidar_data->size(),
                 sync_data.imu_data.front().timestamp(),
                 sync_data.imu_data.back().timestamp(),
                 sync_data.imu_data.size());
@@ -833,7 +835,6 @@ void Odometry::RunOdometry()
                 Initialize(sync_data);
                 continue;
             }
-            spdlog::info("[Lidar] stamp: {:.3f}, size: {}", sync_data.lidar_beg_time, sync_data.lidar_data->size());
             ProcessImuData(sync_data);
             deskewed_cloud_ = Deskew(sync_data.lidar_data, state_, imu_state_buffer_);
 

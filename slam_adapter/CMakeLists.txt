@@ -31,4 +31,17 @@ target_link_libraries(sub_demo PRIVATE
     mcap
     yaml-cpp
 )
+
+add_executable(mcap_sub_demo src/mcap_sub_demo.cpp)
+target_include_directories(mcap_sub_demo PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../slam_recorder/include
+)
+target_link_libraries(mcap_sub_demo PRIVATE
+    slam_core::slam_core
+    slam_common::slam_common
+    mcap
+    yaml-cpp
+)
+
 target_compile_definitions(sub_demo PRIVATE DISABLE_EASY_PROFILER)

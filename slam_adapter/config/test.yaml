@@ -12,6 +12,7 @@ common:
     time_lag_imu_to_lidar: 0.0 # Time offset between LiDAR and IMU calibrated by other algorithms, e.g., LI-Init (find in Readme)
                                # the timesample of IMU is transferred from the current timeline to LiDAR's timeline by subtracting this value
     time_lag_img_to_lidar: 0.1 # the time difference between the image and the LiDAR, in seconds, image timestamp + time_lag_img_to_lidar = LiDAR timestamp
+    log_level: "info" # debug/info/warning/error/fatal
 
 camera:
     extrinsic_mat_0: [-0.55558, -0.57188, -0.60356, -0.07323,
@@ -68,4 +69,3 @@ publish:
 
 pcd_save:
     pcd_save_en: true
-

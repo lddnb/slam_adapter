@@ -46,6 +46,9 @@ int main()
     EASY_PROFILER_ENABLE;
     std::signal(SIGINT, HandleSignal);
 
+    LoadConfigFromFile("../config/test.yaml");
+    const auto& config_inst = Config::GetInstance();
+
     ms_slam::slam_common::LoggerConfig config;
     config.log_file_path = "sub.log";
     auto dup_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(10));
@@ -54,7 +57,7 @@ int main()
     auto logger = std::make_shared<spdlog::logger>("crash_logger", dup_filter);
 
     logger->set_pattern(config.log_pattern);
-    logger->set_level(spdlog::level::from_str(config.log_level));
+    logger->set_level(spdlog::level::from_str(config_inst.common_params.log_level));
     logger->flush_on(spdlog::level::warn);
 
     spdlog::set_default_logger(logger);
@@ -72,9 +75,8 @@ int main()
     }
     spdlog::info("eCAL initialized, creating publishers and subscribers...");
 
-    LoadConfigFromFile("../config/test.yaml");
+    
     LogConfig();
-    const auto& config_inst = Config::GetInstance();
     const double blind_dist = config_inst.common_params.blind;
     const bool use_img = config_inst.common_params.render_en;
 

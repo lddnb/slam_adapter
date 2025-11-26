@@ -21,6 +21,7 @@ struct CommonParams {
     bool dense_pc;   ///< 发布稠密点云flag
     float blind;
     int point_filter_num;
+    std::string log_level;
 };
 
 struct MappingParams {

@@ -290,7 +290,10 @@ class PlaybackPublisher final : public PlaybackPublisherBase
      * @brief 构造函数
      * @param service_name 服务名称
      */
-    explicit PlaybackPublisher(const std::string& service_name) : publisher_(service_name) {}
+    explicit PlaybackPublisher(const std::string& service_name, const eCAL::Publisher::Configuration& config = eCAL::GetPublisherConfiguration())
+    : publisher_(service_name, config)
+    {
+    }
 
     /**
      * @brief 发布 Protobuf 消息
@@ -488,16 +491,28 @@ PlaybackPublisherBase* EnsurePublisher(PlaybackContext& ctx, const TopicSettings
     }
 
     std::unique_ptr<PlaybackPublisherBase> publisher;
+    auto custom_publisher_config = eCAL::GetPublisherConfiguration();
 
     switch (kind) {
         case MessageKind::PointCloud:
+            custom_publisher_config.layer.shm.enable = true;
+            custom_publisher_config.layer.shm.memfile_min_size_bytes = 1024 * 512; // 512KB
             publisher = std::make_unique<PlaybackPublisher<FoxglovePointCloud>>(topic_settings.publish_service);
             break;
         case MessageKind::CompressedImage:
+            custom_publisher_config.layer.shm.enable = true;
+            custom_publisher_config.layer.shm.memfile_min_size_bytes = 1024 * 1024; // 1MB
             publisher = std::make_unique<PlaybackPublisher<FoxgloveCompressedImage>>(topic_settings.publish_service);
             break;
         case MessageKind::Imu:
-            publisher = std::make_unique<PlaybackPublisher<FoxgloveImu>>(topic_settings.publish_service);
+            //! udp
+            // custom_publisher_config.layer.shm.enable = false;
+            // custom_publisher_config.layer.udp.enable = true;
+            //! shm + acknowledge_timeout_ms
+            custom_publisher_config.layer.shm.enable = true;
+            custom_publisher_config.layer.shm.acknowledge_timeout_ms = 2;
+            custom_publisher_config.layer.shm.memfile_buffer_count = 3;
+            publisher = std::make_unique<PlaybackPublisher<FoxgloveImu>>(topic_settings.publish_service, custom_publisher_config);
             break;
         case MessageKind::PoseInFrame:
             publisher = std::make_unique<PlaybackPublisher<FoxglovePoseInFrame>>(topic_settings.publish_service);
@@ -1194,7 +1209,7 @@ int RunToolImpl(const ToolConfig& config)
     uint64_t total_messages = 0;
     const auto summary_status = reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan);
     if (!summary_status.ok()) {
-        spdlog::debug("Failed to read MCAP summary: {}", summary_status.message);
+        spdlog::info("Failed to read MCAP summary: {}", summary_status.message);
     } else if (const auto stats_opt = reader.statistics(); stats_opt.has_value()) {
         total_messages = stats_opt->messageCount;
     }

@@ -188,6 +188,7 @@ inline void FillCommonParams(const YAML::Node& root, slam_core::CommonParams& co
         AssignIfPresent(common_node, "space_down_sample", common.space_down_sample);
         AssignIfPresent(common_node, "time_lag_imu_to_lidar", common.time_lag_imu_to_lidar);
         AssignIfPresent(common_node, "time_lag_img_to_lidar", common.time_lag_img_to_lidar);
+        AssignIfPresent(common_node, "log_level", common.log_level);
 
         AssignIfPresent(common_node, "fisheye_en", camera.fisheye_en);
         AssignIfPresent(common_node, "camera_num", camera.camera_num);
@@ -337,6 +338,7 @@ inline void LogConfig()
     spdlog::info("[Config] Common.point_filter_num: {}", common.point_filter_num);
     spdlog::info("[Config] Common.render_en: {}", common.render_en);
     spdlog::info("[Config] Common.dense_pc: {}", common.dense_pc);
+    spdlog::info("[Config] Common.log_level: {}", common.log_level);
 
     const auto& mapping = config.mapping_params;
     spdlog::info("[Config] Mapping.down_size: {}", mapping.down_size);
