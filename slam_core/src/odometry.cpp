@@ -593,7 +593,8 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_
 
     int N = downsampled_cloud_->size();
 
-    std::vector<bool> chosen(N, false);
+    //! 警惕vector<bool> 并行写入竞争
+    std::vector<std::uint8_t> chosen(N, 0);
     Matches matches(N);
 
     std::vector<int> indices(N);
@@ -623,7 +624,7 @@ void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_
 
         float s = 1 - 0.9 * fabs(dist) / sqrt(p.norm());
         if (s > 0.9) {
-            chosen[i] = true;
+            chosen[i] = 1;
             matches[i] = Match(p, p_abcd, dist);
             matches[i].confidence = static_cast<double>(s);
         }

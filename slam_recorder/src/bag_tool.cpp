@@ -189,6 +189,35 @@ MessageDescriptor DescribeMessage(const mcap::MessageView& view)
 }
 
 /**
+ * @brief 基于 Schema 名称推断消息类型
+ * @param schema_name Schema 全名
+ * @return 对应的 MessageKind
+ */
+MessageKind MessageKindFromSchemaName(const std::string& schema_name)
+{
+    if (schema_name == "sensor_msgs/PointCloud2" || schema_name == "foxglove.PointCloud" || schema_name == "livox_ros_driver2/CustomMsg" ||
+        schema_name == "livox_ros_driver/CustomMsg") {
+        return MessageKind::PointCloud;
+    }
+    if (schema_name == "sensor_msgs/CompressedImage" || schema_name == "foxglove.CompressedImage") {
+        return MessageKind::CompressedImage;
+    }
+    if (schema_name == "sensor_msgs/Imu" || schema_name == "foxglove.Imu") {
+        return MessageKind::Imu;
+    }
+    // if (schema_name == "nav_msgs/Path" || schema_name == "foxglove.PosesInFrame") {
+    //     return MessageKind::PosesInFrame;
+    // }
+    // if (schema_name == "nav_msgs/Odometry" || schema_name == "foxglove.PoseInFrame") {
+    //     return MessageKind::PoseInFrame;
+    // }
+    // if (schema_name == "tf2_msgs/TFMessage" || schema_name == "foxglove.FrameTransforms") {
+    //     return MessageKind::FrameTransforms;
+    // }
+    return MessageKind::Unsupported;
+}
+
+/**
  * @brief 基于全局配置解析单个话题的实际配置
  * @param config 工具全局配置
  * @param topic 话题名称
@@ -200,6 +229,7 @@ TopicSettings ResolveTopic(const ToolConfig& config, const std::string& topic)
     resolved.playback = config.playback_enabled && config.default_playback;
     resolved.record = config.record_enabled && config.default_record;
     resolved.publish_service = topic;
+    resolved.schema = "";
 
     const auto it = config.topics.find(topic);
     if (it != config.topics.end()) {
@@ -208,6 +238,7 @@ TopicSettings ResolveTopic(const ToolConfig& config, const std::string& topic)
         }
         resolved.playback = config.playback_enabled && it->second.playback;
         resolved.record = config.record_enabled && it->second.record;
+        resolved.schema = it->second.schema;
     }
 
     return resolved;
@@ -276,6 +307,7 @@ struct RecorderContext {
 struct PlaybackPublisherBase {
     virtual ~PlaybackPublisherBase() = default;
     virtual bool Publish(const google::protobuf::Message& message) = 0;
+    virtual size_t GetSubscriberCount() const = 0;
 };
 
 /**
@@ -314,6 +346,15 @@ class PlaybackPublisher final : public PlaybackPublisherBase
         return publisher_.Send(*typed_message);
     }
 
+    /**
+     * @brief 查询当前订阅者数量
+     * @return 订阅者数量
+     */
+    size_t GetSubscriberCount() const override
+    {
+        return publisher_.GetSubscriberCount();
+    }
+
   private:
     eCAL::protobuf::CPublisher<MessageType> publisher_;
 };
@@ -328,6 +369,7 @@ struct PlaybackContext {
     bool ecal_initialized{false};
     bool owns_ecal{false};
     std::unordered_map<std::string, std::unique_ptr<PlaybackPublisherBase>> publishers;
+    std::unordered_set<std::string> ready_services;
     std::optional<uint64_t> first_timestamp;
     std::chrono::steady_clock::time_point start_wall_time{};
 };
@@ -357,6 +399,50 @@ struct MessageStats {
     size_t filtered{0};
     size_t skipped{0};
     size_t window_skipped{0};
+};
+
+/**
+ * @brief 播放窗口判定结果
+ */
+enum class WindowDecision { Process, Skip, Stop };
+
+/**
+ * @brief 播放窗口管理，负责起止时间判定
+ */
+struct PlaybackWindow {
+    std::optional<uint64_t> bag_start_ns;   ///< 记录文件首帧时间戳
+    std::optional<uint64_t> process_start;  ///< 窗口起始时间戳
+    std::optional<uint64_t> process_end;    ///< 窗口结束时间戳
+    uint64_t start_offset_ns{0};            ///< 起始偏移
+    uint64_t duration_ns{0};                ///< 播放时长（纳秒）
+    bool has_duration{false};               ///< 是否限定时长
+
+    /**
+     * @brief 判定当前时间戳的处理策略
+     * @param timestamp_ns 当前消息时间戳
+     * @param stats 消息统计信息（用于窗口跳过计数）
+     * @return 窗口判定结果
+     */
+    WindowDecision Evaluate(uint64_t timestamp_ns, MessageStats& stats)
+    {
+        if (!bag_start_ns.has_value()) {
+            bag_start_ns = timestamp_ns;
+            process_start = bag_start_ns.value() + start_offset_ns;
+            if (has_duration) {
+                process_end = process_start.value() + duration_ns;
+            }
+        }
+
+        const uint64_t start_ns = process_start.value_or(timestamp_ns);
+        if (timestamp_ns < start_ns) {
+            ++stats.window_skipped;
+            return WindowDecision::Skip;
+        }
+        if (has_duration && process_end.has_value() && timestamp_ns > process_end.value()) {
+            return WindowDecision::Stop;
+        }
+        return WindowDecision::Process;
+    }
 };
 
 /**
@@ -506,12 +592,11 @@ PlaybackPublisherBase* EnsurePublisher(PlaybackContext& ctx, const TopicSettings
             break;
         case MessageKind::Imu:
             //! udp
-            // custom_publisher_config.layer.shm.enable = false;
-            // custom_publisher_config.layer.udp.enable = true;
+            custom_publisher_config.layer.shm.enable = false;
+            custom_publisher_config.layer.udp.enable = true;
             //! shm + acknowledge_timeout_ms
-            custom_publisher_config.layer.shm.enable = true;
-            custom_publisher_config.layer.shm.acknowledge_timeout_ms = 2;
-            custom_publisher_config.layer.shm.memfile_buffer_count = 3;
+            // custom_publisher_config.layer.shm.enable = true;
+            // custom_publisher_config.layer.shm.acknowledge_timeout_ms = 10;
             publisher = std::make_unique<PlaybackPublisher<FoxgloveImu>>(topic_settings.publish_service, custom_publisher_config);
             break;
         case MessageKind::PoseInFrame:
@@ -532,6 +617,91 @@ PlaybackPublisherBase* EnsurePublisher(PlaybackContext& ctx, const TopicSettings
     auto* raw_ptr = publisher.get();
     ctx.publishers.emplace(topic_settings.publish_service, std::move(publisher));
     return raw_ptr;
+}
+
+/**
+ * @brief 轮询等待指定发布器至少连接一个订阅者
+ * @param publisher 待检查的发布器
+ * @param service_name 发布服务名称
+ * @param max_wait_ms 最大等待时间（毫秒）
+ * @param step_ms 轮询间隔（毫秒）
+ * @return 等到订阅者返回 true，否则返回 false
+ */
+bool WaitForSubscribers(PlaybackPublisherBase& publisher, const std::string& service_name, int max_wait_ms = 3000, int step_ms = 50)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(max_wait_ms);
+    while (publisher.GetSubscriberCount() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(step_ms));
+    }
+    const size_t count = publisher.GetSubscriberCount();
+    if (count == 0) {
+        spdlog::warn("No subscribers for {} after {} ms, continue playback to avoid blocking", service_name, max_wait_ms);
+        return false;
+    }
+    spdlog::info("Playback publisher {} connected to {} subscriber(s)", service_name, count);
+    return true;
+}
+
+/**
+ * @brief 保证回放发布器已创建并完成握手
+ * @param ctx 回放上下文
+ * @param topic_settings 话题配置
+ * @param kind 消息类型
+ * @return 发布器存在返回 true，否则返回 false
+ */
+bool EnsurePublisherReady(PlaybackContext& ctx, const TopicSettings& topic_settings, MessageKind kind)
+{
+    if (ctx.ready_services.find(topic_settings.publish_service) != ctx.ready_services.end()) {
+        return true;
+    }
+
+    auto* publisher = EnsurePublisher(ctx, topic_settings, kind);
+    if (!publisher) {
+        return false;
+    }
+
+    if (WaitForSubscribers(*publisher, topic_settings.publish_service)) {
+        ctx.ready_services.insert(topic_settings.publish_service);
+    }
+    return true;
+}
+
+/**
+ * @brief 基于配置预先创建发布器并完成握手，避免首帧后才建立连接
+ * @param config 工具配置
+ * @param ctx 回放上下文
+ */
+void PreparePlaybackPublishers(const ToolConfig& config, PlaybackContext& ctx)
+{
+    if (!ctx.enabled) {
+        return;
+    }
+
+    for (const auto& kv : config.topics) {
+        const auto& name = kv.first;
+        const auto& settings = kv.second;
+        if (!(config.playback_enabled && settings.playback)) {
+            continue;
+        }
+        if (settings.schema.empty()) {
+            spdlog::warn("Skip pre-connect for {}: schema is empty", name);
+            continue;
+        }
+
+        const MessageKind kind = MessageKindFromSchemaName(settings.schema);
+        if (kind == MessageKind::Unsupported) {
+            spdlog::warn("Skip pre-connect for {}: unsupported schema {}", name, settings.schema);
+            continue;
+        }
+
+        TopicSettings resolved_settings = settings;
+        if (resolved_settings.publish_service.empty()) {
+            resolved_settings.publish_service = name;
+        }
+        if (EnsurePublisherReady(ctx, resolved_settings, kind)) {
+            spdlog::info("Pre-connected playback publisher for {}", resolved_settings.publish_service);
+        }
+    }
 }
 
 /**
@@ -1089,6 +1259,9 @@ void StartKeyboardControl(KeyboardControl& control)
     control.worker = std::thread([&control]() {
         spdlog::info("Keyboard control: press space to toggle playback");
         while (!control.stop.load()) {
+            if (g_interrupted.load(std::memory_order_relaxed)) {
+                break;
+            }
             pollfd fd{STDIN_FILENO, POLLIN, 0};
             const int ret = ::poll(&fd, 1, 100);
             if (ret > 0 && (fd.revents & POLLIN)) {
@@ -1126,6 +1299,41 @@ void StopKeyboardControl(KeyboardControl& control)
 }
 
 /**
+ * @brief 处理暂停与中断逻辑，统一维护播放起始时间
+ * @param keyboard 键盘控制句柄
+ * @param playback 回放上下文
+ * @param pause_started 暂停开始时间（用于恢复墙钟基准）
+ * @return 继续处理返回 true，需退出返回 false
+ */
+bool HandlePauseAndInterrupt(KeyboardControl& keyboard,
+                             PlaybackContext& playback,
+                             std::optional<std::chrono::steady_clock::time_point>& pause_started)
+{
+    if (keyboard.paused.load()) {
+        if (!pause_started.has_value()) {
+            pause_started = std::chrono::steady_clock::now();
+        }
+    }
+    while (keyboard.paused.load() && !keyboard.stop.load()) {
+        if (g_interrupted.load(std::memory_order_relaxed)) {
+            keyboard.stop.store(true);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (keyboard.stop.load()) {
+        return false;
+    }
+    if (pause_started.has_value()) {
+        if (playback.first_timestamp.has_value()) {
+            playback.start_wall_time += std::chrono::steady_clock::now() - *pause_started;
+        }
+        pause_started.reset();
+    }
+    return true;
+}
+
+/**
  * @brief 将消息发布到回放服务
  * @param ctx 回放上下文
  * @param topic_settings 话题配置
@@ -1148,6 +1356,11 @@ void PublishPlayback(
     auto* publisher = EnsurePublisher(ctx, topic_settings, kind);
     if (!publisher) {
         return;
+    }
+    if (ctx.ready_services.find(topic_settings.publish_service) == ctx.ready_services.end()) {
+        if (WaitForSubscribers(*publisher, topic_settings.publish_service)) {
+            ctx.ready_services.insert(topic_settings.publish_service);
+        }
     }
 
     if (!publisher->Publish(message)) {
@@ -1220,6 +1433,7 @@ int RunToolImpl(const ToolConfig& config)
     }
 
     ToolRuntime runtime{config, CreateRecorder(config), CreatePlaybackContext(config)};
+    PreparePlaybackPublishers(config, runtime.playback);
     MessageStats stats;
     MessageCache message_cache;
     std::string serialized_buffer;
@@ -1234,55 +1448,26 @@ int RunToolImpl(const ToolConfig& config)
     uint64_t processed = 0;
     uint64_t next_progress = total_messages > 0 ? std::max<uint64_t>(1, total_messages / 20) : 1000;
     std::optional<std::chrono::steady_clock::time_point> pause_started;
-    std::optional<uint64_t> bag_start_time_ns;
-    std::optional<uint64_t> processing_start_time_ns;
-    std::optional<uint64_t> processing_end_time_ns;
+    PlaybackWindow window;
+    window.start_offset_ns = start_offset_ns;
+    window.duration_ns = duration_ns;
+    window.has_duration = has_duration;
     for (auto it = messages.begin(); it != messages.end(); ++it) {
         const auto& view = *it;
         const std::string topic = view.channel ? view.channel->topic : "";
 
-        if (keyboard.paused.load()) {
-            if (!pause_started.has_value()) {
-                pause_started = std::chrono::steady_clock::now();
-            }
-        }
-        while (keyboard.paused.load() && !keyboard.stop.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        if (keyboard.stop.load()) {
-            break;
-        }
-        if (pause_started.has_value()) {
-            if (runtime.playback.first_timestamp.has_value()) {
-                runtime.playback.start_wall_time += std::chrono::steady_clock::now() - *pause_started;
-            }
-            pause_started.reset();
-        }
-
         const uint64_t timestamp_ns = view.message.logTime != 0 ? view.message.logTime : view.message.publishTime;
-        // 部分数据可能缺失 logTime，此时回落到 publishTime 保证时间戳连续
-        if (!bag_start_time_ns.has_value()) {
-            // 初始化bag首帧时间，并依据配置计算处理窗口边界
-            bag_start_time_ns = timestamp_ns;
-            processing_start_time_ns = bag_start_time_ns.value() + start_offset_ns;
-            if (!has_duration) {
-                processing_end_time_ns.reset();
-            } else {
-                processing_end_time_ns = processing_start_time_ns.value() + duration_ns;
-            }
-        }
-        if (processing_start_time_ns.has_value() && timestamp_ns < processing_start_time_ns.value()) {
-            // 落在配置窗口左侧的消息直接跳过
-            ++stats.window_skipped;
-            continue;
-        }
-        if (processing_end_time_ns.has_value() && timestamp_ns > processing_end_time_ns.value()) {
-            // 超出窗口终点后立即终止遍历，避免不必要的解码
-            spdlog::info("Processing window reached end timestamp, stopping");
-            break;
-        }
         if (g_interrupted.load(std::memory_order_relaxed)) {
             spdlog::warn("SIGINT received, stopping gracefully...");
+            break;
+        }
+
+        const WindowDecision window_decision = window.Evaluate(timestamp_ns, stats);
+        if (window_decision == WindowDecision::Skip) {
+            continue;
+        }
+        if (window_decision == WindowDecision::Stop) {
+            spdlog::info("Processing window reached end timestamp, stopping");
             break;
         }
 
@@ -1296,6 +1481,15 @@ int RunToolImpl(const ToolConfig& config)
         if (!topic_settings.playback && !topic_settings.record) {
             ++stats.filtered;
             continue;
+        }
+
+        // 先行创建并握手发布器，确保按空格开始播放前完成注册
+        if (runtime.playback.enabled && topic_settings.playback) {
+            EnsurePublisherReady(runtime.playback, topic_settings, descriptor.kind);
+        }
+
+        if (!HandlePauseAndInterrupt(keyboard, runtime.playback, pause_started)) {
+            break;
         }
 
         google::protobuf::Message* message_ptr = nullptr;
@@ -1474,6 +1668,9 @@ ToolConfig LoadBagToolConfig(const std::string& yaml_path)
                 }
                 settings.playback = entry["playback_enabled"].as<bool>(true);
                 settings.record = entry["record_enabled"].as<bool>(true);
+                if (entry["schema"]) {
+                    settings.schema = entry["schema"].as<std::string>();
+                }
                 config.topics.emplace(name, settings);
             }
         }

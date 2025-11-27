@@ -24,6 +24,7 @@ struct TopicSettings {
     bool playback{true};          ///< 是否启用回放
     bool record{true};            ///< 是否启用录制
     std::string publish_service;  ///< 回放时映射的服务名称
+    std::string schema;           ///< 话题的消息 Schema 名称（用于预创建发布器）
 };
 
 /**
