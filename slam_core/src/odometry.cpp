@@ -5,20 +5,20 @@
 #include <cmath>
 #include <execution>
 #include <limits>
+#include <type_traits>
 
 #include <Eigen/Dense>
 #include <spdlog/spdlog.h>
 #include <easy/profiler.h>
 #include <easy/arbitrary_value.h>
 #include "slam_core/config.hpp"
-#include "slam_core/filter.hpp"
-#include "slam_core/utils.hpp"
 #include "slam_core/logging_utils.hpp"
 
 namespace ms_slam::slam_core
 {
 
-Odometry::Odometry()
+template<typename Estimator, typename LocalMap>
+Odometry<Estimator, LocalMap>::Odometry()
 {
     EASY_FUNCTION(profiler::colors::Amber100);
     const auto& cfg = Config::GetInstance();
@@ -27,40 +27,20 @@ Odometry::Odometry()
     initialized_ = false;
     last_timestamp_imu_ = 0.0;
     localmap_params_ = cfg.localmap_params;
-#ifdef USE_VDB
-    local_map_ = std::make_unique<VDBMap>(
-        localmap_params_.voxel_size,
-        localmap_params_.map_clipping_distance,
-        localmap_params_.max_points_per_voxel,
-        localmap_params_.voxel_neighborhood);
-    spdlog::info("!!! Using VDB map !!!");
-#elif defined(USE_HASHMAP)
-    HashMapConfig hash_map_config{};
-    hash_map_config.voxel_size = localmap_params_.voxel_size;
-    hash_map_config.map_clipping_distance = localmap_params_.map_clipping_distance;
-    hash_map_config.max_points_per_voxel = localmap_params_.max_points_per_voxel;
-    hash_map_config.voxel_neighborhood = localmap_params_.voxel_neighborhood;
-    local_map_ = std::make_unique<VoxelHashMap>(hash_map_config);
-    spdlog::info("!!! Using HashMap !!!");
-#elif defined(USE_OCTREE)
-    local_map_ = std::make_unique<thuni::Octree>();
-    local_map_->set_min_extent(localmap_params_.voxel_size / 2);
-    local_map_->set_bucket_size(static_cast<size_t>(std::max(localmap_params_.max_points_per_voxel, 1)));
-    local_map_->set_down_size(true);
-    spdlog::info("!!! Using Octree map !!!");
-#elif defined(USE_VOXELMAP)
-    VoxelMapConfig config;
-    config.voxel_size = localmap_params_.voxel_size;
-    local_map_ = std::make_unique<VoxelMap>(config);
-    spdlog::info("!!! Using VoxelMap !!!");
+#ifdef USE_VOXELMAP
+    static_assert(!std::is_same_v<LocalMap, VoxelMap>, "VoxelMap support is pending in templated odometry");
 #endif
+
+    local_map_ = MapTraits<LocalMap>::Create(localmap_params_);
     deskewed_cloud_ = std::make_shared<PointCloudType>();
     downsampled_cloud_ = std::make_shared<PointCloudType>();
     odometry_thread_ = std::make_unique<std::thread>(&Odometry::RunOdometry, this);
-    state_ = State();
+    state_ = typename Estimator::StateType();
     state_.AddHModel("lidar", std::bind(&Odometry::ObsModel, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
 #ifdef USE_VOXELMAP
-    state_.AddHModel("voxelmap", std::bind(&Odometry::VoxelMapObsModel, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+    if constexpr (std::is_same_v<LocalMap, VoxelMap>) {
+        state_.AddHModel("voxelmap", std::bind(&Odometry::VoxelMapObsModel, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+    }
 #endif
 
     lidar_measurement_cov_ = std::max(static_cast<double>(cfg.mapping_params.laser_point_cov), 1e-6);
@@ -74,13 +54,15 @@ Odometry::Odometry()
     spdlog::info("Odometry thread initialized");
 }
 
-Odometry::~Odometry()
+template<typename Estimator, typename LocalMap>
+Odometry<Estimator, LocalMap>::~Odometry()
 {
     EASY_FUNCTION();
     Stop();
 }
 
-void Odometry::Stop()
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::Stop()
 {
     EASY_FUNCTION();
     if (!running_.exchange(false)) {
@@ -94,7 +76,8 @@ void Odometry::Stop()
 }
 
 // TODO: 设置缓冲区
-void Odometry::AddIMUData(const IMU& imu_data)
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::AddIMUData(const IMU& imu_data)
 {
     std::unique_lock<std::mutex> lock(data_mutex_);
     if (imu_data.timestamp() <= last_timestamp_imu_) {
@@ -108,19 +91,22 @@ void Odometry::AddIMUData(const IMU& imu_data)
     imu_buffer_.emplace_back(imu_data);
 }
 
-void Odometry::AddLidarData(const PointCloudType::ConstPtr& lidar_data)
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::AddLidarData(const PointCloudType::ConstPtr& lidar_data)
 {
     std::unique_lock<std::mutex> lock(data_mutex_);
     lidar_buffer_.emplace_back(lidar_data);
 }
 
-void Odometry::AddImageData(const Image& image_data)
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::AddImageData(const Image& image_data)
 {
     std::unique_lock<std::mutex> lock(data_mutex_);
     image_buffer_.emplace_back(image_data);
 }
 
-std::vector<SyncData> Odometry::SyncPackages()
+template<typename Estimator, typename LocalMap>
+std::vector<SyncData> Odometry<Estimator, LocalMap>::SyncPackages()
 {
     EASY_FUNCTION(profiler::colors::Cyan);
     LOG_EVERY_N(info, 1000, "buff size: lidar {}, imu {}, image {}", lidar_buffer_.size(), imu_buffer_.size(), image_buffer_.size());
@@ -242,7 +228,8 @@ std::vector<SyncData> Odometry::SyncPackages()
     return sync_data_list;
 }
 
-void Odometry::Initialize(const SyncData& sync_data)
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::Initialize(const SyncData& sync_data)
 {
     EASY_FUNCTION(profiler::colors::LightBlue300);
     static int N(0);
@@ -320,227 +307,39 @@ void Odometry::Initialize(const SyncData& sync_data)
             state_.b_a().x(), state_.b_a().y(), state_.b_a().z(),
             state_.timestamp());
         // clang-format on
-        spdlog::info("init cov: {}", as_eigen(state_.cov().block<6, 6>(0, 0)));
+        spdlog::info("init cov: {}", as_eigen(state_.cov(). template block<6, 6>(0, 0)));
     }
     EASY_VALUE("init_imu_count", N, EASY_UNIQUE_VIN);
 }
 
-void Odometry::ProcessImuData(const SyncData& sync_data)
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::ProcessImuData(const SyncData& sync_data)
 {
-    EASY_FUNCTION(profiler::colors::Pink300);
-    if (sync_data.imu_data.size() < 10) {
-        spdlog::error("!!!!! lost IMU data, size {} !!!!!", sync_data.imu_data.size());
-    }
-    IMU last_imu(Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), 0.0);
-    Eigen::Vector3d gyro = Eigen::Vector3d::Zero();
-    Eigen::Vector3d acc = Eigen::Vector3d::Zero();
-    double dt = 0.0;
-    State::BundleInput input;
-    for (const auto& imu : sync_data.imu_data) {
-        EASY_BLOCK("IntegrateImu", profiler::colors::Purple500);
-        dt = imu.timestamp() - state_.timestamp();
-        if (last_imu.timestamp() == 0.0 || dt <= 0.0) {
-            last_imu = imu;
-            continue;
-        } else if (imu.timestamp() < sync_data.lidar_end_time) {
-            gyro = 0.5 * (last_imu.angular_velocity() + imu.angular_velocity());
-            acc = 0.5 * (last_imu.linear_acceleration() + imu.linear_acceleration());
-            // 校正比例因子
-            acc = acc * imu_scale_factor_;
-
-            input = State::BundleInput{gyro, acc};
-            state_.Predict(input, dt, imu.timestamp());
-
-            last_imu = imu;
-        } else {
-            dt = sync_data.lidar_end_time - state_.timestamp();
-            if (dt <= 0.0) {
-                spdlog::error("Invalid IMU data timestamp, dt {:.3f}", dt);
-                continue;
-            }
-            CHECK(last_imu.timestamp() == state_.timestamp());
-            double dt_1 = imu.timestamp() - sync_data.lidar_end_time;
-            double dt_2 = sync_data.lidar_end_time - last_imu.timestamp();
-            double w1 = dt_1 / (dt_1 + dt_2);
-            double w2 = dt_2 / (dt_1 + dt_2);
-            gyro = w1 * last_imu.angular_velocity() + w2 * imu.angular_velocity();
-            acc = w1 * last_imu.linear_acceleration() + w2 * imu.linear_acceleration();
-            acc = acc * imu_scale_factor_;
-            input = State::BundleInput{gyro, acc};
-
-            state_.Predict(input, dt, sync_data.lidar_end_time);
-            spdlog::info(
-                "[state] predict pc ts: {:.3f}, pos: {:.6f} {:.6f} {:.6f}, quat: {:.6f} {:.6f} {:.6f} {:.6f}",
-                state_.timestamp(),
-                state_.p().x(),
-                state_.p().y(),
-                state_.p().z(),
-                state_.quat().x(),
-                state_.quat().y(),
-                state_.quat().z(),
-                state_.quat().w());
-
-            // spdlog::info("predict cov: {}", as_eigen(state_.cov().block<6, 6>(0, 0)));
-            {
-                std::unique_lock<std::mutex> lock(state_mutex_, std::try_to_lock);
-                if (lock.owns_lock()) {
-                    lidar_state_buffer_.emplace_back(state_);
-                } else {
-                    spdlog::info("Skip lidar_state_buffer push: state_mutex_ busy at {:.3f}s", state_.timestamp());
-                }
-            }
-        }
-        imu_state_buffer_.emplace_back(state_);
-    }
-    while (imu_state_buffer_.size() > 1 && imu_state_buffer_[1].timestamp() < sync_data.lidar_beg_time) {
-        imu_state_buffer_.pop_front();
-    }
+    estimator_.ProcessImuData(sync_data, state_, imu_state_buffer_, lidar_state_buffer_, imu_scale_factor_, state_mutex_);
 }
 
-/**
- * @brief 对输入点云进行时间去畸变处理
- * @param cloud 原始点云
- * @param state 当前里程计状态
- * @param buffer IMU预测状态缓冲区
- * @return 去畸变后的点云
- * @note 假设点时间戳严格位于缓冲区时间范围内
- */
-PointCloudType::Ptr Odometry::Deskew(const PointCloudType::ConstPtr& cloud, const State& state, const States& buffer) const
+template<typename Estimator, typename LocalMap>
+PointCloudType::Ptr Odometry<Estimator, LocalMap>::Deskew(const PointCloudType::ConstPtr& cloud, const typename Estimator::StateType& state, const typename Estimator::StatesType& buffer) const
 {
-    EASY_FUNCTION(profiler::colors::Teal300);
-    PointCloudType::Ptr deskewed_cloud = std::make_shared<PointCloudType>(*cloud);
-    Eigen::Isometry3f TN = (state.isometry3d() * T_i_l).cast<float>();
-
-    std::vector<int> indices(cloud->size());
-    std::iota(indices.begin(), indices.end(), 0);
-
-    if (cloud->timestamp(0) < buffer.front().timestamp()) {
-        spdlog::error(
-            "cloud timestamp is earlier than buffer timestamp, cloud ts {:.3f}, buffer ts {:.3f}",
-            cloud->timestamp(0),
-            buffer.front().timestamp());
-    } else if (cloud->timestamp(cloud->size() - 1) > buffer.back().timestamp()) {
-        spdlog::error(
-            "cloud timestamp is later than buffer timestamp, cloud ts {:.3f}, buffer ts {:.3f}",
-            cloud->timestamp(cloud->size() - 1),
-            buffer.back().timestamp());
-    }
-
-    EASY_BLOCK("DeskewPoints", profiler::colors::BlueGrey500);
-    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int k) {
-        const auto& point_time = cloud->timestamp(k);
-
-        // 返回数组中第一个大于或等于被查数的迭代器
-        auto it = std::lower_bound(buffer.begin(), buffer.end(), point_time, [](const State& state_item, double target_time) {
-            return state_item.timestamp() < target_time;
-        });
-
-        if (it == buffer.end()) {
-            spdlog::error("Lower bound search failed for time {:.3f}", point_time);
-            return;
-        }
-
-        const State& reference_state = (it->timestamp() == point_time) ? *it : *std::prev(it);
-
-        auto X0 = reference_state.Predict(point_time);
-        if (!X0) {
-            spdlog::error("Failed to predict point at time {:.3f}", point_time);
-        }
-
-        Eigen::Isometry3f T0 = (X0.value() * T_i_l).cast<float>();
-
-        Eigen::Vector3f p = cloud->position(k);
-
-        p = TN.inverse() * T0 * p;
-
-        deskewed_cloud->position(k) = p;
-    });
-
-    return deskewed_cloud;
+    return estimator_.Deskew(cloud, state, buffer, T_i_l);
 }
 
 #ifdef USE_PCL
-void Odometry::PCLAddLidarData(const PointCloudT::ConstPtr& lidar_data)
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::PCLAddLidarData(const PointCloudT::ConstPtr& lidar_data)
 {
     std::unique_lock<std::mutex> lock(data_mutex_);
     pcl_lidar_buffer_.emplace_back(lidar_data);
 }
 
-PointCloudT::Ptr Odometry::PCLDeskew(const PointCloudT::ConstPtr& cloud, const State& state, const States& buffer) const
+template<typename Estimator, typename LocalMap>
+PointCloudT::Ptr Odometry<Estimator, LocalMap>::PCLDeskew(const PointCloudT::ConstPtr& cloud, const typename Estimator::StateType& state, const typename Estimator::StatesType& buffer) const
 {
-    EASY_FUNCTION(profiler::colors::Teal900);
-    if (!cloud) {
-        spdlog::warn("PCLDeskew received null cloud");
-        return PointCloudT::Ptr(new PointCloudT);
-    }
-
-    PointCloudT::Ptr deskewed_cloud(new PointCloudT);
-    *deskewed_cloud = *cloud;
-
-    if (cloud->points.empty()) {
-        return deskewed_cloud;
-    }
-
-    const auto& config = Config::GetInstance();
-    Eigen::Isometry3d T_i_l_local = Eigen::Isometry3d::Identity();
-    T_i_l_local.linear() = config.mapping_params.extrinR;
-    T_i_l_local.translation() = config.mapping_params.extrinT;
-    Eigen::Isometry3f TN = (state.isometry3d() * T_i_l_local).cast<float>();
-
-    // 守护时间范围，避免插值越界
-    if (cloud->points.front().timestamp < buffer.front().timestamp()) {
-        spdlog::error(
-            "PCL cloud timestamp is earlier than buffer timestamp, cloud ts {:.3f}, buffer ts {:.3f}",
-            cloud->points.front().timestamp,
-            buffer.front().timestamp());
-    } else if (cloud->points.back().timestamp > buffer.back().timestamp()) {
-        spdlog::error(
-            "PCL cloud timestamp is later than buffer timestamp, cloud ts {:.3f}, buffer ts {:.3f}",
-            cloud->points.back().timestamp,
-            buffer.back().timestamp());
-    }
-
-    std::vector<std::size_t> indices(cloud->points.size());
-    std::iota(indices.begin(), indices.end(), 0);
-
-    EASY_BLOCK("DeskewPointsPCL", profiler::colors::BlueGrey300);
-    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](std::size_t k) {
-        const double point_time = cloud->points[k].timestamp;
-
-        // 查找包络状态用于线性插值
-        auto it = std::lower_bound(buffer.begin(), buffer.end(), point_time, [](const State& state_item, double target_time) {
-            return state_item.timestamp() < target_time;
-        });
-
-        if (it == buffer.end()) {
-            spdlog::error("Lower bound search failed for time {:.3f} (PCL)", point_time);
-            return;
-        }
-
-        const State& reference_state = (it->timestamp() == point_time) ? *it : *std::prev(it);
-
-        auto predicted_state = reference_state.Predict(point_time);
-        if (!predicted_state) {
-            spdlog::error("Failed to predict PCL point at time {:.3f}", point_time);
-            return;
-        }
-
-        // 计算点云在标定框架下的去畸变坐标
-        Eigen::Isometry3f T0 = (predicted_state.value() * T_i_l_local).cast<float>();
-
-        Eigen::Vector3f p(cloud->points[k].x, cloud->points[k].y, cloud->points[k].z);
-        Eigen::Vector3f deskewed = TN.inverse() * T0 * p;
-
-        auto& dst = deskewed_cloud->points[k];
-        dst.x = deskewed.x();
-        dst.y = deskewed.y();
-        dst.z = deskewed.z();
-    });
-
-    return deskewed_cloud;
+    return estimator_.PCLDeskew(cloud, state, buffer, T_i_l);
 }
 
-void Odometry::GetPCLMapCloud(std::vector<PointCloudT::Ptr>& cloud_buffer)
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::GetPCLMapCloud(std::vector<PointCloudT::Ptr>& cloud_buffer)
 {
     std::unique_lock<std::mutex> lock(state_mutex_);
     cloud_buffer.clear();
@@ -550,7 +349,8 @@ void Odometry::GetPCLMapCloud(std::vector<PointCloudT::Ptr>& cloud_buffer)
 }
 #endif
 
-void Odometry::GetLidarState(States& buffer)
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::GetLidarState(typename Estimator::StatesType& buffer)
 {
     std::unique_lock<std::mutex> lock(state_mutex_);
     buffer.clear();
@@ -559,7 +359,8 @@ void Odometry::GetLidarState(States& buffer)
     }
 }
 
-void Odometry::GetMapCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::GetMapCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
 {
     std::unique_lock<std::mutex> lock(state_mutex_);
     cloud_buffer.clear();
@@ -568,151 +369,46 @@ void Odometry::GetMapCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
     }
 }
 
-void Odometry::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
 {
     EASY_FUNCTION();
     std::unique_lock<std::mutex> lock(state_mutex_);
-#ifdef USE_VDB
-    // const auto points = local_map_->GetPointCloud();
-    local_map->clear();
-    // local_map->append(points);
-#elif defined(USE_HASHMAP)
-    local_map->clear();
-#endif
+    if constexpr (std::is_same_v<LocalMap, VDBMap>) {
+        local_map->clear();
+    } else if constexpr (std::is_same_v<LocalMap, VoxelHashMap>) {
+        local_map->clear();
+    }
 }
 
-void Odometry::ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_inv)
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::ObsModel(typename Estimator::StateType::ObsH& H, typename Estimator::StateType::ObsZ& z, typename Estimator::StateType::NoiseDiag& noise_inv)
 {
-    EASY_FUNCTION(profiler::colors::Green500);
-    H.resize(0, State::DoFObs);
-    z.resize(0, 1);
-    noise_inv.resize(0);
-    if (frame_index_ == 0) return;
-
-    Matches obs_matches;
-
-    int N = downsampled_cloud_->size();
-
-    //! 警惕vector<bool> 并行写入竞争
-    std::vector<std::uint8_t> chosen(N, 0);
-    Matches matches(N);
-
-    std::vector<int> indices(N);
-    std::iota(indices.begin(), indices.end(), 0);
-
-    EASY_BLOCK("matching", profiler::colors::BlueGrey500);
-    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
-        const Eigen::Vector3d p = downsampled_cloud_->position(i).cast<double>();
-        const Eigen::Vector3d g = state_.isometry3d() * T_i_l * p;  // global coords
-
-        std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> neighbors;
-        std::vector<float> pointSearchSqDis;
-#ifdef USE_VDB
-        local_map_->GetKNearestNeighbors(g.cast<float>(), localmap_params_.knn_num, neighbors, pointSearchSqDis);
-#elif defined(USE_HASHMAP)
-        neighbors = local_map_->SearchNeighbors(g.cast<float>(), localmap_params_.knn_num, pointSearchSqDis);
-#elif defined(USE_OCTREE)
-        local_map_->knnNeighbors(g.cast<float>(), localmap_params_.knn_num, neighbors, pointSearchSqDis);
+#ifdef USE_VOXELMAP
+    static_assert(!std::is_same_v<LocalMap, VoxelMap>, "VoxelMap obs model handled separately");
 #endif
-
-        if (neighbors.size() < localmap_params_.min_knn_num || pointSearchSqDis.empty() || pointSearchSqDis.back() > 1.0) return;
-
-        Eigen::Vector4d p_abcd = Eigen::Vector4d::Zero();
-        if (not EstimatePlane(p_abcd, neighbors, localmap_params_.plane_threshold)) return;
-
-        double dist = p_abcd.head<3>().dot(g) + p_abcd(3);
-
-        float s = 1 - 0.9 * fabs(dist) / sqrt(p.norm());
-        if (s > 0.9) {
-            chosen[i] = 1;
-            matches[i] = Match(p, p_abcd, dist);
-            matches[i].confidence = static_cast<double>(s);
-        }
-    });  // end for_each
-    EASY_END_BLOCK;
-
+    estimator_.ObsModel(
+        downsampled_cloud_,
 #ifdef USE_PCL
-    EASY_BLOCK("PCL_MATCHING", profiler::colors::BlueGrey300);
-    if (pcl_downsampled_cloud_ && !pcl_downsampled_cloud_->empty()) {
-        std::vector<int> pcl_indices(static_cast<int>(pcl_downsampled_cloud_->size()));
-        std::iota(pcl_indices.begin(), pcl_indices.end(), 0);
-        std::atomic<std::size_t> pcl_match_count{0};
-
-        std::for_each(std::execution::par_unseq, pcl_indices.begin(), pcl_indices.end(), [&](int idx) {
-            const auto& pcl_point = pcl_downsampled_cloud_->points[static_cast<std::size_t>(idx)];
-            const Eigen::Vector3d p = Eigen::Vector3d(pcl_point.x, pcl_point.y, pcl_point.z);
-            const Eigen::Vector3d g = state_.isometry3d() * T_i_l * p;
-
-            std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> neighbors;
-            std::vector<float> pointSearchSqDis;
-
-            // 记录PCL管线下的近邻命中情况
-            if (neighbors.size() < 5 || pointSearchSqDis.empty() || pointSearchSqDis.back() > 5.0f) {
-                return;
-            }
-
-            Eigen::Vector4d p_abcd = Eigen::Vector4d::Zero();
-            if (not EstimatePlane(p_abcd, neighbors, 0.1)) return;
-
-            // chosen[idx] = true;
-            // matches[idx] = Match(p, p_abcd);
-
-            pcl_match_count.fetch_add(1, std::memory_order_relaxed);
-        });
-
-        spdlog::info("PCL candidate matches size: {}", pcl_match_count.load());
-    } else {
-        spdlog::warn("PCL downsampled cloud unavailable for ObsModel");
-    }
-    EASY_END_BLOCK;
+        pcl_downsampled_cloud_,
 #endif
-
-    obs_matches.clear();
-
-    for (int i = 0; i < N; i++) {
-        if (chosen[i]) obs_matches.emplace_back(matches[i]);
-    }
-
-    spdlog::debug("osb matches size: {}", obs_matches.size());
-
-    H = Eigen::MatrixXd::Zero(obs_matches.size() * State::DoFRes, State::DoFObs);
-    z = Eigen::VectorXd::Zero(obs_matches.size() * State::DoFRes);
-    noise_inv = Eigen::VectorXd::Zero(obs_matches.size() * State::DoFRes);
-
-    indices.resize(obs_matches.size());
-    std::iota(indices.begin(), indices.end(), 0);
-
-    EASY_BLOCK("build_jacobian", profiler::colors::Lime600);
-    std::atomic<double> residual_sum = 0.0;
-    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
-        const Match m = obs_matches[i];
-
-        Eigen::Matrix3d J;  // Jacobian of R act.
-        const Eigen::Vector3d g = state_.ori_R().act(T_i_l * m.p, J) + state_.p();
-        const Eigen::Vector3d J_R = m.n.head(3).transpose() * J;  // Jacobian of rot
-
-        //! 这里要用负的残差
-        H.block<State::DoFRes, State::DoFObs>(i * State::DoFRes, 0) << m.n.head(3).transpose(), J_R.transpose();
-        z.segment<State::DoFRes>(i * State::DoFRes).setConstant(-m.dist2plane);
-
-        // noise_inv.segment<State::DoFRes>(i * State::DoFRes).setConstant(cov_inv);
-
-        // ICP
-        // H.block<State::DoFRes, State::DoFObs>(i * State::DoFRes, 0) << Eigen::Matrix3d::Identity(), J;
-        // z.segment<State::DoFRes>(i * State::DoFRes) = -(g - m.n.head(3));
-        residual_sum.fetch_add(fabs(z(i * State::DoFRes)), std::memory_order_relaxed);
-    });  // end for_each
-    const double base_cov_inv = 1.0 / lidar_measurement_cov_;
-    noise_inv = State::NoiseDiag::Constant(obs_matches.size() * State::DoFRes, base_cov_inv);
-    EASY_END_BLOCK;
-    spdlog::debug("Avg. Residual: {:.4f}", residual_sum.load() / obs_matches.size());
+        *local_map_,
+        T_i_l,
+        localmap_params_,
+        frame_index_,
+        lidar_measurement_cov_,
+        state_,
+        H,
+        z,
+        noise_inv);
 }
 
 #ifdef USE_VOXELMAP
-void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_inv)
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::VoxelMapObsModel(typename Estimator::StateType::ObsH& H, typename Estimator::StateType::ObsZ& z, typename Estimator::StateType::NoiseDiag& noise_inv)
 {
     EASY_FUNCTION(profiler::colors::Green500);
-    H.resize(0, State::DoFObs);
+    H.resize(0, Estimator::StateType::DoFObs);
     z.resize(0, 1);
     noise_inv.resize(0);
     if (frame_index_ == 0) return;
@@ -751,9 +447,9 @@ void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag
 
     spdlog::debug("osb matches size: {}", effct_feat_num);
 
-    H = Eigen::MatrixXd::Zero(effct_feat_num * State::DoFRes, State::DoFObs);
-    z = Eigen::VectorXd::Zero(effct_feat_num * State::DoFRes);
-    noise_inv = Eigen::VectorXd::Zero(effct_feat_num * State::DoFRes);
+    H = Eigen::MatrixXd::Zero(effct_feat_num * Estimator::StateType::DoFRes, Estimator::StateType::DoFObs);
+    z = Eigen::VectorXd::Zero(effct_feat_num * Estimator::StateType::DoFRes);
+    noise_inv = Eigen::VectorXd::Zero(effct_feat_num * Estimator::StateType::DoFRes);
 
     indices.resize(effct_feat_num);
     std::iota(indices.begin(), indices.end(), 0);
@@ -776,10 +472,10 @@ void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag
         // const Eigen::Vector3d J_R = m.n.head(3).transpose() * J;  // Jacobian of rot
 
         //! 这里要用负的残差
-        H.block<State::DoFRes, State::DoFObs>(i * State::DoFRes, 0) << norm_vec.x(), norm_vec.y(), norm_vec.z(), A[0], A[1], A[2];
+        H.block<Estimator::StateType::DoFRes, Estimator::StateType::DoFObs>(i * Estimator::StateType::DoFRes, 0) << norm_vec.x(), norm_vec.y(), norm_vec.z(), A[0], A[1], A[2];
         double pd2 = norm_vec.dot(ptpl_list[i].world_point.cast<double>()) + ptpl_list[i].d;
 
-        z.segment<State::DoFRes>(i * State::DoFRes).setConstant(-pd2);
+        z.segment<Estimator::StateType::DoFRes>(i * Estimator::StateType::DoFRes).setConstant(-pd2);
 
         Eigen::Vector3d point_world = ptpl_list[i].world_point.cast<double>();
         // /*** get the normal vector of closest surface/corner ***/
@@ -795,16 +491,17 @@ void Odometry::VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag
         // HACK 2. 不同分量的方差用加法来合成 因为公式(12)中的Sigma是对角阵，逐元素运算之后就是对角线上的项目相加
         double R_inv = 1.0 / (sigma_l + norm_vec.transpose() * R_cov_Rt * norm_vec);
 
-        noise_inv.segment<State::DoFRes>(i * State::DoFRes).setConstant(R_inv);
+        noise_inv.segment<Estimator::StateType::DoFRes>(i * Estimator::StateType::DoFRes).setConstant(R_inv);
 
-        residual_sum.fetch_add(fabs(z(i * State::DoFRes)), std::memory_order_relaxed);
+        residual_sum.fetch_add(fabs(z(i * Estimator::StateType::DoFRes)), std::memory_order_relaxed);
     });  // end for_each
     EASY_END_BLOCK;
     spdlog::debug("Avg. Residual: {:.4f}", residual_sum.load() / effct_feat_num);
 }
 #endif
 
-void Odometry::RunOdometry()
+template<typename Estimator, typename LocalMap>
+void Odometry<Estimator, LocalMap>::RunOdometry()
 {
     EASY_THREAD_SCOPE("OdometryThread");
     const auto& cfg = Config::GetInstance();
@@ -894,9 +591,9 @@ void Odometry::RunOdometry()
 
             EASY_BLOCK("Update", profiler::colors::DeepPurpleA400);
 #ifdef USE_VOXELMAP
-            state_.UpdateWithModel("voxelmap");
+            estimator_.UpdateWithModel(state_, "voxelmap");
 #else
-            state_.UpdateWithModel("lidar");
+            estimator_.UpdateWithModel(state_, "lidar");
 #endif
             EASY_END_BLOCK;
             spdlog::info(
@@ -911,9 +608,9 @@ void Odometry::RunOdometry()
             // spdlog::info("update cov: {}", as_eigen(state_.cov().block<6, 6>(0, 0)));
 
             EASY_BLOCK("TransformToWorld", profiler::colors::Indigo700);
-#if !defined(USE_VDB) && !defined(USE_VOXELMAP)
-            downsampled_cloud_->transform(state_.isometry3d() * T_i_l);
-#endif
+            if constexpr (!std::is_same_v<LocalMap, VDBMap>) {
+                downsampled_cloud_->transform(state_.isometry3d() * T_i_l);
+            }
             deskewed_cloud_->transform(state_.isometry3d() * T_i_l);
             map_cloud_buffer_.emplace_back(deskewed_cloud_->clone());
             EASY_END_BLOCK;
@@ -927,25 +624,8 @@ void Odometry::RunOdometry()
 #endif
 
             EASY_BLOCK("UpdateLocalMap", profiler::colors::DarkBrown);
-#ifdef USE_VDB
-            auto ori_points = downsampled_cloud_->positions_vec3();
-            std::vector<Eigen::Vector3f> local_points;
-            local_points.assign(ori_points.begin(), ori_points.end());
-            local_map_->Update(local_points, state_.isometry3d() * T_i_l);
-            spdlog::info("local map add {} points", local_points.size());
-#elif defined(USE_HASHMAP)
-            auto ori_points = downsampled_cloud_->positions_vec3();
-            for (const Eigen::Vector3f& point : ori_points) {
-                local_map_->AddPoint(point);
-            }
-            local_map_->RemoveDistantVoxels(state_.p());
-#elif defined(USE_OCTREE)
-            auto ori_points = downsampled_cloud_->positions_vec3();
-            std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> local_points;
-            local_points.assign(ori_points.begin(), ori_points.end());
-            local_map_->update(local_points);
-            spdlog::info("local map add {} points", local_points.size());
-#elif defined(USE_VOXELMAP)
+#if defined(USE_VOXELMAP)
+            if constexpr (std::is_same_v<LocalMap, VoxelMap>) {
             auto downsampled_world = downsampled_cloud_->transformed(state_.isometry3d() * T_i_l);
             auto world_points = downsampled_world.positions_vec3();
             auto lidar_points = downsampled_cloud_->positions_vec3();
@@ -974,12 +654,30 @@ void Odometry::RunOdometry()
             std::sort(pv_list.begin(), pv_list.end(), VarContrast);
             local_map_->UpdateParallel(pv_list);
             spdlog::info("local map add {} points", world_points.size());
+            } else
 #endif
+            {
+                auto ori_points = downsampled_cloud_->positions_vec3();
+                if constexpr (std::is_same_v<LocalMap, thuni::Octree>) {
+                    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> local_points;
+                    local_points.assign(ori_points.begin(), ori_points.end());
+                    MapTraits<LocalMap>::Update(*local_map_, local_points, state_.isometry3d() * T_i_l, state_.p());
+                    spdlog::info("local map add {} points", local_points.size());
+                } else {
+                    std::vector<Eigen::Vector3f> local_points;
+                    local_points.assign(ori_points.begin(), ori_points.end());
+                    MapTraits<LocalMap>::Update(*local_map_, local_points, state_.isometry3d() * T_i_l, state_.p());
+                    spdlog::info("local map add {} points", local_points.size());
+                }
+            }
             frame_index_++;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
+
+// 显式实例化默认滤波器版本
+template class Odometry<DefaultEstimator, DefaultLocalMap>;
 
 }  // namespace ms_slam::slam_core

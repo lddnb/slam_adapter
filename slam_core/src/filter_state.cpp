@@ -1,4 +1,4 @@
-#include "slam_core/state.hpp"
+#include "slam_core/filter_state.hpp"
 
 #include <algorithm>
 
@@ -8,7 +8,7 @@
 namespace ms_slam::slam_core
 {
 template<int kObsDim, int kResDim>
-StateTemplate<kObsDim, kResDim>::StateTemplate() : stamp(-1.0)
+FilterStateTemplate<kObsDim, kResDim>::FilterStateTemplate() : stamp(-1.0)
 {
     const auto& cfg = Config::GetInstance();
     Eigen::Vector3d zero_vec = Eigen::Vector3d(0., 0., 0.);
@@ -42,7 +42,7 @@ StateTemplate<kObsDim, kResDim>::StateTemplate() : stamp(-1.0)
 }
 
 template<int kObsDim, int kResDim>
-void StateTemplate<kObsDim, kResDim>::Predict(const BundleInput& imu, double dt, double timestamp)
+void FilterStateTemplate<kObsDim, kResDim>::Predict(const BundleInput& imu, double dt, double timestamp)
 {
     const Eigen::Vector3d& in_gyro = imu.element<0>().coeffs();
     const Eigen::Vector3d& in_acc = imu.element<1>().coeffs();
@@ -66,7 +66,7 @@ void StateTemplate<kObsDim, kResDim>::Predict(const BundleInput& imu, double dt,
 }
 
 template<int kObsDim, int kResDim>
-std::optional<Eigen::Isometry3d> StateTemplate<kObsDim, kResDim>::Predict(double timestamp) const
+std::optional<Eigen::Isometry3d> FilterStateTemplate<kObsDim, kResDim>::Predict(double timestamp) const
 {
     double dt = timestamp - stamp;
     if (dt < 0.0) {
@@ -83,7 +83,7 @@ std::optional<Eigen::Isometry3d> StateTemplate<kObsDim, kResDim>::Predict(double
 }
 
 template<int kObsDim, int kResDim>
-void StateTemplate<kObsDim, kResDim>::Update()
+void FilterStateTemplate<kObsDim, kResDim>::Update()
 {
     if (h_models_.empty()) {
         spdlog::warn("State::Update: no observation models available");
@@ -96,7 +96,7 @@ void StateTemplate<kObsDim, kResDim>::Update()
 }
 
 template<int kObsDim, int kResDim>
-void StateTemplate<kObsDim, kResDim>::UpdateWithModel(std::string_view name)
+void FilterStateTemplate<kObsDim, kResDim>::UpdateWithModel(std::string_view name)
 {
     if (h_models_.empty()) {
         spdlog::warn("State::UpdateWithModel: no observation models available");
@@ -117,7 +117,7 @@ void StateTemplate<kObsDim, kResDim>::UpdateWithModel(std::string_view name)
 }
 
 template<int kObsDim, int kResDim>
-void StateTemplate<kObsDim, kResDim>::UpdateWithModels(const std::vector<std::string>& names)
+void FilterStateTemplate<kObsDim, kResDim>::UpdateWithModels(const std::vector<std::string>& names)
 {
     if (names.empty()) {
         spdlog::warn("State::UpdateWithModels: empty name list");
@@ -130,7 +130,7 @@ void StateTemplate<kObsDim, kResDim>::UpdateWithModels(const std::vector<std::st
 }
 
 template<int kObsDim, int kResDim>
-void StateTemplate<kObsDim, kResDim>::ApplyObservationModel(const ObservationEntry& entry)
+void FilterStateTemplate<kObsDim, kResDim>::ApplyObservationModel(const ObservationEntry& entry)
 {
     if (!entry.model) {
         spdlog::warn("State::Update: skip empty observation model {}", entry.name);
@@ -194,7 +194,7 @@ void StateTemplate<kObsDim, kResDim>::ApplyObservationModel(const ObservationEnt
 }
 
 template<int kObsDim, int kResDim>
-typename StateTemplate<kObsDim, kResDim>::Tangent StateTemplate<kObsDim, kResDim>::f(const Eigen::Vector3d& ang_vel, const Eigen::Vector3d& lin_acc) const
+typename FilterStateTemplate<kObsDim, kResDim>::Tangent FilterStateTemplate<kObsDim, kResDim>::f(const Eigen::Vector3d& ang_vel, const Eigen::Vector3d& lin_acc) const
 {
     Tangent u = Tangent::Zero();
     u.element<0>().coeffs() = v();
@@ -207,7 +207,7 @@ typename StateTemplate<kObsDim, kResDim>::Tangent StateTemplate<kObsDim, kResDim
 }
 
 template<int kObsDim, int kResDim>
-typename StateTemplate<kObsDim, kResDim>::ProcessMatrix StateTemplate<kObsDim, kResDim>::df_dx(const BundleInput& imu) const
+typename FilterStateTemplate<kObsDim, kResDim>::ProcessMatrix FilterStateTemplate<kObsDim, kResDim>::df_dx(const BundleInput& imu) const
 {
     ProcessMatrix out = ProcessMatrix::Zero();
     const Eigen::Vector3d& in_acc = imu.element<1>().coeffs();
@@ -227,7 +227,7 @@ typename StateTemplate<kObsDim, kResDim>::ProcessMatrix StateTemplate<kObsDim, k
 }
 
 template<int kObsDim, int kResDim>
-typename StateTemplate<kObsDim, kResDim>::MappingMatrix StateTemplate<kObsDim, kResDim>::df_dw(const BundleInput& imu) const
+typename FilterStateTemplate<kObsDim, kResDim>::MappingMatrix FilterStateTemplate<kObsDim, kResDim>::df_dw(const BundleInput& imu) const
 {
     // w = (n_g, n_a, n_{b_g}, n_{b_a})
     MappingMatrix out = MappingMatrix::Zero();
@@ -241,14 +241,14 @@ typename StateTemplate<kObsDim, kResDim>::MappingMatrix StateTemplate<kObsDim, k
 }
 
 template<int kObsDim, int kResDim>
-void StateTemplate<kObsDim, kResDim>::SetHModel(const ObservationModel& h_model)
+void FilterStateTemplate<kObsDim, kResDim>::SetHModel(const ObservationModel& h_model)
 {
     h_models_.clear();
     h_models_.push_back(ObservationEntry{std::string("obs_0"), h_model});
 }
 
 template<int kObsDim, int kResDim>
-void StateTemplate<kObsDim, kResDim>::SetHModels(const std::vector<ObservationModel>& h_models)
+void FilterStateTemplate<kObsDim, kResDim>::SetHModels(const std::vector<ObservationModel>& h_models)
 {
     h_models_.clear();
     h_models_.reserve(h_models.size());
@@ -258,7 +258,7 @@ void StateTemplate<kObsDim, kResDim>::SetHModels(const std::vector<ObservationMo
 }
 
 template<int kObsDim, int kResDim>
-void StateTemplate<kObsDim, kResDim>::SetNamedHModels(const std::vector<std::pair<std::string, ObservationModel>>& named_models)
+void FilterStateTemplate<kObsDim, kResDim>::SetNamedHModels(const std::vector<std::pair<std::string, ObservationModel>>& named_models)
 {
     h_models_.clear();
     h_models_.reserve(named_models.size());
@@ -268,24 +268,24 @@ void StateTemplate<kObsDim, kResDim>::SetNamedHModels(const std::vector<std::pai
 }
 
 template<int kObsDim, int kResDim>
-void StateTemplate<kObsDim, kResDim>::AddHModel(const ObservationModel& h_model)
+void FilterStateTemplate<kObsDim, kResDim>::AddHModel(const ObservationModel& h_model)
 {
     const std::string name = "obs_" + std::to_string(h_models_.size());
     h_models_.push_back(ObservationEntry{name, h_model});
 }
 
 template<int kObsDim, int kResDim>
-void StateTemplate<kObsDim, kResDim>::AddHModel(const std::string& name, const ObservationModel& h_model)
+void FilterStateTemplate<kObsDim, kResDim>::AddHModel(const std::string& name, const ObservationModel& h_model)
 {
     h_models_.push_back(ObservationEntry{name, h_model});
 }
 
 template<int kObsDim, int kResDim>
-void StateTemplate<kObsDim, kResDim>::ClearHModels()
+void FilterStateTemplate<kObsDim, kResDim>::ClearHModels()
 {
     h_models_.clear();
 }
 
-template class StateTemplate<6, 1>;
+template class FilterStateTemplate<6, 1>;
 
 }  // namespace ms_slam::slam_core

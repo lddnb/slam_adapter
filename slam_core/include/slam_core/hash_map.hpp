@@ -41,14 +41,11 @@ struct Voxel {
     short z;
 };
 
-/// 兼容旧接口的别名
-using voxel = Voxel;
-
 /**
- * @brief 体素包含的点集合
+ * @brief 哈希地图体素包含的点集合
  */
-struct VoxelBlock {
-    explicit VoxelBlock(int num_points_ = 20) : num_points(num_points_) { points.reserve(num_points_); }
+struct HashVoxelBlock {
+    explicit HashVoxelBlock(int num_points_ = 20) : num_points(num_points_) { points.reserve(num_points_); }
 
     std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> points;
 
@@ -73,7 +70,7 @@ struct VoxelBlock {
      * @brief 查询体素内点的数量
      * @return 当前点数
      */
-    inline int NumPoints() const { return points.size(); }
+    inline std::size_t NumPoints() const { return points.size(); }
 
     /**
      * @brief 查询体素容量
@@ -82,10 +79,10 @@ struct VoxelBlock {
     inline int Capacity() { return num_points; }
 
   private:
-    int num_points;
+    std::size_t num_points;
 };
 
-using VoxelHashStorage = tsl::robin_map<Voxel, VoxelBlock>;
+using VoxelHashStorage = tsl::robin_map<Voxel, HashVoxelBlock>;
 
 }  // namespace ms_slam::slam_core
 
@@ -165,7 +162,7 @@ class VoxelHashMap
             if (!voxel_block.IsFull()) {
                 double sq_dist_min_to_points = 10 * config_.voxel_size * config_.voxel_size;
                 // 计算该体素中距离当前点最近的平方距离
-                for (int i = 0; i < voxel_block.NumPoints(); ++i) {
+                for (std::size_t i = 0; i < voxel_block.NumPoints(); ++i) {
                     const auto& voxel_point = voxel_block.points[i];
                     const double sq_dist = (voxel_point - point).squaredNorm();
                     if (sq_dist < sq_dist_min_to_points) {
@@ -178,7 +175,7 @@ class VoxelHashMap
                 }
             }
         } else {
-            VoxelBlock block(config_.max_points_per_voxel);
+            HashVoxelBlock block(config_.max_points_per_voxel);
             block.AddPoint(point);
             voxel_map_[Voxel(kx, ky, kz)] = std::move(block);
         }
@@ -211,7 +208,7 @@ class VoxelHashMap
                     if (search != voxel_map_.end()) {
                         const auto& voxel_block = search->second;
                         // 遍历体素内所有点并维护固定容量的大根堆
-                        for (int i = 0; i < voxel_block.NumPoints(); ++i) {
+                        for (std::size_t i = 0; i < voxel_block.NumPoints(); ++i) {
                             const auto& neighbor = voxel_block.points[i];
                             const double distance = (neighbor - point).norm();
                             if (priority_queue.size() == static_cast<size_t>(k)) {

@@ -26,7 +26,10 @@
 #include <slam_core/image.hpp>
 #include <slam_core/point_cloud.hpp>
 #include <slam_core/point_types.hpp>
-#include <slam_core/state.hpp>
+#include <slam_core/filter_state.hpp>
+
+using State = ms_slam::slam_core::FilterState;
+using States = ms_slam::slam_core::FilterStates;
 
 namespace ms_slam::slam_adapter
 {
@@ -169,7 +172,7 @@ inline void FillIdentityPose(foxglove::Pose& pose)
  * @param message 目标消息
  * @return 成功返回 true
  */
-inline bool BuildFoxglovePoseInFrame(const slam_core::State& state, std::string_view frame_id, foxglove::PoseInFrame& message)
+inline bool BuildFoxglovePoseInFrame(const State& state, std::string_view frame_id, foxglove::PoseInFrame& message)
 {
     message.Clear();
 
@@ -189,7 +192,7 @@ inline bool BuildFoxglovePoseInFrame(const slam_core::State& state, std::string_
  * @param message 目标消息
  * @return 成功返回 true
  */
-inline bool BuildFoxglovePosesInFrame(const std::vector<slam_core::State>& states, std::string_view frame_id, foxglove::PosesInFrame& message)
+inline bool BuildFoxglovePosesInFrame(const std::vector<State>& states, std::string_view frame_id, foxglove::PosesInFrame& message)
 {
     message.Clear();
 
@@ -245,7 +248,7 @@ inline bool BuildFoxgloveFrameTransforms(std::span<const FrameTransformData> tra
  * @return 成功返回 true
  */
 inline bool BuildFoxgloveSceneUpdateFromState(
-    const slam_core::State& state,
+    const State& state,
     std::string_view frame_id,
     std::string_view entity_id,
     foxglove::SceneUpdate& message)

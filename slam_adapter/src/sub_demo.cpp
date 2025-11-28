@@ -80,7 +80,7 @@ int main()
     const double blind_dist = config_inst.common_params.blind;
     const bool use_img = config_inst.common_params.render_en;
 
-    auto odom = std::make_shared<Odometry>();
+    auto odom = std::make_shared<FilterOdometry>();
 
     eCAL::protobuf::CPublisher<FoxgloveCompressedImage> processed_image_pub("/camera/image_processed");
     eCAL::protobuf::CPublisher<FoxglovePoseInFrame> odom_pub("/odom");

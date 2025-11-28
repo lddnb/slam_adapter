@@ -1,46 +1,24 @@
 #pragma once
 
-#define USE_VOXELMAP
-
+#include <atomic>
 #include <deque>
 #include <mutex>
 #include <thread>
-#include <atomic>
 
 #ifdef USE_PCL
 #include "slam_core/PCL.hpp"
 #endif
-#include "slam_core/imu.hpp"
-#include "slam_core/point_cloud.hpp"
-#include "slam_core/image.hpp"
-#include "slam_core/state.hpp"
 #include "slam_core/config.hpp"
-#ifdef USE_VDB
-#include "slam_core/VDB_map.hpp"
-#elif defined(USE_HASHMAP)
-#include "slam_core/hash_map.hpp"
-#elif defined(USE_OCTREE)
-#include "slam_core/Octree.hpp"
-#elif defined(USE_VOXELMAP)
-#include "slam_core/voxel_map.hpp"
-#endif
+#include "slam_core/filter_estimator.hpp"
+#include "slam_core/odom_common.hpp"
+#include "slam_core/localmap_traits.hpp"
 
 namespace ms_slam::slam_core
 {
-using PointType = PointXYZITDescriptor;
-using PointCloudType = PointCloud<PointType>;
+using DefaultLocalMap = VDBMap;
+using DefaultEstimator = FilterEstimator<DefaultLocalMap>;
 
-struct SyncData {
-    PointCloudType::ConstPtr lidar_data;
-#ifdef USE_PCL
-    PointCloudT::ConstPtr pcl_lidar_data;
-#endif
-    double lidar_beg_time;
-    double lidar_end_time;
-    Image image_data;
-    std::vector<IMU> imu_data;
-};
-
+template<typename Estimator = DefaultEstimator, typename LocalMap = DefaultLocalMap>
 class Odometry
 {
   public:
@@ -59,7 +37,14 @@ class Odometry
 
     [[nodiscard]] std::vector<SyncData> SyncPackages();
 
-    [[nodiscard]] PointCloudType::Ptr Deskew(const PointCloudType::ConstPtr& cloud, const State& state, const States& buffer) const;
+    /**
+     * @brief 使用通用去畸变接口，返回对齐参考时刻的点云
+     * @param cloud 输入点云
+     * @param state 当前滤波状态（参考时刻）
+     * @param buffer 状态时间序列，用于插值
+     * @return 去畸变后的点云
+     */
+    [[nodiscard]] PointCloudType::Ptr Deskew(const PointCloudType::ConstPtr& cloud, const typename Estimator::StateType& state, const typename Estimator::StatesType& buffer) const;
 
     void ProcessImuData(const SyncData& sync_data);
 
@@ -73,13 +58,13 @@ class Odometry
      * @param z 观测残差
      * @param noise_inv 噪声协方差对角的逆（可为统一值或逐点值）
      */
-    void ObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_inv);
+    void ObsModel(typename Estimator::StateType::ObsH& H, typename Estimator::StateType::ObsZ& z, typename Estimator::StateType::NoiseDiag& noise_inv);
 
 #if defined(USE_VOXELMAP)
-    void VoxelMapObsModel(State::ObsH& H, State::ObsZ& z, State::NoiseDiag& noise_inv);
+    void VoxelMapObsModel(typename Estimator::StateType::ObsH& H, typename Estimator::StateType::ObsZ& z, typename Estimator::StateType::NoiseDiag& noise_inv);
 #endif
 
-    void GetLidarState(States& buffer);
+    void GetLidarState(typename Estimator::StatesType& buffer);
 
     void GetMapCloud(std::vector<PointCloudType::Ptr>& cloud_buffer);
 
@@ -90,7 +75,14 @@ class Odometry
 #ifdef USE_PCL
     void PCLAddLidarData(const PointCloudT::ConstPtr& lidar_data);
 
-    [[nodiscard]] PointCloudT::Ptr PCLDeskew(const PointCloudT::ConstPtr& cloud, const State& state, const States& buffer) const;
+    /**
+     * @brief PCL 点云去畸变
+     * @param cloud 输入点云
+     * @param state 当前滤波状态（参考时刻）
+     * @param buffer 状态缓存
+     * @return 去畸变后的点云
+     */
+    [[nodiscard]] PointCloudT::Ptr PCLDeskew(const PointCloudT::ConstPtr& cloud, const typename Estimator::StateType& state, const typename Estimator::StatesType& buffer) const;
 
     void GetPCLMapCloud(std::vector<PointCloudT::Ptr>& cloud_buffer);
 #endif
@@ -104,16 +96,12 @@ class Odometry
 
     bool visual_enable_;  ///< 可视化开关
 
+    Estimator estimator_;  ///< 估计器封装
+
     std::unique_ptr<std::thread> odometry_thread_;  ///< 里程计线程
 
-#ifdef USE_VDB
-    std::unique_ptr<VDBMap> local_map_;
-#elif defined(USE_HASHMAP)
-    std::unique_ptr<VoxelHashMap> local_map_;  ///< 局部地图
-#elif defined(USE_OCTREE)
-    std::unique_ptr<thuni::Octree> local_map_;
-#elif defined(USE_VOXELMAP)
-    std::unique_ptr<VoxelMap> local_map_;
+    std::unique_ptr<LocalMap> local_map_;
+#if defined(USE_VOXELMAP)
     std::vector<Eigen::Matrix3d> var_down_body_;
 #endif
 
@@ -121,10 +109,10 @@ class Odometry
 
     std::atomic<bool> running_;  ///< 运行状态
 
-    State state_;                ///< 当前里程计状态
-    States imu_state_buffer_;    ///< imu时刻状态缓存
-    States lidar_state_buffer_;  ///< lidar时刻状态缓存
-    bool initialized_;           ///< 是否初始化
+    typename Estimator::StateType state_;                ///< 当前里程计状态
+    typename Estimator::StatesType imu_state_buffer_;    ///< imu时刻状态缓存
+    typename Estimator::StatesType lidar_state_buffer_;  ///< lidar时刻状态缓存
+    bool initialized_;                 ///< 是否初始化
 
     double imu_scale_factor_;  ///< 平均加速度
     std::mutex state_mutex_;   ///< 状态互斥锁
@@ -149,4 +137,10 @@ class Odometry
     std::vector<PointCloudT::Ptr> pcl_map_cloud_buffer_;
 #endif
 };
+}  // namespace ms_slam::slam_core
+
+// 默认使用滤波估计器的类型别名
+namespace ms_slam::slam_core
+{
+using FilterOdometry = Odometry<DefaultEstimator, DefaultLocalMap>;
 }  // namespace ms_slam::slam_core

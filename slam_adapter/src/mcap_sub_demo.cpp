@@ -411,7 +411,7 @@ public:
      * @param use_image 是否启用图像处理
      * @param exit_flag 全局退出标志
      */
-    McapPlaybackRunner(std::shared_ptr<Odometry> odom,
+    McapPlaybackRunner(std::shared_ptr<FilterOdometry> odom,
                        std::string mcap_path,
                        PlaybackOptions options,
                        double blind_dist,
@@ -577,7 +577,7 @@ private:
         spdlog::info("MCAP playback finished");
     }
 
-    std::shared_ptr<Odometry> odom_;
+    std::shared_ptr<FilterOdometry> odom_;
     std::string mcap_path_;
     PlaybackOptions options_;
     double blind_dist_{0.5};
@@ -641,7 +641,7 @@ int main(int argc, char** argv)
     playback_options.duration_s = bag_node["time_window"]["duration_seconds"].as<double>();
     const std::string input_path = bag_node["input"]["path"].as<std::string>();
 
-    auto odom = std::make_shared<Odometry>();
+    auto odom = std::make_shared<FilterOdometry>();
 
     eCAL::protobuf::CPublisher<FoxgloveCompressedImage> processed_image_pub("/camera/image_processed");
     eCAL::protobuf::CPublisher<FoxglovePoseInFrame> odom_pub("/odom");

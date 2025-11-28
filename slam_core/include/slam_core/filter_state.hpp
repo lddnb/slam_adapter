@@ -16,7 +16,7 @@ namespace ms_slam::slam_core
 {
 
 template<int kObsDim, int kResDim>
-class StateTemplate
+class FilterStateTemplate
 {
   public:
     using BundleState = manif::Bundle<
@@ -55,8 +55,8 @@ class StateTemplate
      */
     using ObservationModel = std::function<void(ObsH& H, ObsZ& z, NoiseDiag& noise_diag_inv)>;
 
-    StateTemplate();
-    ~StateTemplate() = default;
+    FilterStateTemplate();
+    ~FilterStateTemplate() = default;
 
     void Predict(const BundleInput& imu, double dt, double timestamp);
     [[nodiscard]] std::optional<Eigen::Isometry3d> Predict(double timestamp) const;
@@ -183,7 +183,6 @@ class StateTemplate
     std::vector<ObservationEntry> h_models_;
 };
 
-using State = StateTemplate<6, 1>;
-using States = std::deque<State>;
-
+using FilterState = FilterStateTemplate<6, 1>;
+using FilterStates = std::deque<FilterState>;
 }  // namespace ms_slam::slam_core
