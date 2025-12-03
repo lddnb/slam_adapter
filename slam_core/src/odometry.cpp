@@ -25,6 +25,7 @@ Odometry<Estimator>::Odometry()
     running_ = true;
     visual_enable_ = cfg.common_params.render_en;
     last_timestamp_imu_ = 0.0;
+    last_index_imu_ = 0;
     odometry_thread_ = std::make_unique<std::thread>(&Odometry::RunOdometry, this);
     spdlog::info("Odometry thread initialized");
 }
@@ -60,8 +61,12 @@ void Odometry<Estimator>::AddIMUData(const IMU& imu_data)
         spdlog::error("IMU data timestamp loop back, clear buffer");
         imu_buffer_.clear();
         last_timestamp_imu_ = 0.0;
+        last_index_imu_ = 0;
         return;
+    } else if (imu_data.index() - last_index_imu_ > 1) {
+        spdlog::warn("IMU data lost, last index {}, current index {}", last_index_imu_, imu_data.index());
     }
+    last_index_imu_ = imu_data.index();
     last_timestamp_imu_ = imu_data.timestamp();
     imu_buffer_.emplace_back(imu_data);
 }

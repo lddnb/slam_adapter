@@ -1,85 +1,85 @@
-#include "slam_common/flatbuffers_pub_sub.hpp"
-#include "slam_common/foxglove_messages.hpp"
-#include <slam_common/crash_logger.hpp>
-#include <spdlog/sinks/stdout_color_sinks.h>
+#include "slam_common/iceoryx_pub_sub.hpp"
+#include "slam_common/sensor_struct.hpp"
+#include "slam_common/crash_logger.hpp"
+
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/dup_filter_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
-#include <opencv2/opencv.hpp>
+
+#include <chrono>
+#include <memory>
+#include <thread>
 
 using namespace ms_slam::slam_common;
 
-cv::Mat image_to_opencv_mat(const foxglove::CompressedImage& img)
+/**
+ * @brief 订阅回调，打印 IMU 数据
+ * @param imu IMU 数据引用
+ */
+void OnImu(const LivoxImuData& imu)
 {
-    cv::Mat mat(1837, 1377, CV_8UC3);
-    std::memcpy(mat.data, img.data(), img.data()->size());
+    spdlog::info("IMU idx={}, ts={}, gyro=({:.3f},{:.3f},{:.3f}), acc=({:.3f},{:.3f},{:.3f})",
+                 imu.index,
+                 imu.timestamp_ns,
+                 imu.angular_velocity[0],
+                 imu.angular_velocity[1],
+                 imu.angular_velocity[2],
+                 imu.linear_acceleration[0],
+                 imu.linear_acceleration[1],
+                 imu.linear_acceleration[2]);
+}
 
-    return mat;
+/**
+ * @brief 订阅回调，打印点云基本信息
+ * @param frame 点云帧引用
+ */
+void OnLidar(const Mid360Frame& frame)
+{
+    spdlog::info("Lidar frame idx={}, ts={}, points={}", frame.index, frame.frame_timestamp_ns, frame.point_count);
+    if (frame.point_count > 0) {
+        const auto& p = frame.points[0];
+        spdlog::info("  first point: ({:.3f},{:.3f},{:.3f}) id={} tag={} ts={}",
+                     p.x,
+                     p.y,
+                     p.z,
+                     p.intensity,
+                     p.tag,
+                     p.timestamp_ns);
+    }
 }
 
 int main()
 {
-    ms_slam::slam_common::LoggerConfig config;
+    LoggerConfig config;
     config.log_file_path = "sub.log";
-    auto dup_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(10));
+    auto dup_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(2));
     dup_filter->add_sink(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
     dup_filter->add_sink(std::make_shared<spdlog::sinks::basic_file_sink_mt>(config.log_file_path, true));
-    auto logger = std::make_shared<spdlog::logger>("crash_logger", dup_filter);
+    auto logger = std::make_shared<spdlog::logger>("subscriber_logger", dup_filter);
 
     logger->set_pattern(config.log_pattern);
-    logger->set_level(spdlog::level::from_str(config.log_level));
+    logger->set_level(spdlog::level::info);
     logger->flush_on(spdlog::level::warn);
-
     spdlog::set_default_logger(logger);
 
-    spdlog::info("Starting SLAM test");
-
     if (!SLAM_CRASH_LOGGER_INIT(logger)) {
-        spdlog::error("❌ Failed to initialize crash logger!");
+        spdlog::error("Failed to initialize crash logger");
         return 1;
     }
-    spdlog::info("Crash logger initialized successfully");
 
-    // Create unique node for subscriber
-    auto node = std::make_shared<iox2::Node<iox2::ServiceType::Ipc>>(
-        iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("successful node creation"));
+    auto node = std::make_shared<IoxNode>(iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("Create node"));
 
-    std::cout << "Creating generic publishers and subscribers..." << std::endl;
+    IoxSubscriber<Mid360Frame> lidar_sub(node, "/test/lidar", OnLidar);
+    IoxSubscriber<LivoxImuData> imu_sub(node, "/test/imu", OnImu);
 
-    std::atomic<int> received_count{0};
-    auto callback = [&received_count](const FoxgloveCompressedImage& img_wrapper) {
-        received_count++;
+    // 简单轮询等待外部 publisher 推送
+    for (int i = 0; i < 20; ++i) {
+        imu_sub.ReceiveAll();
+        lidar_sub.ReceiveAll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
 
-        const foxglove::CompressedImage* img = img_wrapper.get();
-        spdlog::info("✓ [Non-threaded] Received Image #{}: format={}, {} bytes",
-                    received_count.load(), img->format()->c_str(), img->data()->size());
-        // cv::Mat mat = image_to_opencv_mat(*img);
-        std::vector<uint8_t> buffer(img->data()->begin(), img->data()->end());
-        cv::Mat mat = cv::imdecode(buffer, cv::IMREAD_COLOR);
-        spdlog::info(" mat size: {}x{}", mat.size().width, mat.size().height);
-
-        std::string filename = "received_image.jpg";
-        cv::imwrite(filename, mat);
-        spdlog::info("  Saved to {}", filename);
-    };
-
-    // FBSSubscriber<Image> img_subscriber(node, "/test/image", callback);
-
-    // std::this_thread::sleep_for(std::chrono::seconds(3));
-    // img_subscriber.receive_once();
-
-    // std::this_thread::sleep_for(std::chrono::seconds(5));
-
-    // ThreadedSubscriber
-    ThreadedFBSSubscriber<FoxgloveCompressedImage> threaded_subscriber(
-        node, "/test/image", callback);
-
-    threaded_subscriber.start();
-    spdlog::info("Starting threaded_subscriber...");
-
-    std::this_thread::sleep_for(std::chrono::seconds(10));
-
-    threaded_subscriber.stop();
-
+    spdlog::info("Subscriber finished");
     return 0;
 }

@@ -1,32 +1,27 @@
 #pragma once
 
+#include <cstdint>
+#include <cstring>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdint>
-#include <cstring>
-#include <span>
+#include <limits>
 #include <string>
 #include <string_view>
+#include <span>
+#include <type_traits>
 #include <vector>
 
-#include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
-#include <opencv2/imgcodecs.hpp>
+#include <opencv2/core/mat.hpp>
 #include <spdlog/spdlog.h>
 
-#include <foxglove/CompressedImage.pb.h>
-#include <foxglove/FrameTransforms.pb.h>
-#include <foxglove/PointCloud.pb.h>
-#include <foxglove/PoseInFrame.pb.h>
-#include <foxglove/PosesInFrame.pb.h>
-#include <foxglove/SceneUpdate.pb.h>
-
-#include <slam_common/foxglove_messages.hpp>
+#include <slam_common/sensor_struct.hpp>
+#include <slam_core/filter_state.hpp>
 #include <slam_core/image.hpp>
 #include <slam_core/point_cloud.hpp>
 #include <slam_core/point_types.hpp>
-#include <slam_core/filter_state.hpp>
 
 using State = ms_slam::slam_core::FilterState;
 using States = ms_slam::slam_core::FilterStates;
@@ -34,7 +29,7 @@ using States = ms_slam::slam_core::FilterStates;
 namespace ms_slam::slam_adapter
 {
 /**
- * @brief Foxglove 坐标变换描述
+ * @brief 坐标变换描述，供 TF 发布使用
  */
 struct FrameTransformData {
     double timestamp{0.0};                                        ///< 时间戳（秒）
@@ -47,402 +42,253 @@ struct FrameTransformData {
 namespace detail
 {
 /**
- * @brief 将秒转换为 Protobuf Timestamp
- * @param timestamp 输入的秒
- * @param target 目标时间戳
+ * @brief 将秒转换为纳秒并写入头部
+ * @param timestamp_sec 输入的秒
+ * @param header 目标头部
  */
-inline void FillTimestamp(const double timestamp, google::protobuf::Timestamp& target)
+inline void FillTimestampHeader(double timestamp_sec, slam_common::TimeFrameHeader& header)
 {
-    const auto seconds = static_cast<std::int64_t>(timestamp);
-    const auto nanos = static_cast<std::int32_t>(std::round((timestamp - static_cast<double>(seconds)) * 1e9));
-    target.set_seconds(seconds);
-    target.set_nanos(nanos);
+    header.timestamp_ns = static_cast<uint64_t>(std::llround(timestamp_sec * 1e9));
 }
 
 /**
- * @brief 填充向量字段
- * @param vec Eigen 向量
- * @param target Protobuf Vector3
+ * @brief 拷贝字符串到定长数组，自动补 '\0'
+ * @tparam N 目标数组长度
+ * @param value 输入字符串
+ * @param buffer 目标数组
  */
-inline void FillVector3(const Eigen::Vector3d& vec, foxglove::Vector3& target)
+template <std::size_t N>
+inline void CopyString(std::string_view value, std::array<char, N>& buffer)
 {
-    target.set_x(vec.x());
-    target.set_y(vec.y());
-    target.set_z(vec.z());
+    buffer.fill('\0');
+    const std::size_t copy_len = std::min<std::size_t>(value.size(), N - 1);
+    std::memcpy(buffer.data(), value.data(), copy_len);
 }
 
 /**
- * @brief 填充四元数字段
- * @param quat Eigen 四元数
- * @param target Protobuf Quaternion
+ * @brief 填充 3D 位姿到 Pose3d
+ * @param translation 平移
+ * @param rotation 旋转
+ * @param target 目标 Pose3d
  */
-inline void FillQuaternion(const Eigen::Quaterniond& quat, foxglove::Quaternion& target)
+inline void FillPose(const Eigen::Vector3d& translation, const Eigen::Quaterniond& rotation, slam_common::Pose3d& target)
 {
-    target.set_x(quat.x());
-    target.set_y(quat.y());
-    target.set_z(quat.z());
-    target.set_w(quat.w());
+    target.position = {translation.x(), translation.y(), translation.z()};
+    target.orientation = {rotation.x(), rotation.y(), rotation.z(), rotation.w()};
 }
-
-/**
- * @brief 计算位置协方差对应的椭球参数
- * @param position_cov 位置协方差
- * @param axes 输出椭球长轴
- * @param orientation 输出椭球朝向
- * @return 成功返回 true
- */
-inline bool ComputePositionCovarianceEllipsoid(const Eigen::Matrix3d& position_cov, Eigen::Vector3d& axes, Eigen::Quaterniond& orientation)
-{
-    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigen_solver(position_cov);
-    if (eigen_solver.info() != Eigen::Success) {
-        spdlog::warn("ComputePositionCovarianceEllipsoid: eigen decomposition failed");
-        return false;
-    }
-
-    constexpr double kMinEigenValue = 1e-12;
-    constexpr double kScaleSigma = 3.0;
-
-    const Eigen::Vector3d eigenvalues = eigen_solver.eigenvalues().cwiseMax(kMinEigenValue);
-    axes = eigenvalues.cwiseSqrt() * kScaleSigma;
-
-    Eigen::Matrix3d eigenvectors = eigen_solver.eigenvectors();
-    if (eigenvectors.determinant() < 0.0) {
-        eigenvectors.col(0) = -eigenvectors.col(0);
-    }
-
-    orientation = Eigen::Quaterniond(eigenvectors);
-    orientation.normalize();
-    return true;
-}
-
-/**
- * @brief 写入 float 数据
- * @param destination 目标指针
- * @param value 写入值
- */
-inline void StoreFloat(std::uint8_t* destination, const float value)
-{
-    std::memcpy(destination, std::addressof(value), sizeof(float));
-}
-
-/**
- * @brief 写入 double 数据
- * @param destination 目标指针
- * @param value 写入值
- */
-inline void StoreDouble(std::uint8_t* destination, const double value)
-{
-    std::memcpy(destination, std::addressof(value), sizeof(double));
-}
-
-/**
- * @brief 写入 uint8_t 数据
- * @param destination 目标指针
- * @param value 写入值
- */
-inline void StoreU8(std::uint8_t* destination, const std::uint8_t value)
-{
-    *destination = value;
-}
-
-/**
- * @brief 填充单位姿态
- * @param pose 目标 Pose
- */
-inline void FillIdentityPose(foxglove::Pose& pose)
-{
-    auto* position = pose.mutable_position();
-    position->set_x(0.0);
-    position->set_y(0.0);
-    position->set_z(0.0);
-
-    auto* orientation = pose.mutable_orientation();
-    orientation->set_x(0.0);
-    orientation->set_y(0.0);
-    orientation->set_z(0.0);
-    orientation->set_w(1.0);
-}
-
 }  // namespace detail
 
 /**
- * @brief 将 State 转换为 Foxglove PoseInFrame 消息
- * @param state 里程计状态
- * @param frame_id 坐标系名称
- * @param message 目标消息
+ * @brief 将单帧状态转换为 OdomData
+ * @param state 输入滤波状态
+ * @param frame_id 世界坐标系
+ * @param child_frame_id 机体坐标系
+ * @param message 输出里程计
  * @return 成功返回 true
  */
-inline bool BuildFoxglovePoseInFrame(const State& state, std::string_view frame_id, foxglove::PoseInFrame& message)
+inline bool BuildOdomData(const State& state,
+                          std::string_view frame_id,
+                          std::string_view child_frame_id,
+                          slam_common::OdomData& message)
 {
-    message.Clear();
+    detail::FillTimestampHeader(state.timestamp(), message.header);
+    detail::CopyString(frame_id, message.header.frame_id);
+    detail::CopyString(child_frame_id, message.child_frame_id);
 
-    detail::FillTimestamp(state.timestamp(), *message.mutable_timestamp());
-    message.set_frame_id(frame_id.data(), static_cast<int>(frame_id.size()));
+    detail::FillPose(state.p(), state.quat().normalized(), message.pose);
 
-    auto* pose = message.mutable_pose();
-    detail::FillVector3(state.p(), *pose->mutable_position());
-    detail::FillQuaternion(state.quat(), *pose->mutable_orientation());
+    const auto cov = state.cov();
+    const int cov_rows = static_cast<int>(cov.rows());
+    const int cov_cols = static_cast<int>(cov.cols());
+    for (int r = 0; r < 6; ++r) {
+        for (int c = 0; c < 6; ++c) {
+            const int idx = r * 6 + c;
+            if (r < cov_rows && c < cov_cols) {
+                message.pose_covariance[static_cast<std::size_t>(idx)] = cov(r, c);
+            } else {
+                message.pose_covariance[static_cast<std::size_t>(idx)] = 0.0;
+            }
+        }
+    }
+
+    const auto velocity = state.v();
+    message.linear_velocity = {velocity.x(), velocity.y(), velocity.z()};
+    message.angular_velocity = {0.0, 0.0, 0.0};  // 状态中未直接提供角速度，暂置零
+    message.twist_covariance.fill(0.0);
     return true;
 }
 
 /**
- * @brief 将状态序列转换为 Foxglove PosesInFrame 消息
+ * @brief 将状态序列转换为 PathData
  * @param states 状态序列
- * @param frame_id 坐标系名称
- * @param message 目标消息
+ * @param frame_id 坐标系 ID
+ * @param message 输出路径
  * @return 成功返回 true
  */
-inline bool BuildFoxglovePosesInFrame(const std::vector<State>& states, std::string_view frame_id, foxglove::PosesInFrame& message)
+inline bool BuildPathData(const std::vector<State>& states, std::string_view frame_id, slam_common::PathData& message)
 {
-    message.Clear();
-
     if (states.empty()) {
+        spdlog::warn("BuildPathData: empty states");
         return false;
     }
 
-    detail::FillTimestamp(states.back().timestamp(), *message.mutable_timestamp());
-    message.set_frame_id(frame_id.data(), static_cast<int>(frame_id.size()));
+    detail::FillTimestampHeader(states.back().timestamp(), message.header);
+    detail::CopyString(frame_id, message.header.frame_id);
 
-    for (const auto& state : states) {
-        auto* pose = message.add_poses();
-        detail::FillVector3(state.p(), *pose->mutable_position());
-        detail::FillQuaternion(state.quat().normalized(), *pose->mutable_orientation());
+    const std::size_t count = std::min<std::size_t>(states.size(), slam_common::kMaxPathPoses);
+    message.pose_count = static_cast<uint32_t>(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& state = states[i];
+        auto& pose = message.poses[i];
+        pose.timestamp_ns = static_cast<uint64_t>(std::llround(state.timestamp() * 1e9));
+        detail::FillPose(state.p(), state.quat().normalized(), pose.pose);
     }
-
     return true;
 }
 
 /**
- * @brief 构建 Foxglove FrameTransforms 消息
+ * @brief 构造坐标变换数组
  * @param transforms 变换列表
- * @param message 目标消息
+ * @param message 输出 TF 数组
  * @return 成功返回 true
  */
-inline bool BuildFoxgloveFrameTransforms(std::span<const FrameTransformData> transforms, foxglove::FrameTransforms& message)
+inline bool BuildFrameTransformArray(std::span<const FrameTransformData> transforms, slam_common::FrameTransformArray& message)
 {
-    message.Clear();
-
     if (transforms.empty()) {
-        spdlog::warn("BuildFoxgloveFrameTransforms: empty transform list");
+        spdlog::warn("BuildFrameTransformArray: empty input");
         return false;
     }
 
-    for (const auto& transform : transforms) {
-        auto* tf = message.add_transforms();
-        detail::FillTimestamp(transform.timestamp, *tf->mutable_timestamp());
-        tf->set_parent_frame_id(transform.parent_frame.data(), static_cast<int>(transform.parent_frame.size()));
-        tf->set_child_frame_id(transform.child_frame.data(), static_cast<int>(transform.child_frame.size()));
-        detail::FillVector3(transform.translation, *tf->mutable_translation());
-        detail::FillQuaternion(transform.rotation.normalized(), *tf->mutable_rotation());
+    const std::size_t count = std::min<std::size_t>(transforms.size(), slam_common::kMaxFrameTransforms);
+    message.transform_count = static_cast<uint32_t>(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& src = transforms[i];
+        auto& dst = message.transforms[i];
+        dst.timestamp_ns = static_cast<uint64_t>(std::llround(src.timestamp * 1e9));
+        detail::CopyString(src.parent_frame, dst.parent_frame_id);
+        detail::CopyString(src.child_frame, dst.child_frame_id);
+        detail::FillPose(src.translation, src.rotation.normalized(), dst.transform);
     }
-
     return true;
 }
 
 /**
- * @brief 基于 State 构建 Foxglove SceneUpdate 椭球消息
- * @param state 当前状态
- * @param frame_id 所属坐标系
- * @param entity_id 场景实体 ID
- * @param message 目标消息
+ * @brief 将 slam_core 图像封装为定长图像结构
+ * @tparam ImageStruct 目标图像类型
+ * @param image 输入图像
+ * @param frame_id 坐标系 ID
+ * @param encoding 编码字符串（如 bgr8）
+ * @param message 输出结构
  * @return 成功返回 true
  */
-inline bool BuildFoxgloveSceneUpdateFromState(
-    const State& state,
-    std::string_view frame_id,
-    std::string_view entity_id,
-    foxglove::SceneUpdate& message)
+template <typename ImageStruct>
+inline bool BuildImageMessage(const slam_core::Image& image,
+                              std::string_view frame_id,
+                              std::string_view encoding,
+                              ImageStruct& message)
 {
-    message.Clear();
+    static_assert(std::is_same_v<ImageStruct, slam_common::Image>, "Unsupported image struct");
 
-    Eigen::Vector3d axes{Eigen::Vector3d::Zero()};
-    Eigen::Quaterniond orientation{Eigen::Quaterniond::Identity()};
-    const Eigen::Matrix3d position_cov = state.cov().block<3, 3>(0, 0);
-    if (!detail::ComputePositionCovarianceEllipsoid(position_cov, axes, orientation)) {
+    const auto& mat = image.data();
+    if (mat.empty() || mat.channels() != 3 || mat.type() != CV_8UC3) {
+        spdlog::warn("BuildImageMessage: unsupported image format type={}, channels={}", mat.type(), mat.channels());
         return false;
     }
 
-    auto* entity = message.add_entities();
-    detail::FillTimestamp(state.timestamp(), *entity->mutable_timestamp());
-    entity->set_frame_id(frame_id.data(), static_cast<int>(frame_id.size()));
-    entity->set_id(entity_id.data(), static_cast<int>(entity_id.size()));
+    const int width = mat.cols;
+    const int height = mat.rows;
+    constexpr int kChannels = 3;
+    const std::size_t payload_size = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * kChannels;
+    if (payload_size > message.data.size()) {
+        spdlog::warn("BuildImageMessage: payload overflow, need {}, buffer {}", payload_size, message.data.size());
+        return false;
+    }
 
-    auto* sphere = entity->add_spheres();
-    auto* pose = sphere->mutable_pose();
-    detail::FillVector3(state.p(), *pose->mutable_position());
-    detail::FillQuaternion(orientation, *pose->mutable_orientation());
-    detail::FillVector3(axes * 2.0, *sphere->mutable_size());
+    message.header.timestamp_ns = static_cast<uint64_t>(std::llround(image.timestamp() * 1e9));
+    detail::CopyString(frame_id, message.header.frame_id);
+    detail::CopyString(encoding, message.header.encoding);
+    message.header.width = static_cast<uint32_t>(width);
+    message.header.height = static_cast<uint32_t>(height);
+    message.header.step = static_cast<uint32_t>(width * kChannels);
+    message.header.payload_size = static_cast<uint32_t>(payload_size);
+    message.header.compressed = false;
 
-    auto* color = sphere->mutable_color();
-    color->set_r(0.2);
-    color->set_g(0.6);
-    color->set_b(0.9);
-    color->set_a(0.35);
-
+    std::memcpy(message.data.data(), mat.data, payload_size);
     return true;
 }
 
 /**
- * @brief 将点云转换为 Foxglove PointCloud 消息
+ * @brief 将通用点云转换为 Mid360Frame（用于 map/local map 发布）
  * @tparam PointCloudT 点云类型
- * @param cloud 点云数据
- * @param frame_id 坐标系名称
- * @param message 目标消息
+ * @param cloud 输入点云
+ * @param frame_timestamp_ns 帧时间戳，若点云自带时间戳可为 0
+ * @param frame_id 坐标系 ID
+ * @param frame 输出 Mid360 帧
  * @return 成功返回 true
  */
 template <typename PointCloudT>
-inline bool BuildFoxglovePointCloud(const PointCloudT& cloud, std::string_view frame_id, foxglove::PointCloud& message)
+inline bool BuildMid360FrameFromPointCloud(const PointCloudT& cloud,
+                                           uint64_t frame_timestamp_ns,
+                                           slam_common::Mid360Frame& frame,
+                                           std::string_view frame_id = "")
 {
-    message.Clear();
-
     using Descriptor = typename PointCloudT::descriptor_type;
     static_assert(slam_core::has_field_v<slam_core::PositionTag, Descriptor>, "Point cloud descriptor must provide PositionTag");
 
     constexpr bool kHasIntensity = slam_core::has_field_v<slam_core::IntensityTag, Descriptor>;
-    constexpr bool kHasRGB = slam_core::has_field_v<slam_core::RGBTag, Descriptor>;
     constexpr bool kHasTimestamp = slam_core::has_field_v<slam_core::TimestampTag, Descriptor>;
 
-    struct FieldInfo {
-        const char* name;
-        std::uint32_t offset;
-        std::uint32_t size;
-        foxglove::PackedElementField::NumericType numeric_type;
-    };
-
-    constexpr std::size_t kFieldCount =
-        3 + static_cast<std::size_t>(kHasIntensity) + static_cast<std::size_t>(kHasRGB) * 3 + static_cast<std::size_t>(kHasTimestamp);
-
-    std::array<FieldInfo, kFieldCount> field_infos{};
-    std::uint32_t current_offset = 0;
-    std::size_t field_index = 0;
-
-    auto push_field = [&](const char* name, std::uint32_t size, foxglove::PackedElementField::NumericType type) {
-        field_infos[field_index++] = FieldInfo{.name = name, .offset = current_offset, .size = size, .numeric_type = type};
-        current_offset += size;
-    };
-
-    push_field("x", sizeof(float), foxglove::PackedElementField::FLOAT32);
-    push_field("y", sizeof(float), foxglove::PackedElementField::FLOAT32);
-    push_field("z", sizeof(float), foxglove::PackedElementField::FLOAT32);
-
-    if constexpr (kHasIntensity) {
-        push_field("intensity", sizeof(float), foxglove::PackedElementField::FLOAT32);
+    const std::size_t point_count = std::min<std::size_t>(cloud.size(), slam_common::kMid360MaxPoints);
+    if (point_count == 0) {
+        spdlog::warn("BuildMid360FrameFromPointCloud: empty cloud");
+        frame.point_count = 0;
+        detail::CopyString(frame_id, frame.frame_id);
+        return false;
     }
 
-    if constexpr (kHasRGB) {
-        push_field("red", sizeof(std::uint8_t), foxglove::PackedElementField::UINT8);
-        push_field("green", sizeof(std::uint8_t), foxglove::PackedElementField::UINT8);
-        push_field("blue", sizeof(std::uint8_t), foxglove::PackedElementField::UINT8);
-    }
-
+    uint64_t base_ts_ns = frame_timestamp_ns;
     if constexpr (kHasTimestamp) {
-        push_field("timestamp", sizeof(double), foxglove::PackedElementField::FLOAT64);
+        if (base_ts_ns == 0 && !cloud.empty()) {
+            const double ts_sec = cloud.timestamp(0);
+            if (std::isfinite(ts_sec) && ts_sec > 0.0) {
+                base_ts_ns = static_cast<uint64_t>(std::llround(ts_sec * 1e9));
+            }
+        }
     }
 
-    const std::uint32_t point_stride = current_offset;
-    const std::size_t point_count = cloud.size();
-    std::vector<std::uint8_t> data(point_count * point_stride);
+    frame.index = 0;
+    frame.frame_timestamp_ns = base_ts_ns;
+    frame.point_count = static_cast<uint32_t>(point_count);
+    detail::CopyString(frame_id, frame.frame_id);
 
-    for (std::size_t idx = 0; idx < point_count; ++idx) {
-        std::uint8_t* base = data.data() + idx * point_stride;
-        const auto position = cloud.position(idx);
-
-        detail::StoreFloat(base + field_infos[0].offset, static_cast<float>(position.x()));
-        detail::StoreFloat(base + field_infos[1].offset, static_cast<float>(position.y()));
-        detail::StoreFloat(base + field_infos[2].offset, static_cast<float>(position.z()));
-
-        std::size_t writer_index = 3;
+    for (std::size_t i = 0; i < point_count; ++i) {
+        const auto pos = cloud.position(i);
+        auto& dst = frame.points[i];
+        dst.x = static_cast<float>(pos.x());
+        dst.y = static_cast<float>(pos.y());
+        dst.z = static_cast<float>(pos.z());
 
         if constexpr (kHasIntensity) {
-            detail::StoreFloat(base + field_infos[writer_index].offset, static_cast<float>(cloud.intensity(idx)));
-            ++writer_index;
+            const float intensity = static_cast<float>(cloud.intensity(i));
+            dst.intensity = static_cast<uint8_t>(std::clamp(intensity, 0.0F, 255.0F));
+        } else {
+            dst.intensity = 0;
         }
 
-        if constexpr (kHasRGB) {
-            const auto rgb = cloud.rgb(idx);
-            detail::StoreU8(base + field_infos[writer_index + 0].offset, static_cast<std::uint8_t>(rgb(0)));
-            detail::StoreU8(base + field_infos[writer_index + 1].offset, static_cast<std::uint8_t>(rgb(1)));
-            detail::StoreU8(base + field_infos[writer_index + 2].offset, static_cast<std::uint8_t>(rgb(2)));
-            writer_index += 3;
-        }
+        dst.tag = 0;
 
         if constexpr (kHasTimestamp) {
-            detail::StoreDouble(base + field_infos[writer_index].offset, static_cast<double>(cloud.timestamp(idx)));
+            const double ts_sec = cloud.timestamp(i);
+            const double ts_ns = ts_sec * 1e9;
+            if (std::isfinite(ts_ns) && ts_ns > 0.0) {
+                dst.timestamp_ns = static_cast<uint64_t>(std::llround(ts_ns));
+            } else {
+                dst.timestamp_ns = base_ts_ns;
+            }
+        } else {
+            dst.timestamp_ns = base_ts_ns;
         }
     }
-
-    double message_time = 0.0;
-    if constexpr (kHasTimestamp) {
-        message_time = point_count > 0 ? static_cast<double>(cloud.timestamp(0)) : 0.0;
-    }
-
-    detail::FillTimestamp(message_time, *message.mutable_timestamp());
-    message.set_frame_id(frame_id.data(), static_cast<int>(frame_id.size()));
-    message.set_point_stride(point_stride);
-    message.set_data(reinterpret_cast<const char*>(data.data()), static_cast<int>(data.size()));
-
-    auto* pose = message.mutable_pose();
-    detail::FillIdentityPose(*pose);
-
-    for (const auto& field : field_infos) {
-        auto* proto_field = message.add_fields();
-        proto_field->set_name(field.name);
-        proto_field->set_offset(field.offset);
-        proto_field->set_type(field.numeric_type);
-    }
-
-    return true;
-}
-
-/**
- * @brief 将图像转换为 Foxglove CompressedImage 消息
- * @param image 图像数据
- * @param frame_id 坐标系名称
- * @param format 压缩格式（jpeg/png/webp）
- * @param quality 压缩质量
- * @param message 目标消息
- * @return 成功返回 true
- */
-inline bool BuildFoxgloveCompressedImage(
-    const slam_core::Image& image,
-    std::string_view frame_id,
-    std::string_view format,
-    int quality,
-    foxglove::CompressedImage& message)
-{
-    message.Clear();
-
-    if (image.data().empty()) {
-        spdlog::warn("BuildFoxgloveCompressedImage: empty image data");
-        return false;
-    }
-
-    const int clamped_quality = std::clamp(quality, 1, 100);
-    std::vector<int> params;
-    std::string extension = "." + std::string(format);
-
-    if (format == "jpeg" || format == "jpg") {
-        params = {cv::IMWRITE_JPEG_QUALITY, clamped_quality};
-        extension = ".jpg";
-    } else if (format == "png") {
-        params = {cv::IMWRITE_PNG_COMPRESSION, std::clamp(9 - clamped_quality / 12, 0, 9)};
-        extension = ".png";
-    } else if (format == "webp") {
-        params = {cv::IMWRITE_WEBP_QUALITY, clamped_quality};
-        extension = ".webp";
-    }
-
-    std::vector<std::uint8_t> compressed;
-    if (!cv::imencode(extension, image.data(), compressed, params)) {
-        spdlog::error("BuildFoxgloveCompressedImage: failed to encode image with format {}", format);
-        return false;
-    }
-
-    detail::FillTimestamp(image.timestamp(), *message.mutable_timestamp());
-    message.set_frame_id(frame_id.data(), static_cast<int>(frame_id.size()));
-    message.set_format(format.data(), static_cast<int>(format.size()));
-    message.set_data(reinterpret_cast<const char*>(compressed.data()), static_cast<int>(compressed.size()));
-
     return true;
 }
 

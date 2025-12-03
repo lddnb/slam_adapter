@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -14,8 +15,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <ecal/ecal.h>
-#include <ecal/msg/protobuf/subscriber.h>
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/message.h>
@@ -23,9 +22,20 @@
 #include <foxglove/channel.hpp>
 #include <foxglove/foxglove.hpp>
 #include <foxglove/server.hpp>
+#include <iox2/iceoryx2.hpp>
 #include <mcap/writer.hpp>
 #include <spdlog/spdlog.h>
-#include <slam_common/foxglove_messages.hpp>
+#include <slam_common/iceoryx_pub_sub.hpp>
+#include <slam_common/sensor_struct.hpp>
+
+#include "foxglove/CompressedImage.pb.h"
+#include "foxglove/FrameTransforms.pb.h"
+#include "foxglove/Imu.pb.h"
+#include "foxglove/PackedElementField.pb.h"
+#include "foxglove/PointCloud.pb.h"
+#include "foxglove/PoseInFrame.pb.h"
+#include "foxglove/PosesInFrame.pb.h"
+#include "foxglove/SceneUpdate.pb.h"
 
 namespace ms_slam::slam_recorder
 {
@@ -230,14 +240,6 @@ class FoxgloveWebSocketBridge
     static uint64_t GetCurrentTimestampNs();
 
     /**
-     * @brief 从 Protobuf 消息中提取时间戳
-     * @param schema Schema 名称
-     * @param message 消息体
-     * @return 纳秒时间戳（若失败返回 0）
-     */
-    uint64_t ExtractTimestampNs(const std::string& schema, const google::protobuf::Message& message) const;
-
-    /**
      * @brief 将消息时间对齐到系统时间轴
      * @param message_time_ns 消息自身时间（纳秒）
      * @return 对齐后的纳秒时间戳
@@ -281,14 +283,18 @@ class FoxgloveWebSocketBridge
     static bool SerializeMessage(const google::protobuf::Message& message, std::string& buffer);
 
     /**
-     * @brief 注册 eCAL 订阅与回调
+     * @brief 注册 iceoryx2 订阅与回调
      * @tparam MessageType 消息类型
      * @param topic_name 话题名称
      * @param schema_name Schema 名称
      * @return 创建好的订阅者
      */
     template <typename MessageType>
-    std::shared_ptr<eCAL::protobuf::CSubscriber<MessageType>> RegisterSubscriber(const std::string& topic_name, const std::string& schema_name);
+    std::shared_ptr<slam_common::IoxSubscriber<MessageType>> RegisterSubscriber(
+        const std::string& topic_name,
+        const std::string& schema_name,
+        const std::function<bool(const MessageType&, std::string&, uint64_t&)>& converter,
+        const slam_common::IoxPubSubConfig& iox_config = slam_common::IoxPubSubConfig());
 
     // 配置
     Config config_;
@@ -300,18 +306,16 @@ class FoxgloveWebSocketBridge
     std::unique_ptr<foxglove::WebSocketServer> server_;
     std::map<std::string, std::unique_ptr<foxglove::RawChannel>> channels_;
 
-    // eCAL 状态
-    bool ecal_initialized_{false};
-    bool owns_ecal_{false};
+    // iceoryx2 节点
+    std::shared_ptr<slam_common::IoxNode> iox_node_;
 
-    // Protobuf 订阅者（topic_name -> subscriber）
-    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxglovePointCloud>>> pc_subs_;
-    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveCompressedImage>>> img_subs_;
-    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveImu>>> imu_subs_;
-    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxglovePoseInFrame>>> pose_subs_;
-    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxglovePosesInFrame>>> poses_subs_;
-    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveFrameTransforms>>> frame_tf_subs_;
-    std::unordered_map<std::string, std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveSceneUpdate>>> frame_marker_subs_;
+    // iceoryx2 订阅者（topic_name -> subscriber）
+    std::unordered_map<std::string, std::shared_ptr<slam_common::IoxSubscriber<slam_common::Mid360Frame>>> pc_subs_;
+    std::unordered_map<std::string, std::shared_ptr<slam_common::IoxSubscriber<slam_common::Image>>> img_subs_;
+    std::unordered_map<std::string, std::shared_ptr<slam_common::IoxSubscriber<slam_common::LivoxImuData>>> imu_subs_;
+    std::unordered_map<std::string, std::shared_ptr<slam_common::IoxSubscriber<slam_common::OdomData>>> pose_subs_;
+    std::unordered_map<std::string, std::shared_ptr<slam_common::IoxSubscriber<slam_common::PathData>>> poses_subs_;
+    std::unordered_map<std::string, std::shared_ptr<slam_common::IoxSubscriber<slam_common::FrameTransformArray>>> frame_tf_subs_;
 
     struct PendingPacket {
         std::string data;

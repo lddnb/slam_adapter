@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <string>
@@ -12,7 +13,9 @@
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgcodecs.hpp>
 
-#include <slam_common/foxglove_messages.hpp>
+#include <spdlog/spdlog.h>
+
+#include <slam_common/sensor_struct.hpp>
 #include <slam_core/image.hpp>
 #include <slam_core/imu.hpp>
 #include <slam_core/point_cloud.hpp>
@@ -23,238 +26,135 @@
 
 namespace ms_slam::slam_adapter
 {
-inline bool ConvertHesaiPointCloudMessage(
-    const foxglove::PointCloud& message,
-    const std::shared_ptr<slam_core::PointCloud<slam_core::PointXYZITDescriptor>>& cloud)
+namespace
 {
-    if (!cloud) {
-        return false;
-    }
+/// @brief 纳秒转秒的转换系数
+inline constexpr double kNsToSeconds = 1e-9;
 
-    const std::string& data_buffer = message.data();
-    const std::uint32_t stride = message.point_stride();
-    if (data_buffer.empty() || stride == 0) {
-        cloud->clear();
-        return false;
-    }
-
-    constexpr std::uint32_t x_offset = 0;
-    constexpr std::uint32_t y_offset = 4;
-    constexpr std::uint32_t z_offset = 8;
-    constexpr std::uint32_t intensity_offset = 12;
-    constexpr std::uint32_t timestamp_offset = 18;
-
-    if (stride < timestamp_offset + sizeof(double)) {
-        cloud->clear();
-        return false;
-    }
-
-    const std::size_t data_size = data_buffer.size();
-    if (data_size % stride != 0) {
-        cloud->clear();
-        return false;
-    }
-
-    const std::size_t num_points = data_size / stride;
-    cloud->clear();
-    cloud->reserve(num_points);
-
-    const auto* buffer_ptr = reinterpret_cast<const std::uint8_t*>(data_buffer.data());
-    for (std::size_t i = 0; i < num_points; ++i) {
-        const auto* data = buffer_ptr + i * stride;
-
-        const float x = *reinterpret_cast<const float*>(data + x_offset);
-        const float y = *reinterpret_cast<const float*>(data + y_offset);
-        const float z = *reinterpret_cast<const float*>(data + z_offset);
-        const float intensity = *reinterpret_cast<const float*>(data + intensity_offset);
-        const double timestamp = *reinterpret_cast<const double*>(data + timestamp_offset);
-
-        cloud->push_back(slam_core::PointXYZIT(x, y, z, intensity, timestamp));
-    }
-
-    return true;
+/**
+ * @brief 将纳秒时间戳转换为秒
+ * @param timestamp_ns 输入的纳秒时间戳
+ * @return 秒
+ */
+inline double ToSeconds(uint64_t timestamp_ns) noexcept
+{
+    return static_cast<double>(timestamp_ns) * kNsToSeconds;
 }
 
-inline bool ConvertLivoxPointCloudMessage(
-    const foxglove::PointCloud& message,
-    const std::shared_ptr<slam_core::PointCloud<slam_core::PointXYZITDescriptor>>& cloud,
-    const double blind_dist = 0.5)
+/// @brief 记录上一帧末尾点的时间戳（秒），保证跨帧时间单调
+inline double g_last_tail_timestamp = -std::numeric_limits<double>::infinity();
+}  // namespace
+
+/**
+ * @brief 将 Mid360 点云帧转换为 slam_core 点云
+ * @param frame 输入的 Mid360 点云帧
+ * @param cloud 目标点云容器
+ * @param blind_dist 盲区半径（米）
+ * @return 转换成功返回 true
+ */
+inline bool ConvertMid360Frame(const slam_common::Mid360Frame& frame,
+                               const std::shared_ptr<slam_core::PointCloud<slam_core::PointXYZITDescriptor>>& cloud,
+                               double blind_dist = 0.5)
 {
-    static double last_tail_timestamp = -std::numeric_limits<double>::infinity();  ///< 上一帧最后一个点时间
     if (!cloud) {
+        spdlog::warn("ConvertMid360Frame: cloud pointer is null");
         return false;
     }
 
-    const std::string& data_buffer = message.data();
-    const std::uint32_t stride = message.point_stride();
-    if (data_buffer.empty() || stride == 0 || !message.has_timestamp()) {
+    const uint32_t count = std::min<uint32_t>(frame.point_count, slam_common::kMid360MaxPoints);
+    if (count == 0) {
         cloud->clear();
         return false;
     }
 
-    constexpr std::uint32_t x_offset = 0;
-    constexpr std::uint32_t y_offset = 4;
-    constexpr std::uint32_t z_offset = 8;
-    constexpr std::uint32_t reflectivity_offset = 12;
-    constexpr std::uint32_t tag_offset = 13;
-    constexpr std::uint32_t line_offset = 14;
-    constexpr std::uint32_t timestamp_offset = 16;
-
-    if (stride < timestamp_offset + sizeof(uint32_t)) {
-        cloud->clear();
-        return false;
-    }
-
-    const std::size_t data_size = data_buffer.size();
-    if (data_size % stride != 0) {
-        cloud->clear();
-        return false;
-    }
-
-    const std::size_t num_points = data_size / stride;
+    const double blind_sq = blind_dist * blind_dist;
     cloud->clear();
-    cloud->reserve(num_points);
+    cloud->reserve(count);
 
-    const auto& stamp = message.timestamp();
-    const double timestamp = static_cast<double>(stamp.seconds()) + static_cast<double>(stamp.nanos()) * 1e-9;
-    const double prev_tail = last_tail_timestamp;
+    const double prev_tail = g_last_tail_timestamp;
     double current_tail = -std::numeric_limits<double>::infinity();
-    const auto* buffer_ptr = reinterpret_cast<const std::uint8_t*>(data_buffer.data());
-    for (std::size_t i = 0; i < num_points; ++i) {
-        const auto* data = buffer_ptr + i * stride;
 
-        const float x = *reinterpret_cast<const float*>(data + x_offset);
-        const float y = *reinterpret_cast<const float*>(data + y_offset);
-        const float z = *reinterpret_cast<const float*>(data + z_offset);
-        const float intensity = static_cast<float>(*reinterpret_cast<const uint8_t*>(data + reflectivity_offset));
-        const uint8_t tag = *reinterpret_cast<const uint8_t*>(data + tag_offset);
-        const uint8_t line = *reinterpret_cast<const uint8_t*>(data + line_offset);
-        const double offset_time = static_cast<double>(*reinterpret_cast<const uint32_t*>(data + timestamp_offset)) / 1e9;
-        const double point_ts = timestamp + offset_time;
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& p = frame.points[i];
+        const double norm_sq = static_cast<double>(p.x) * static_cast<double>(p.x) + static_cast<double>(p.y) * static_cast<double>(p.y) +
+                               static_cast<double>(p.z) * static_cast<double>(p.z);
+        const double timestamp = ToSeconds(p.timestamp_ns);
 
-        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) || !std::isfinite(intensity) ||
-            (x * x + y * y + z * z < blind_dist * blind_dist) || (point_ts < prev_tail)) {
+        // 过滤掉盲区点及时间戳回退的点，确保下一帧的点时间始终大于上一帧尾部
+        if (!std::isfinite(norm_sq) || norm_sq < blind_sq || timestamp <= prev_tail) {
             continue;
         }
 
-        current_tail = std::max(current_tail, point_ts);
-        cloud->push_back(slam_core::PointXYZIT(x, y, z, intensity, point_ts));
+        current_tail = std::max(current_tail, timestamp);
+        cloud->push_back(slam_core::PointXYZIT(p.x, p.y, p.z, static_cast<float>(p.intensity), timestamp));
     }
+
     cloud->sort();
     if (!cloud->empty()) {
-        last_tail_timestamp = current_tail;
+        g_last_tail_timestamp = current_tail;
+        return true;
     }
+    return false;
+}
 
+/**
+ * @brief 将 Livox IMU 数据转换为 slam_core IMU
+ * @param imu_in 输入的 LivoxImuData
+ * @param imu_out 输出的 slam_core::IMU
+ * @return 转换成功返回 true
+ */
+inline bool ConvertLivoxImuData(const slam_common::LivoxImuData& imu_in, slam_core::IMU& imu_out)
+{
+    Eigen::Vector3d gyro(imu_in.angular_velocity[0], imu_in.angular_velocity[1], imu_in.angular_velocity[2]);
+    Eigen::Vector3d accel(imu_in.linear_acceleration[0], imu_in.linear_acceleration[1], imu_in.linear_acceleration[2]);
+
+    const double timestamp = ToSeconds(imu_in.timestamp_ns);
+    if (!std::isfinite(timestamp)) {
+        spdlog::warn("ConvertLivoxImuData: invalid timestamp {}", imu_in.timestamp_ns);
+        return false;
+    }
+    const uint64_t index = imu_in.index;
+
+    imu_out = slam_core::IMU(gyro, accel, timestamp, index);
     return true;
 }
 
-#ifdef USE_PCL
-struct LivoxPointRaw {
-    float x;
-    float y;
-    float z;
-    uint8_t reflectivity;
-    uint8_t tag;
-    uint8_t line;
-    uint8_t padding;
-    uint32_t offset_time;
-} __attribute__((packed));
-static_assert(sizeof(LivoxPointRaw) == 20, "Unexpected Livox point size");
-
-inline bool ConvertLivoxPointCloudMessagePCL(const foxglove::PointCloud& msg, PointCloudT& cloud)
+/**
+ * @brief 解码定长图像消息为 slam_core 图像
+ * @tparam ImageStruct 支持的图像结构
+ * @param message 输入的定长图像
+ * @param image_out 输出的 slam_core::Image
+ * @return 解码成功返回 true
+ */
+inline bool DecodeImageMessage(const slam_common::Image& message, slam_core::Image& image_out)
 {
-    const std::string& data = msg.data();
-    const uint32_t stride = msg.point_stride();
-    if (data.empty() || stride == 0 || !msg.has_timestamp()) {
-        return false;
-    }
-
-    const std::size_t point_count = data.size() / stride;
-    cloud.clear();
-    cloud.reserve(point_count);
-    cloud.header.frame_id = msg.frame_id();
-    cloud.width = static_cast<uint32_t>(point_count);
-    cloud.height = 1;
-    cloud.is_dense = false;
-
-    const auto* raw_ptr = reinterpret_cast<const std::uint8_t*>(data.data());
-    const double timestamp = static_cast<double>(msg.timestamp().seconds()) + static_cast<double>(msg.timestamp().nanos()) * 1e-9;
-    for (std::size_t i = 0; i < point_count; ++i) {
-        LivoxPointRaw point{};
-        std::memcpy(&point, raw_ptr + i * stride, sizeof(LivoxPointRaw));
-        PointT pt{};
-        pt.x = point.x;
-        pt.y = point.y;
-        pt.z = point.z;
-        pt.intensity = static_cast<float>(point.reflectivity);
-        pt.timestamp = timestamp + static_cast<double>(point.offset_time) * 1e-9;
-
-        cloud.push_back(pt);
-    }
-
-    cloud.width = static_cast<uint32_t>(cloud.size());
-    cloud.height = 1;
-
-    std::vector<int> indices;
-    pcl::removeNaNFromPointCloud(cloud, cloud, indices);
-
-    if (!cloud.points.empty()) {
-        auto minmax = std::minmax_element(cloud.points.begin(), cloud.points.end(), [](const PointT& p1, const PointT& p2) {
-            return p1.timestamp > p2.timestamp;
-        });
-        if (minmax.first != cloud.points.begin()) {
-            std::iter_swap(minmax.first, cloud.points.begin());
-        }
-        if (minmax.second != cloud.points.end() - 1) {
-            std::iter_swap(minmax.second, cloud.points.end() - 1);
-        }
-    }
-
-    return !cloud.points.empty();
-}
-#endif
-
-inline bool DecodeCompressedImageMessage(const foxglove::CompressedImage& message, slam_core::Image& image_out)
-{
-    const std::string& raw = message.data();
-    if (raw.empty() || !message.has_timestamp()) {
+    const auto& header = message.header;
+    if (header.compressed) {
+        spdlog::warn("DecodeImageMessage: compressed flag is true, skipping");
         image_out = slam_core::Image();
         return false;
     }
 
-    const double timestamp = static_cast<double>(message.timestamp().seconds()) + static_cast<double>(message.timestamp().nanos()) * 1e-9;
-
-    std::vector<std::uint8_t> buffer(raw.begin(), raw.end());
-    const auto decoded_mat = cv::imdecode(buffer, cv::IMREAD_COLOR);
-    if (decoded_mat.empty()) {
+    const int width = static_cast<int>(header.width);
+    const int height = static_cast<int>(header.height);
+    if (width <= 0 || height <= 0) {
+        spdlog::warn("DecodeImageMessage: invalid image size {}x{}", width, height);
         image_out = slam_core::Image();
         return false;
     }
 
-    image_out = slam_core::Image(decoded_mat, timestamp);
-    return true;
-}
-
-inline bool ConvertImuMessage(const foxglove::Imu& message, slam_core::IMU& imu_out, const bool g_unit = true)
-{
-    if (!message.has_angular_velocity() || !message.has_linear_acceleration() || !message.has_timestamp()) {
-        imu_out = slam_core::IMU();
+    const std::size_t expected_size = static_cast<std::size_t>(header.step) * static_cast<std::size_t>(height);
+    if (expected_size == 0 || expected_size > message.data.size()) {
+        spdlog::warn("DecodeImageMessage: payload size mismatch, expected {}, buffer {}", expected_size, message.data.size());
+        image_out = slam_core::Image();
         return false;
     }
 
-    const double timestamp = static_cast<double>(message.timestamp().seconds()) + static_cast<double>(message.timestamp().nanos()) * 1e-9;
+    // 仅支持 3 通道 8bit 图像，其他编码暂不处理
+    cv::Mat mat(height, width, CV_8UC3);
+    std::memcpy(mat.data, message.data.data(), expected_size);
 
-    Eigen::Vector3d angular_velocity_vec(message.angular_velocity().x(), message.angular_velocity().y(), message.angular_velocity().z());
-    Eigen::Vector3d linear_acceleration_vec(0.0, 0.0, 0.0);
-    if (g_unit) {
-        linear_acceleration_vec =
-            Eigen::Vector3d(message.linear_acceleration().x(), message.linear_acceleration().y(), message.linear_acceleration().z());
-    } else {
-        linear_acceleration_vec =
-            Eigen::Vector3d(message.linear_acceleration().x(), message.linear_acceleration().y(), message.linear_acceleration().z());
-    }
-
-    imu_out = slam_core::IMU(angular_velocity_vec, linear_acceleration_vec, timestamp);
+    image_out = slam_core::Image(mat, ToSeconds(header.timestamp_ns));
     return true;
 }
 }  // namespace ms_slam::slam_adapter

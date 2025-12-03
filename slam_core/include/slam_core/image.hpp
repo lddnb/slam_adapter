@@ -17,9 +17,11 @@ class Image
     [[nodiscard]] cv::Mat& data() noexcept { return data_; }
     [[nodiscard]] const cv::Mat& data() const noexcept { return data_; }
     [[nodiscard]] double timestamp() const noexcept { return timestamp_; }
+    [[nodiscard]] std::uint64_t index() const noexcept { return index_; }
 
   private:
     cv::Mat data_;
     double timestamp_;
+    std::uint64_t index_;
 };
 }  // namespace ms_slam::slam_core

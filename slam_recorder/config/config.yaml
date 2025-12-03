@@ -64,45 +64,30 @@ BagTool:
     start_seconds: 0.0
     duration_seconds: 0.0
 
-  record:
-    enable: false
-    output_dir: /home/ubuntu/slam_adapter/slam_recorder/output
-    filename_prefix: recording
-    compression: zstd
-    chunk_size: 1048576
-    overwrite_existing: true
-
   topics:
     default_playback_enabled: true
-    default_record_enabled: true
     entries:
       - name: /livox/lidar
         schema: livox_ros_driver2/CustomMsg
         playback_enabled: true
-        record_enabled: true
         publish_service: /livox/lidar
       - name: /camera/image_raw/compressed
         schema: sensor_msgs/CompressedImage
         playback_enabled: true
-        record_enabled: true
         publish_service: /camera/image_raw
       - name: /livox/imu
         schema: sensor_msgs/Imu
         playback_enabled: true
-        record_enabled: true
         publish_service: /livox/imu
       - name: /path
         schema: nav_msgs/Path
         playback_enabled: true
-        record_enabled: true
         publish_service: /path
       - name: /Odometry
         schema: nav_msgs/Odometry
         playback_enabled: true
-        record_enabled: true
         publish_service: /odom
       - name: /tf
         schema: tf2_msgs/TFMessage
         playback_enabled: true
-        record_enabled: true
         publish_service: /tf

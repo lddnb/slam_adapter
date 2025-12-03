@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -14,23 +15,23 @@
 
 #include <easy/arbitrary_value.h>
 #include <easy/profiler.h>
-#include <ecal/ecal.h>
-#include <ecal/msg/protobuf/publisher.h>
 #include <mcap/reader.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/dup_filter_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 #include <spdlog/stopwatch.h>
-
 #include <slam_common/crash_logger.hpp>
-#include <slam_common/foxglove_messages.hpp>
+#include <slam_common/iceoryx_pub_sub.hpp>
+#include <slam_common/sensor_struct.hpp>
+#include <slam_recorder/ros1_msg.hpp>
 #include <slam_core/odometry.hpp>
+#include <yaml-cpp/yaml.h>
 
 #include "slam_adapter/config_loader.hpp"
 #include "slam_adapter/sensor_preprocess.hpp"
 #include "slam_adapter/sensor_publish.hpp"
-#include "slam_recorder/ros1_msg.hpp"
 
 using namespace ms_slam::slam_common;
 using namespace ms_slam::slam_core;
@@ -55,16 +56,14 @@ void HandleSignal(int signal)
 /**
  * @brief MCAP 消息类别
  */
-enum class MessageKind { PointCloud, CompressedImage, Imu, Unsupported };
+enum class MessageKind { PointCloud, CompressedImage, Image, Imu, Unsupported };
 
 /**
  * @brief 消息特征描述
  */
 struct MessageDescriptor {
     MessageKind kind{MessageKind::Unsupported};  ///< 消息类型
-    bool is_ros{false};                          ///< 是否为ROS消息
-    bool is_protobuf{false};                     ///< 是否为Protobuf消息
-    bool is_livox{false};                        ///< 是否为Livox自定义消息
+    bool is_livox{false};                        ///< 是否为 Livox 自定义点云
 };
 
 /**
@@ -76,48 +75,27 @@ MessageDescriptor DescribeMessage(const mcap::MessageView& view)
 {
     MessageDescriptor descriptor;
     const std::string schema_name = view.schema ? view.schema->name : "";
-    const std::string encoding = view.channel ? view.channel->messageEncoding : "";
-
-    auto mark_ros = [&](MessageKind kind) {
-        descriptor.kind = kind;
-        descriptor.is_ros = true;
-    };
 
     if (schema_name == "sensor_msgs/PointCloud2") {
-        mark_ros(MessageKind::PointCloud);
+        descriptor.kind = MessageKind::PointCloud;
         return descriptor;
     }
     if (schema_name == "sensor_msgs/CompressedImage") {
-        mark_ros(MessageKind::CompressedImage);
+        descriptor.kind = MessageKind::CompressedImage;
+        return descriptor;
+    }
+    if (schema_name == "sensor_msgs/Image") {
+        descriptor.kind = MessageKind::Image;
         return descriptor;
     }
     if (schema_name == "sensor_msgs/Imu") {
-        mark_ros(MessageKind::Imu);
+        descriptor.kind = MessageKind::Imu;
         return descriptor;
     }
     if (schema_name == "livox_ros_driver2/CustomMsg" || schema_name == "livox_ros_driver/CustomMsg") {
         descriptor.kind = MessageKind::PointCloud;
-        descriptor.is_ros = true;
         descriptor.is_livox = true;
         return descriptor;
-    }
-
-    if (encoding == "protobuf") {
-        if (schema_name == "foxglove.PointCloud") {
-            descriptor.kind = MessageKind::PointCloud;
-            descriptor.is_protobuf = true;
-            return descriptor;
-        }
-        if (schema_name == "foxglove.CompressedImage") {
-            descriptor.kind = MessageKind::CompressedImage;
-            descriptor.is_protobuf = true;
-            return descriptor;
-        }
-        if (schema_name == "foxglove.Imu") {
-            descriptor.kind = MessageKind::Imu;
-            descriptor.is_protobuf = true;
-            return descriptor;
-        }
     }
 
     descriptor.kind = MessageKind::Unsupported;
@@ -125,94 +103,12 @@ MessageDescriptor DescribeMessage(const mcap::MessageView& view)
 }
 
 /**
- * @brief 将 ROS PointField 类型映射到 Foxglove 数值枚举
- * @param datatype ROS 数据类型编码
- * @return 对应的枚举值
- */
-foxglove::PackedElementField_NumericType ToNumericType(uint8_t datatype)
-{
-    switch (datatype) {
-        case 1:
-            return foxglove::PackedElementField_NumericType_UINT8;
-        case 2:
-            return foxglove::PackedElementField_NumericType_UINT16;
-        case 3:
-            return foxglove::PackedElementField_NumericType_UINT32;
-        case 4:
-            return foxglove::PackedElementField_NumericType_INT8;
-        case 5:
-            return foxglove::PackedElementField_NumericType_INT16;
-        case 6:
-            return foxglove::PackedElementField_NumericType_INT32;
-        case 7:
-            return foxglove::PackedElementField_NumericType_FLOAT32;
-        case 8:
-            return foxglove::PackedElementField_NumericType_FLOAT64;
-        default:
-            return foxglove::PackedElementField_NumericType_FLOAT32;
-    }
-}
-
-/**
- * @brief 填充 Protobuf 时间戳
- * @param seconds 秒
- * @param nanoseconds 纳秒
- * @param target 目标时间戳
- */
-void FillTimestamp(uint32_t seconds, uint32_t nanoseconds, google::protobuf::Timestamp& target)
-{
-    target.set_seconds(static_cast<std::int64_t>(seconds));
-    target.set_nanos(static_cast<std::int32_t>(nanoseconds));
-}
-
-/**
- * @brief 将位姿重置为单位姿态
- * @param pose 目标位姿
- */
-void FillIdentityPose(foxglove::Pose& pose)
-{
-    auto* position = pose.mutable_position();
-    position->set_x(0.0);
-    position->set_y(0.0);
-    position->set_z(0.0);
-
-    auto* orientation = pose.mutable_orientation();
-    orientation->set_x(0.0);
-    orientation->set_y(0.0);
-    orientation->set_z(0.0);
-    orientation->set_w(1.0);
-}
-
-/**
- * @brief 解析 MCAP 中的 Protobuf 消息
- * @tparam MessageType 目标消息类型
+ * @brief 将 Livox 自定义点云转为 Mid360Frame
  * @param view MCAP 消息视图
- * @param message 输出 Protobuf 对象
- * @return 解析成功返回 true
- */
-template <typename MessageType>
-bool ParseProtobufMessage(const mcap::MessageView& view, MessageType& message)
-{
-    message.Clear();
-    if (view.message.dataSize > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
-        spdlog::error("Protobuf message too large to parse: {} bytes", view.message.dataSize);
-        return false;
-    }
-    if (!message.ParseFromArray(view.message.data, static_cast<int>(view.message.dataSize))) {
-        const std::string topic = view.channel ? view.channel->topic : "<unknown>";
-        spdlog::error("Failed to parse protobuf message on topic {}", topic);
-        return false;
-    }
-    return true;
-}
-
-/**
- * @brief 将 Livox 点云转换为 Foxglove Protobuf
- * @param view MCAP 消息视图
- * @param message 目标点云消息
+ * @param frame 输出点云帧
  * @return 转换成功返回 true
  */
-bool ConvertLivoxPointCloud(const mcap::MessageView& view, FoxglovePointCloud& message)
+bool ConvertLivoxPointCloud(const mcap::MessageView& view, Mid360Frame& frame)
 {
     ROS1LivoxCustomMsg livox_msg;
     if (!livox_msg.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
@@ -221,123 +117,54 @@ bool ConvertLivoxPointCloud(const mcap::MessageView& view, FoxglovePointCloud& m
         return false;
     }
 
-    constexpr uint32_t kPointStride = 20;
-    std::vector<uint8_t> data;
-    data.reserve(livox_msg.points.size() * kPointStride);
+    frame.index = livox_msg.header.seq;
+    frame.frame_timestamp_ns = static_cast<uint64_t>(livox_msg.header.stamp_sec) * 1000000000ULL + livox_msg.header.stamp_nsec;
+    frame.frame_id.fill('\0');
+    std::memcpy(frame.frame_id.data(), livox_msg.header.frame_id.data(),
+                std::min(livox_msg.header.frame_id.size(), frame.frame_id.size() - 1));
+    const uint32_t count = std::min<uint32_t>(livox_msg.point_num, kMid360MaxPoints);
+    frame.point_count = count;
 
-    auto append_scalar = [&data](auto value) {
-        const uint8_t* ptr = reinterpret_cast<const uint8_t*>(&value);
-        data.insert(data.end(), ptr, ptr + sizeof(value));
-    };
-
-    for (const auto& point : livox_msg.points) {
-        append_scalar(point.x);
-        append_scalar(point.y);
-        append_scalar(point.z);
-        data.push_back(point.reflectivity);
-        data.push_back(point.tag);
-        data.push_back(point.line);
-        data.push_back(0);
-        append_scalar(point.offset_time);
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& src = livox_msg.points[i];
+        auto& dst = frame.points[i];
+        dst.x = src.x;
+        dst.y = src.y;
+        dst.z = src.z;
+        dst.intensity = src.reflectivity;
+        dst.tag = src.tag;
+        dst.timestamp_ns = frame.frame_timestamp_ns + static_cast<uint64_t>(src.offset_time);
     }
-
-    message.Clear();
-    FillTimestamp(livox_msg.header.stamp_sec, livox_msg.header.stamp_nsec, *message.mutable_timestamp());
-    message.set_frame_id(livox_msg.header.frame_id);
-    FillIdentityPose(*message.mutable_pose());
-    message.set_point_stride(kPointStride);
-
-    message.mutable_fields()->Reserve(7);
-    auto* x_field = message.add_fields();
-    x_field->set_name("x");
-    x_field->set_offset(0);
-    x_field->set_type(foxglove::PackedElementField_NumericType_FLOAT32);
-
-    auto* y_field = message.add_fields();
-    y_field->set_name("y");
-    y_field->set_offset(4);
-    y_field->set_type(foxglove::PackedElementField_NumericType_FLOAT32);
-
-    auto* z_field = message.add_fields();
-    z_field->set_name("z");
-    z_field->set_offset(8);
-    z_field->set_type(foxglove::PackedElementField_NumericType_FLOAT32);
-
-    auto* reflectivity_field = message.add_fields();
-    reflectivity_field->set_name("reflectivity");
-    reflectivity_field->set_offset(12);
-    reflectivity_field->set_type(foxglove::PackedElementField_NumericType_UINT8);
-
-    auto* tag_field = message.add_fields();
-    tag_field->set_name("tag");
-    tag_field->set_offset(13);
-    tag_field->set_type(foxglove::PackedElementField_NumericType_UINT8);
-
-    auto* line_field = message.add_fields();
-    line_field->set_name("line");
-    line_field->set_offset(14);
-    line_field->set_type(foxglove::PackedElementField_NumericType_UINT8);
-
-    auto* offset_time_field = message.add_fields();
-    offset_time_field->set_name("offset_time");
-    offset_time_field->set_offset(16);
-    offset_time_field->set_type(foxglove::PackedElementField_NumericType_UINT32);
-
-    message.set_data(reinterpret_cast<const char*>(data.data()), data.size());
     return true;
 }
 
 /**
- * @brief 转换 ROS PointCloud2 或直接解析 Protobuf 点云
+ * @brief 解析点云消息，目前仅支持 Livox 自定义格式
  * @param view MCAP 消息视图
  * @param descriptor 消息描述
- * @param message 目标点云消息
- * @return 转换成功返回 true
+ * @param frame 输出点云帧
+ * @return 成功返回 true
  */
-bool ConvertPointCloud(const mcap::MessageView& view, const MessageDescriptor& descriptor, FoxglovePointCloud& message)
+bool ConvertPointCloud(const mcap::MessageView& view, const MessageDescriptor& descriptor, Mid360Frame& frame)
 {
-    if (descriptor.is_protobuf) {
-        return ParseProtobufMessage(view, message);
-    }
-    if (descriptor.is_livox) {
-        return ConvertLivoxPointCloud(view, message);
-    }
-
-    ROS1PointCloud2 pc2;
-    if (!pc2.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
-        const std::string topic = view.channel ? view.channel->topic : "<unknown>";
-        spdlog::error("Failed to parse sensor_msgs/PointCloud2 at topic {}", topic);
+    if (!descriptor.is_livox) {
+        spdlog::warn("ConvertPointCloud: unsupported schema {}", view.schema ? view.schema->name : "<none>");
         return false;
     }
-
-    message.Clear();
-    FillTimestamp(pc2.header.stamp_sec, pc2.header.stamp_nsec, *message.mutable_timestamp());
-    message.set_frame_id(pc2.header.frame_id);
-    FillIdentityPose(*message.mutable_pose());
-    message.set_point_stride(pc2.point_step);
-
-    for (const auto& field : pc2.fields) {
-        auto* field_out = message.add_fields();
-        field_out->set_name(field.name);
-        field_out->set_offset(field.offset);
-        field_out->set_type(ToNumericType(field.datatype));
-    }
-
-    message.set_data(reinterpret_cast<const char*>(pc2.data.data()), pc2.data.size());
-    return true;
+    return ConvertLivoxPointCloud(view, frame);
 }
 
 /**
- * @brief 解析压缩图像消息
+ * @brief 解析压缩图像并转换为定长图像结构
  * @param view MCAP 消息视图
  * @param descriptor 消息描述
- * @param message 目标压缩图像
- * @return 解析成功返回 true
+ * @param image_msg 输出图像
+ * @return 成功返回 true
  */
-bool ConvertImage(const mcap::MessageView& view, const MessageDescriptor& descriptor, FoxgloveCompressedImage& message)
+bool ConvertCompressedImage(const mcap::MessageView& view, const MessageDescriptor& descriptor, ms_slam::slam_common::Image& image_msg)
 {
-    if (descriptor.is_protobuf) {
-        return ParseProtobufMessage(view, message);
+    if (descriptor.kind != MessageKind::CompressedImage) {
+        return false;
     }
 
     ROS1CompressedImage ros_img;
@@ -347,25 +174,113 @@ bool ConvertImage(const mcap::MessageView& view, const MessageDescriptor& descri
         return false;
     }
 
-    message.Clear();
-    FillTimestamp(ros_img.header.stamp_sec, ros_img.header.stamp_nsec, *message.mutable_timestamp());
-    message.set_frame_id(ros_img.header.frame_id);
-    message.set_format(ros_img.format);
-    message.set_data(reinterpret_cast<const char*>(ros_img.data.data()), ros_img.data.size());
+    std::vector<std::uint8_t> buffer(ros_img.data.begin(), ros_img.data.end());
+    const auto decoded_mat = cv::imdecode(buffer, cv::IMREAD_COLOR);
+    if (decoded_mat.empty()) {
+        spdlog::warn("ConvertCompressedImage: failed to decode compressed image");
+        return false;
+    }
+
+    if (decoded_mat.type() != CV_8UC3 || decoded_mat.channels() != 3) {
+        spdlog::warn("ConvertCompressedImage: unsupported image format type={}, channels={}", decoded_mat.type(), decoded_mat.channels());
+        return false;
+    }
+
+    const int width = decoded_mat.cols;
+    const int height = decoded_mat.rows;
+    constexpr int kChannels = 3;
+    const std::size_t payload_size = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * kChannels;
+    if (payload_size > image_msg.data.size()) {
+        spdlog::warn("ConvertCompressedImage: payload overflow, need {}, buffer {}", payload_size, image_msg.data.size());
+        return false;
+    }
+
+    image_msg.header.timestamp_ns =
+        static_cast<uint64_t>(ros_img.header.stamp_sec) * 1000000000ULL + static_cast<uint64_t>(ros_img.header.stamp_nsec);
+    image_msg.header.frame_id.fill('\0');
+    std::memcpy(image_msg.header.frame_id.data(), ros_img.header.frame_id.data(),
+                std::min(ros_img.header.frame_id.size(), image_msg.header.frame_id.size() - 1));
+    image_msg.header.encoding.fill('\0');
+    constexpr std::string_view kEncoding = "bgr8";
+    std::memcpy(image_msg.header.encoding.data(), kEncoding.data(), kEncoding.size());
+    image_msg.header.width = static_cast<uint32_t>(width);
+    image_msg.header.height = static_cast<uint32_t>(height);
+    image_msg.header.step = static_cast<uint32_t>(width * kChannels);
+    image_msg.header.payload_size = static_cast<uint32_t>(payload_size);
+    image_msg.header.compressed = false;
+
+    std::memcpy(image_msg.data.data(), decoded_mat.data, payload_size);
     return true;
 }
 
 /**
- * @brief 解析 IMU 消息
+ * @brief 解析原始图像并转换为定长图像结构（目前支持 bgr8）
  * @param view MCAP 消息视图
  * @param descriptor 消息描述
- * @param message 目标 IMU
- * @return 解析成功返回 true
+ * @param image_msg 输出图像
+ * @return 成功返回 true
  */
-bool ConvertImu(const mcap::MessageView& view, const MessageDescriptor& descriptor, FoxgloveImu& message)
+bool ConvertRawImage(const mcap::MessageView& view, const MessageDescriptor& descriptor, ms_slam::slam_common::Image& image_msg)
 {
-    if (descriptor.is_protobuf) {
-        return ParseProtobufMessage(view, message);
+    if (descriptor.kind != MessageKind::Image) {
+        return false;
+    }
+
+    ROS1Image ros_img;
+    if (!ros_img.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
+        const std::string topic = view.channel ? view.channel->topic : "<unknown>";
+        spdlog::error("Failed to parse sensor_msgs/Image at topic {}", topic);
+        return false;
+    }
+
+    const uint32_t expected_step = ros_img.width * 3U;
+    const std::size_t expected_size = static_cast<std::size_t>(expected_step) * static_cast<std::size_t>(ros_img.height);
+    if (ros_img.width == 0U || ros_img.height == 0U) {
+        spdlog::warn("ConvertRawImage: invalid image size {}x{}", ros_img.width, ros_img.height);
+        return false;
+    }
+    if (ros_img.step != expected_step) {
+        spdlog::warn("ConvertRawImage: unsupported step {} for width {}", ros_img.step, ros_img.width);
+        return false;
+    }
+    if (expected_size > ms_slam::slam_common::kImageMaxDataSize) {
+        spdlog::warn("ConvertRawImage: payload {} exceeds buffer {}", expected_size, ms_slam::slam_common::kImageMaxDataSize);
+        return false;
+    }
+    if (ros_img.data.size() < expected_size) {
+        spdlog::warn("ConvertRawImage: payload too small, have {}, need {}", ros_img.data.size(), expected_size);
+        return false;
+    }
+
+    image_msg.header.timestamp_ns =
+        static_cast<uint64_t>(ros_img.header.stamp_sec) * 1000000000ULL + static_cast<uint64_t>(ros_img.header.stamp_nsec);
+    image_msg.header.frame_id.fill('\0');
+    std::memcpy(image_msg.header.frame_id.data(), ros_img.header.frame_id.data(),
+                std::min(ros_img.header.frame_id.size(), image_msg.header.frame_id.size() - 1));
+    image_msg.header.encoding.fill('\0');
+    constexpr std::string_view kEncoding = "bgr8";
+    std::memcpy(image_msg.header.encoding.data(), kEncoding.data(), kEncoding.size());
+    image_msg.header.width = ros_img.width;
+    image_msg.header.height = ros_img.height;
+    image_msg.header.step = expected_step;
+    image_msg.header.payload_size = static_cast<uint32_t>(expected_size);
+    image_msg.header.compressed = false;
+
+    std::memcpy(image_msg.data.data(), ros_img.data.data(), expected_size);
+    return true;
+}
+
+/**
+ * @brief 解析 IMU 消息为 LivoxImuData
+ * @param view MCAP 消息视图
+ * @param descriptor 消息描述
+ * @param imu_msg 输出 IMU
+ * @return 成功返回 true
+ */
+bool ConvertImu(const mcap::MessageView& view, const MessageDescriptor& descriptor, LivoxImuData& imu_msg)
+{
+    if (descriptor.kind != MessageKind::Imu) {
+        return false;
     }
 
     ROS1Imu imu;
@@ -375,15 +290,13 @@ bool ConvertImu(const mcap::MessageView& view, const MessageDescriptor& descript
         return false;
     }
 
-    message.Clear();
-    FillTimestamp(imu.header.stamp_sec, imu.header.stamp_nsec, *message.mutable_timestamp());
-    message.set_frame_id(imu.header.frame_id);
-    message.mutable_angular_velocity()->set_x(imu.angular_velocity.x);
-    message.mutable_angular_velocity()->set_y(imu.angular_velocity.y);
-    message.mutable_angular_velocity()->set_z(imu.angular_velocity.z);
-    message.mutable_linear_acceleration()->set_x(imu.linear_acceleration.x);
-    message.mutable_linear_acceleration()->set_y(imu.linear_acceleration.y);
-    message.mutable_linear_acceleration()->set_z(imu.linear_acceleration.z);
+    imu_msg.timestamp_ns = static_cast<uint64_t>(imu.header.stamp_sec) * 1000000000ULL + imu.header.stamp_nsec;
+    imu_msg.index = imu.header.seq;
+    imu_msg.angular_velocity = {static_cast<float>(imu.angular_velocity.x), static_cast<float>(imu.angular_velocity.y), static_cast<float>(imu.angular_velocity.z)};
+    imu_msg.linear_acceleration = {
+        static_cast<float>(imu.linear_acceleration.x),
+        static_cast<float>(imu.linear_acceleration.y),
+        static_cast<float>(imu.linear_acceleration.z)};
     return true;
 }
 
@@ -474,9 +387,9 @@ private:
         std::optional<uint64_t> process_end_ns;
         std::optional<std::chrono::steady_clock::time_point> wall_start;
 
-        FoxglovePointCloud pc_msg;
-        FoxgloveCompressedImage img_msg;
-        FoxgloveImu imu_msg;
+        auto pc_frame = std::make_shared<Mid360Frame>();
+        auto image_msg = std::make_shared<ms_slam::slam_common::Image>();
+        auto imu_msg = std::make_shared<LivoxImuData>();
 
         auto messages = reader.readMessages();
         for (auto it = messages.begin(); it != messages.end() && !exit_flag_->load(); ++it) {
@@ -484,7 +397,6 @@ private:
             const uint64_t timestamp_ns = (view.message.logTime != 0) ? view.message.logTime : view.message.publishTime;
 
             if (!bag_start_ns.has_value()) {
-                // 首帧初始化，计算窗口边界与播放起点
                 bag_start_ns = timestamp_ns;
                 process_start_ns = bag_start_ns.value() + start_offset_ns;
                 if (duration_ns > 0) {
@@ -503,7 +415,6 @@ private:
             }
 
             if (options_.sync_time && bag_start_ns.has_value() && wall_start.has_value()) {
-                // 按录制时间轴和倍率进行节流，保持时序一致
                 const double rel_ns = static_cast<double>(timestamp_ns - bag_start_ns.value()) / rate;
                 const auto target = wall_start.value() + std::chrono::nanoseconds(static_cast<int64_t>(rel_ns));
                 const auto now = std::chrono::steady_clock::now();
@@ -513,39 +424,45 @@ private:
             }
 
             const MessageDescriptor descriptor = DescribeMessage(view);
-            if (descriptor.kind == MessageKind::Unsupported) {
-                continue;
-            }
-
             switch (descriptor.kind) {
                 case MessageKind::PointCloud: {
-                    if (!ConvertPointCloud(view, descriptor, pc_msg)) {
+                    if (!ConvertPointCloud(view, descriptor, *pc_frame)) {
                         spdlog::warn("Skip point cloud due to conversion failure");
                         continue;
                     }
-#ifdef USE_PCL
-                    auto pcl_cloud = std::make_shared<PointCloudT>();
-                    if (ConvertLivoxPointCloudMessagePCL(pc_msg, *pcl_cloud)) {
-                        odom_->PCLAddLidarData(pcl_cloud);
-                    }
-#endif
                     auto cloud = std::make_shared<PointCloud<PointXYZITDescriptor>>();
-                    if (!ConvertLivoxPointCloudMessage(pc_msg, cloud, blind_dist_)) {
-                        spdlog::warn("Failed to convert Foxglove point cloud to internal format");
+                    if (!ConvertMid360Frame(*pc_frame, cloud, blind_dist_)) {
+                        spdlog::warn("Failed to convert Mid360Frame to slam_core cloud");
                         continue;
                     }
                     odom_->AddLidarData(cloud);
                     break;
                 }
                 case MessageKind::CompressedImage: {
-                    if (!ConvertImage(view, descriptor, img_msg)) {
-                        spdlog::warn("Skip image due to conversion failure");
+                    if (!ConvertCompressedImage(view, descriptor, *image_msg)) {
+                        spdlog::warn("Skip compressed image due to conversion failure");
                         continue;
                     }
 
-                    Image image;
-                    if (!DecodeCompressedImageMessage(img_msg, image)) {
-                        spdlog::warn("Failed to decode compressed image");
+                    ms_slam::slam_core::Image image;
+                    if (!DecodeImageMessage(*image_msg, image)) {
+                        spdlog::warn("Failed to decode Image");
+                        continue;
+                    }
+                    if (use_image_) {
+                        odom_->AddImageData(image);
+                    }
+                    break;
+                }
+                case MessageKind::Image: {
+                    if (!ConvertRawImage(view, descriptor, *image_msg)) {
+                        spdlog::warn("Skip raw image due to conversion failure");
+                        continue;
+                    }
+
+                    ms_slam::slam_core::Image image;
+                    if (!DecodeImageMessage(*image_msg, image)) {
+                        spdlog::warn("Failed to decode Image");
                         continue;
                     }
                     if (use_image_) {
@@ -554,13 +471,13 @@ private:
                     break;
                 }
                 case MessageKind::Imu: {
-                    if (!ConvertImu(view, descriptor, imu_msg)) {
+                    if (!ConvertImu(view, descriptor, *imu_msg)) {
                         spdlog::warn("Skip IMU due to conversion failure");
                         continue;
                     }
                     IMU imu;
-                    if (!ConvertImuMessage(imu_msg, imu, false)) {
-                        spdlog::warn("Failed to convert IMU message");
+                    if (!ConvertLivoxImuData(*imu_msg, imu)) {
+                        spdlog::warn("Failed to convert IMU struct");
                         continue;
                     }
                     odom_->AddIMUData(imu);
@@ -589,7 +506,7 @@ private:
 }  // namespace
 
 /**
- * @brief 程序入口，使用 MCAP 数据驱动 Odometry 并发布结果
+ * @brief 程序入口，使用 MCAP 数据驱动 Odometry 并通过 iceoryx2 发布
  * @param argc 参数数量
  * @param argv 参数数组（可选：指定 BagTool 配置路径）
  * @return 进程退出码
@@ -624,10 +541,8 @@ int main(int argc, char** argv)
     }
     spdlog::info("Crash logger initialized successfully");
 
-    if (eCAL::Initialize("slam_adapter_mcap_demo") != 0) {
-        spdlog::warn("eCAL already initialized, continue with existing context");
-    }
-    spdlog::info("eCAL initialized, creating publishers...");
+    auto node = std::make_shared<IoxNode>(iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("Create iceoryx2 node"));
+    spdlog::info("iceoryx2 node created for playback pipeline");
 
     LogConfig();
     const double blind_dist = config_inst.common_params.blind;
@@ -639,31 +554,26 @@ int main(int argc, char** argv)
     playback_options.playback_rate = bag_node["playback"]["rate"].as<double>();
     playback_options.start_offset_s = bag_node["time_window"]["start_seconds"].as<double>();
     playback_options.duration_s = bag_node["time_window"]["duration_seconds"].as<double>();
-    const std::string input_path = bag_node["input"]["path"].as<std::string>();
+    const std::string input_path = (argc > 1) ? std::string(argv[1]) : bag_node["input"]["path"].as<std::string>();
 
     auto odom = std::make_shared<FilterOdometry>();
 
-    eCAL::protobuf::CPublisher<FoxgloveCompressedImage> processed_image_pub("/camera/image_processed");
-    eCAL::protobuf::CPublisher<FoxglovePoseInFrame> odom_pub("/odom");
-    eCAL::protobuf::CPublisher<FoxgloveFrameTransforms> tf_pub("/tf");
-    eCAL::protobuf::CPublisher<FoxgloveSceneUpdate> scene_pub("/marker");
-    eCAL::protobuf::CPublisher<FoxglovePointCloud> map_cloud_pub("/cloud_registered");
-    eCAL::protobuf::CPublisher<FoxglovePointCloud> local_map_pub("/local_map");
-    eCAL::protobuf::CPublisher<FoxglovePosesInFrame> path_pub("/path");
+    IoxPublisher<OdomData> odom_pub(node, "/odom");
+    IoxPublisher<FrameTransformArray> tf_pub(node, "/tf");
+    IoxPublisher<PathData> path_pub(node, "/path");
+    IoxPublisher<Mid360Frame> map_cloud_pub(node, "/cloud_registered");
+    IoxPublisher<Mid360Frame> local_map_pub(node, "/local_map");
 
     McapPlaybackRunner playback_runner(odom, input_path, playback_options, blind_dist, use_img, shouldExit);
     playback_runner.Start();
 
     States lidar_states_buffer;
     std::vector<State> states_buffer;
+    OdomData odom_msg{};
+    FrameTransformArray tf_msg{};
+    PathData path_msg{};
     std::vector<PointCloudType::Ptr> deskewed_clouds;
     PointCloud<PointXYZDescriptor>::Ptr local_map = std::make_shared<PointCloud<PointXYZDescriptor>>();
-
-    FoxglovePoseInFrame odom_msg;
-    FoxgloveSceneUpdate scene_msg;
-    FoxgloveFrameTransforms tf_msg;
-    FoxglovePointCloud cloud_msg;
-    FoxglovePosesInFrame path_msg;
 
     while (!shouldExit.load()) {
         EASY_BLOCK("Adapter Publish", profiler::colors::Orange);
@@ -673,15 +583,12 @@ int main(int argc, char** argv)
         transform_data.reserve(lidar_states_buffer.size() * 2);
 
         for (const auto& state : lidar_states_buffer) {
-            if (!BuildFoxglovePoseInFrame(state, "odom", odom_msg)) {
-                spdlog::warn("BuildFoxglovePoseInFrame failed");
+            if (!BuildOdomData(state, "odom", "base_link", odom_msg)) {
+                spdlog::warn("BuildOdomData failed");
                 continue;
             }
-            odom_pub.Send(odom_msg);
-
-            if (BuildFoxgloveSceneUpdateFromState(state, "odom", "odom_covariance", scene_msg)) {
-                scene_pub.Send(scene_msg);
-            }
+            odom_pub.SetBuildCallback([odom_msg](OdomData& payload) { payload = odom_msg; });
+            odom_pub.Publish();
 
             const auto& position = state.p();
             const auto& quat_state = state.quat();
@@ -701,31 +608,42 @@ int main(int argc, char** argv)
                 .rotation = Eigen::Quaterniond::Identity()});
 
             states_buffer.emplace_back(state);
-        }
-
-        if (!transform_data.empty()) {
-            if (BuildFoxgloveFrameTransforms(transform_data, tf_msg)) {
-                tf_pub.Send(tf_msg);
+            if (states_buffer.size() > kMaxPathPoses) {
+                states_buffer.erase(states_buffer.begin());
             }
         }
 
+        if (!transform_data.empty()) {
+            if (BuildFrameTransformArray(transform_data, tf_msg)) {
+                tf_pub.SetBuildCallback([tf_msg](FrameTransformArray& payload) { payload = tf_msg; });
+                tf_pub.Publish();
+            }
+        }
+
+        if (!states_buffer.empty() && states_buffer.size() % 10 == 0 && BuildPathData(states_buffer, "odom", path_msg)) {
+            path_pub.SetBuildCallback([path_msg](PathData& payload) { payload = path_msg; });
+            path_pub.Publish();
+        }
+
+        // 发布 deskew 后地图点云
         odom->GetMapCloud(deskewed_clouds);
         for (const auto& cloud : deskewed_clouds) {
             if (!cloud) {
                 continue;
             }
-            if (BuildFoxglovePointCloud(*cloud, "odom", cloud_msg)) {
-                map_cloud_pub.Send(cloud_msg);
-            }
+            const double ts_sec = cloud->empty() ? 0.0 : cloud->timestamp(0);
+            const uint64_t ts_ns = ts_sec > 0.0 ? static_cast<uint64_t>(std::llround(ts_sec * 1e9)) : 0ULL;
+            map_cloud_pub.PublishWithBuilder([&](Mid360Frame& payload) {
+                return BuildMid360FrameFromPointCloud(*cloud, ts_ns, payload, "odom");
+            });
         }
 
+        // 发布局部地图
         odom->GetLocalMap(local_map);
-        if (local_map && BuildFoxglovePointCloud(*local_map, "odom", cloud_msg)) {
-            local_map_pub.Send(cloud_msg);
-        }
-
-        if (states_buffer.size() % 10 == 0 && BuildFoxglovePosesInFrame(states_buffer, "odom", path_msg)) {
-            path_pub.Send(path_msg);
+        if (local_map && local_map->size() > 0) {
+            local_map_pub.PublishWithBuilder([&](Mid360Frame& payload) {
+                return BuildMid360FrameFromPointCloud(*local_map, 0ULL, payload, "odom");
+            });
         }
 
         EASY_END_BLOCK;
@@ -737,7 +655,6 @@ int main(int argc, char** argv)
 
     spdlog::info("Exit signal received, cleaning up");
 
-    eCAL::Finalize();
     odom->Stop();
 
     const auto dumped_blocks = profiler::dumpBlocksToFile(kProfileDumpPath);

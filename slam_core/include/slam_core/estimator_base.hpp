@@ -186,7 +186,6 @@ void EstimatorBase<LocalMap>::ExportLocalMap(std::unique_ptr<LocalMapType>& out)
 {
     std::lock_guard<std::mutex> lock(state_mutex_);
     out.reset();
-    spdlog::info("ExportLocalMap called, sharing placeholder pointer");
 }
 
 template<typename LocalMap>

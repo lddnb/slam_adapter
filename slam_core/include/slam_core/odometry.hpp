@@ -71,6 +71,7 @@ class Odometry
     std::unique_ptr<std::thread> odometry_thread_;  ///< 里程计线程
 
     double last_timestamp_imu_;
+    std::uint64_t last_index_imu_;
 
     std::atomic<bool> running_;  ///< 运行状态
 

@@ -7,38 +7,31 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_BUILD_TYPE RelWithDebInfo)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+find_package(iceoryx2-cmake-modules REQUIRED)
+include(Iceoryx2PlatformSettings)
+
+string(JOIN " " ICEORYX2_C_FLAGS_STRING ${ICEORYX2_C_FLAGS})
+string(JOIN " " ICEORYX2_C_WARNINGS_STRING ${ICEORYX2_C_WARNINGS})
+string(JOIN " " ICEORYX2_CXX_FLAGS_STRING ${ICEORYX2_CXX_FLAGS})
+string(JOIN " " ICEORYX2_CXX_WARNINGS_STRING ${ICEORYX2_CXX_WARNINGS})
+string(JOIN " " ICEORYX2_SANITIZER_FLAGS_STRING ${ICEORYX2_SANITIZER_FLAGS})
+
+set(CMAKE_C_FLAGS "\
+    ${CMAKE_C_FLAGS} \
+    ${ICEORYX2_C_FLAGS_STRING} \
+    ${ICEORYX2_C_WARNINGS_STRING}\
+")
+set(CMAKE_CXX_FLAGS "\
+    ${CMAKE_CXX_FLAGS} \
+    ${ICEORYX2_CXX_FLAGS_STRING} \
+    ${ICEORYX2_CXX_WARNINGS_STRING} \
+    ${ICEORYX2_SANITIZER_FLAGS_STRING} \
+")
+
 # Dependencies
+find_package(iceoryx2-cxx REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(cpptrace REQUIRED)
-find_package(Protobuf REQUIRED)
-find_package(eCAL REQUIRED)
-
-set(PROTO_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include/proto")
-set(PROTO_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
-file(MAKE_DIRECTORY ${PROTO_GEN_DIR})
-
-# 生成并追加 Protobuf 源文件
-file(GLOB_RECURSE SLAM_COMMON_PROTOS_REL RELATIVE ${PROTO_SRC_DIR} "${PROTO_SRC_DIR}/*.proto")
-set(PROTO_GENERATED_SRCS)
-foreach(PROTO_FILE ${SLAM_COMMON_PROTOS_REL})
-    get_filename_component(PROTO_DIR ${PROTO_FILE} DIRECTORY)
-    get_filename_component(PROTO_NAME_WE ${PROTO_FILE} NAME_WE)
-    set(OUT_DIR ${PROTO_GEN_DIR}/${PROTO_DIR})
-    file(MAKE_DIRECTORY ${OUT_DIR})
-    set(GEN_SRC ${OUT_DIR}/${PROTO_NAME_WE}.pb.cc)
-    set(GEN_HDR ${OUT_DIR}/${PROTO_NAME_WE}.pb.h)
-    add_custom_command(
-        OUTPUT ${GEN_SRC} ${GEN_HDR}
-        COMMAND ${Protobuf_PROTOC_EXECUTABLE}
-            --proto_path=${PROTO_SRC_DIR}
-            --cpp_out=${PROTO_GEN_DIR}
-            ${PROTO_FILE}
-        DEPENDS ${PROTO_SRC_DIR}/${PROTO_FILE}
-        COMMENT "Generating protobuf for ${PROTO_FILE}"
-        VERBATIM
-    )
-    list(APPEND PROTO_GENERATED_SRCS ${GEN_SRC})
-endforeach()
 
 # =============================================================================
 # SLAM Common Library (Dynamic Library)
@@ -52,7 +45,6 @@ file(GLOB_RECURSE SLAM_COMMON_SOURCES CONFIGURE_DEPENDS
 # 创建动态库
 add_library(${PROJECT_NAME} SHARED
     ${SLAM_COMMON_SOURCES}
-    ${PROTO_GENERATED_SRCS}
 )
 add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
 
@@ -67,26 +59,15 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 target_include_directories(${PROJECT_NAME}
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<BUILD_INTERFACE:${PROTO_GEN_DIR}>
         $<INSTALL_INTERFACE:include>
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 # 链接依赖
 target_link_libraries(${PROJECT_NAME}
     PUBLIC
+        iceoryx2-cxx::static-lib-cxx
         cpptrace::cpptrace
         spdlog::spdlog
-        protobuf::libprotobuf
-        eCAL::protobuf_core
-)
-
-# 编译定义
-target_compile_definitions(${PROJECT_NAME}
-    PRIVATE
-        $<$<CONFIG:Debug>:DEBUG>
-        $<$<BOOL:${BUILD_TESTS}>:BUILD_TESTS>
 )
 
 # =============================================================================
@@ -103,7 +84,6 @@ install(TARGETS ${PROJECT_NAME}
 
 # Install public headers
 install(DIRECTORY include/slam_common DESTINATION include FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h")
-install(DIRECTORY ${PROTO_GEN_DIR}/ DESTINATION include FILES_MATCHING PATTERN "*.pb.h")
 
 # Export configuration
 install(EXPORT slam_common-targets

@@ -13,16 +13,14 @@ namespace ms_slam::slam_recorder
  */
 enum class InputType {
     Ros1Mcap,
-    ProtobufMcap,
     Rosbag,
 };
 
 /**
- * @brief 单个话题的播放与录制配置
+ * @brief 单个话题的回放配置
  */
 struct TopicSettings {
     bool playback{true};          ///< 是否启用回放
-    bool record{true};            ///< 是否启用录制
     std::string publish_service;  ///< 回放时映射的服务名称
     std::string schema;           ///< 话题的消息 Schema 名称（用于预创建发布器）
 };
@@ -34,18 +32,11 @@ struct ToolConfig {
     std::string input_path;                                 ///< 输入数据文件路径
     InputType input_type{InputType::Ros1Mcap};              ///< 输入数据类型
     bool default_playback{true};                            ///< 全局默认回放开关
-    bool default_record{true};                              ///< 全局默认录制开关
     double processing_start_seconds{0.0};                   ///< 处理窗口起始时间（秒）
     double processing_duration_seconds{0.0};                ///< 处理窗口持续时间（秒）
     bool playback_enabled{false};                           ///< 是否启用回放功能
     bool playback_sync_time{true};                          ///< 回放是否同步时间
     double playback_rate{1.0};                              ///< 回放倍率
-    bool record_enabled{false};                             ///< 是否启用录制功能
-    std::string record_output_dir{"./output"};              ///< 录制输出目录
-    std::string record_prefix{"recording"};                 ///< 录制文件名前缀
-    std::string record_compression{"zstd"};                 ///< 录制压缩算法
-    uint64_t record_chunk_size{1024ull * 1024ull};          ///< 录制块大小（字节）
-    bool record_overwrite{true};                            ///< 是否允许覆盖已存在文件
     std::unordered_map<std::string, TopicSettings> topics;  ///< 话题级别的覆盖配置
 };
 

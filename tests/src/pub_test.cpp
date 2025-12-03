@@ -1,87 +1,114 @@
-#include "slam_common/flatbuffers_pub_sub.hpp"
-#include "slam_common/foxglove_messages.hpp"
+#include "slam_common/iceoryx_pub_sub.hpp"
+#include "slam_common/sensor_struct.hpp"
+#include "slam_common/crash_logger.hpp"
 
-#include <slam_common/crash_logger.hpp>
-#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/dup_filter_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
-#include <opencv2/opencv.hpp>
+
+#include <algorithm>
+#include <chrono>
+#include <memory>
+#include <random>
+#include <thread>
 
 using namespace ms_slam::slam_common;
 
-flatbuffers::DetachedBuffer opencv_mat_to_image(const cv::Mat& mat, uint64_t timestamp, uint32_t seq)
+/**
+ * @brief 构造模拟 IMU 数据
+ * @param idx 序号
+ * @return 模拟 IMU
+ */
+LivoxImuData MakeImuSample(uint32_t idx)
 {
-    flatbuffers::FlatBufferBuilder fbb(1024 * 1024);
-    foxglove::Time ts(timestamp / 1000000000, timestamp % 1000000000);
+    LivoxImuData imu{};
+    imu.timestamp_ns = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    imu.index = idx;
 
-    auto frame_id = fbb.CreateString("camera_frame");
+    thread_local std::mt19937 gen(std::random_device{}());
+    thread_local std::uniform_real_distribution<float> dist(-1.0F, 1.0F);
 
-    // Create format
-    auto format = fbb.CreateString("jpeg");
+    for (int i = 0; i < 3; ++i) {
+        imu.angular_velocity[i] = dist(gen);
+        imu.linear_acceleration[i] = dist(gen) * 9.8F;
+    }
+    return imu;
+}
 
-    std::vector<uint8_t> image_data;
-    bool success = cv::imencode(".jpg", mat, image_data);
-    auto data = fbb.CreateVector(image_data);
+/**
+ * @brief 构造模拟点云帧（仅填充少量点）
+ * @param idx 帧序号
+ * @return 模拟点云帧
+ */
+Mid360Frame MakeLidarSample(uint32_t idx)
+{
+    Mid360Frame frame{};
+    frame.index = idx;
+    frame.frame_timestamp_ns = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    frame.frame_id.fill('\0');
+    constexpr char kFrameId[] = "publisher_lidar";
+    const std::size_t copy_len = std::min<std::size_t>(sizeof(kFrameId) - 1, frame.frame_id.size() - 1);
+    std::copy_n(kFrameId, copy_len, frame.frame_id.begin());
+    frame.point_count = 5;
 
-    // Create CompressedImage
-    auto compressed_img = foxglove::CreateCompressedImage(
-        fbb,
-        &ts,
-        frame_id,
-        data,
-        format
-    );
-
-    fbb.Finish(compressed_img);
-
-    return fbb.Release();
+    for (uint32_t i = 0; i < frame.point_count; ++i) {
+        auto& p = frame.points[i];
+        p.x = static_cast<float>(i) * 0.1F;
+        p.y = static_cast<float>(i) * 0.2F;
+        p.z = static_cast<float>(i) * 0.3F;
+        p.intensity = static_cast<uint8_t>(i);
+        p.tag = static_cast<uint8_t>(i % 4);
+        p.timestamp_ns = frame.frame_timestamp_ns + i * 1000;
+    }
+    return frame;
 }
 
 int main()
 {
-    ms_slam::slam_common::LoggerConfig config;
+    LoggerConfig config;
     config.log_file_path = "pub.log";
-    auto dup_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(10));
+    auto dup_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(2));
     dup_filter->add_sink(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
     dup_filter->add_sink(std::make_shared<spdlog::sinks::basic_file_sink_mt>(config.log_file_path, true));
-    auto logger = std::make_shared<spdlog::logger>("crash_logger", dup_filter);
+    auto logger = std::make_shared<spdlog::logger>("publisher_logger", dup_filter);
 
     logger->set_pattern(config.log_pattern);
-    logger->set_level(spdlog::level::from_str(config.log_level));
+    logger->set_level(spdlog::level::info);
     logger->flush_on(spdlog::level::warn);
-
     spdlog::set_default_logger(logger);
 
-    spdlog::info("Starting SLAM test");
-
     if (!SLAM_CRASH_LOGGER_INIT(logger)) {
-        spdlog::error("❌ Failed to initialize crash logger!");
+        spdlog::error("Failed to initialize crash logger");
         return 1;
     }
-    spdlog::info("Crash logger initialized successfully");
 
-    // Create unique node for publisher
-   auto node = std::make_shared<iox2::Node<iox2::ServiceType::Ipc>>(
-        iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("successful node creation"));
+    auto node = std::make_shared<IoxNode>(iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("Create node"));
 
-    std::cout << "Creating generic publishers and subscribers..." << std::endl;
+    IoxPublisher<Mid360Frame> lidar_pub(node, "/test/lidar");
+    IoxPublisher<LivoxImuData> imu_pub(node, "/test/imu");
 
-    // Create Image publisher using Handle-based CuImage (now iceoryx2 compatible)
-    FBSPublisher<FoxgloveCompressedImage> img_publisher(node, "/test/image");
+    for (uint32_t i = 0; i < 3; ++i) {
+        auto lidar_sample = MakeLidarSample(i);
+        auto imu_sample = MakeImuSample(i);
 
-    // 读取OpenCV图像
-    cv::Mat img = cv::imread("/home/ubuntu/data/image.jpg", cv::IMREAD_COLOR);
+        // 按需绑定构建回调，直接将本次样本写入共享内存
+        lidar_pub.SetBuildCallback([lidar_sample](Mid360Frame& payload) { payload = lidar_sample; });
+        imu_pub.SetBuildCallback([imu_sample](LivoxImuData& payload) { payload = imu_sample; });
 
-    auto test_image = opencv_mat_to_image(
-        img, std::chrono::steady_clock::now().time_since_epoch().count(), 1);
+        lidar_pub.Publish();
+        imu_pub.Publish();
 
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+        spdlog::info("Published lidar frame #{}, imu #{}, total lidar={}, imu={}",
+                     i,
+                     i,
+                     lidar_pub.GetPublishedCount(),
+                     imu_pub.GetPublishedCount());
 
-    img_publisher.publish_raw(test_image.data(), test_image.size());
-    spdlog::info("published test image");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
 
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    spdlog::info("Publisher finished");
     return 0;
 }

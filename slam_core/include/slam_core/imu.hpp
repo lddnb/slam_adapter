@@ -8,21 +8,24 @@ class IMU
   public:
     IMU() = default;
 
-    IMU(const Eigen::Vector3d& gyro, const Eigen::Vector3d& accel, double timestamp)
+    IMU(const Eigen::Vector3d& gyro, const Eigen::Vector3d& accel, const double timestamp, const std::uint64_t index = 0)
     : linear_acceleration_(accel),
       angular_velocity_(gyro),
-      timestamp_(timestamp)
+      timestamp_(timestamp),
+      index_(index)
     {
     }
     [[nodiscard]] const Eigen::Vector3d& angular_velocity() const noexcept { return angular_velocity_; }
     [[nodiscard]] const Eigen::Vector3d& linear_acceleration() const noexcept { return linear_acceleration_; }
     [[nodiscard]] double timestamp() const noexcept { return timestamp_; }
+    [[nodiscard]] std::uint64_t index() const noexcept { return index_; }
 
   private:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     Eigen::Vector3d angular_velocity_;
     Eigen::Vector3d linear_acceleration_;
     double timestamp_;
+    std::uint64_t index_;
 };
 
 inline IMU imu2baselink(const IMU& imu, const Eigen::Matrix3d& R, const Eigen::Vector3d& t, double dt) noexcept

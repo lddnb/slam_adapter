@@ -1,12 +1,23 @@
 #include "slam_recorder/foxglove_websocket_bridge.hpp"
 
+#include <cctype>
+#include <cstring>
+
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <queue>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include <spdlog/spdlog.h>
 
@@ -14,6 +25,14 @@ namespace ms_slam::slam_recorder
 {
 namespace
 {
+using FoxglovePointCloud = ::foxglove::PointCloud;
+using FoxgloveCompressedImage = ::foxglove::CompressedImage;
+using FoxgloveImu = ::foxglove::Imu;
+using FoxglovePoseInFrame = ::foxglove::PoseInFrame;
+using FoxglovePosesInFrame = ::foxglove::PosesInFrame;
+using FoxgloveFrameTransforms = ::foxglove::FrameTransforms;
+using FoxgloveSceneUpdate = ::foxglove::SceneUpdate;
+
 /**
  * @brief 根据 schema 名称获取对应的 Protobuf 描述符
  * @param schema_name Schema 名称
@@ -22,32 +41,369 @@ namespace
 const google::protobuf::Descriptor* ResolveDescriptor(const std::string& schema_name)
 {
     if (schema_name == "foxglove.PointCloud") {
-        return slam_common::FoxglovePointCloud::descriptor();
+        return FoxglovePointCloud::descriptor();
     }
     if (schema_name == "foxglove.CompressedImage") {
-        return slam_common::FoxgloveCompressedImage::descriptor();
+        return FoxgloveCompressedImage::descriptor();
     }
     if (schema_name == "foxglove.Imu") {
-        return slam_common::FoxgloveImu::descriptor();
+        return FoxgloveImu::descriptor();
     }
     if (schema_name == "foxglove.PoseInFrame") {
-        return slam_common::FoxglovePoseInFrame::descriptor();
+        return FoxglovePoseInFrame::descriptor();
     }
     if (schema_name == "foxglove.PosesInFrame") {
-        return slam_common::FoxglovePosesInFrame::descriptor();
+        return FoxglovePosesInFrame::descriptor();
     }
     if (schema_name == "foxglove.FrameTransforms") {
-        return slam_common::FoxgloveFrameTransforms::descriptor();
+        return FoxgloveFrameTransforms::descriptor();
     }
     if (schema_name == "foxglove.SceneUpdate") {
-        return slam_common::FoxgloveSceneUpdate::descriptor();
+        return FoxgloveSceneUpdate::descriptor();
     }
     return nullptr;
+}
+
+/**
+ * @brief 将纳秒时间戳填充到 Timestamp
+ */
+void FillTimestampFromNs(uint64_t timestamp_ns, google::protobuf::Timestamp& stamp)
+{
+    constexpr uint64_t kNsPerSec = 1'000'000'000ULL;
+    stamp.set_seconds(static_cast<std::int64_t>(timestamp_ns / kNsPerSec));
+    stamp.set_nanos(static_cast<std::int32_t>(timestamp_ns % kNsPerSec));
+}
+
+/**
+ * @brief 将定长字符数组转换为安全字符串
+ */
+template <std::size_t N>
+std::string ToSafeString(const std::array<char, N>& buffer)
+{
+    return std::string(buffer.data());
+}
+
+/**
+ * @brief 将 Pose 设置为单位姿态
+ */
+void FillIdentityPose(foxglove::Pose& pose)
+{
+    auto* position = pose.mutable_position();
+    position->set_x(0.0);
+    position->set_y(0.0);
+    position->set_z(0.0);
+
+    auto* orientation = pose.mutable_orientation();
+    orientation->set_x(0.0);
+    orientation->set_y(0.0);
+    orientation->set_z(0.0);
+    orientation->set_w(1.0);
+}
+
+/**
+ * @brief 将编码字符串转换为小写形式
+ * @param encoding 原始编码
+ * @return 小写编码结果
+ */
+std::string NormalizeEncoding(const std::string& encoding)
+{
+    std::string lowered = encoding;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return lowered;
+}
+
+/**
+ * @brief 规范化压缩格式，未知值回退到 jpeg
+ * @param encoding 输入编码字符串
+ * @return 用于 foxglove.CompressedImage 的格式
+ */
+std::string NormalizeImageFormat(const std::string& encoding)
+{
+    const std::string lowered = NormalizeEncoding(encoding);
+    if (lowered == "jpeg" || lowered == "jpg" || lowered == "jpe") {
+        return "jpeg";
+    }
+    if (lowered == "png") {
+        return "png";
+    }
+    if (lowered == "webp") {
+        return "webp";
+    }
+    if (lowered == "avif") {
+        return "avif";
+    }
+    return "jpeg";
+}
+
+/**
+ * @brief 将未压缩的定长图像转换为 BGR Mat
+ * @param image 输入的定长图像
+ * @param bgr_mat 输出的 BGR Mat
+ * @return 转换成功返回 true
+ */
+bool BuildBgrMatFromImage(const slam_common::Image& image, cv::Mat& bgr_mat)
+{
+    constexpr uint32_t kChannels = 3U;
+    const uint32_t width = image.header.width;
+    const uint32_t height = image.header.height;
+    if (width == 0U || height == 0U) {
+        spdlog::warn("BuildBgrMatFromImage: invalid size {}x{}", width, height);
+        return false;
+    }
+
+    const std::size_t row_step = image.header.step;
+    const std::size_t expected_step = static_cast<std::size_t>(width) * kChannels;
+    if (row_step == 0U || row_step > std::numeric_limits<std::size_t>::max() / std::max<std::size_t>(1, height)) {
+        spdlog::warn("BuildBgrMatFromImage: invalid step {} for height {}", row_step, height);
+        return false;
+    }
+    if (row_step < expected_step) {
+        spdlog::warn("BuildBgrMatFromImage: step {} too small for width {}", row_step, width);
+        return false;
+    }
+    const std::size_t required_size = row_step * static_cast<std::size_t>(height);
+    if (required_size == 0U || required_size > slam_common::kImageMaxDataSize || required_size > image.header.payload_size) {
+        spdlog::warn("BuildBgrMatFromImage: payload too small, need {}, have {}", required_size, image.header.payload_size);
+        return false;
+    }
+
+    const std::string encoding = ToSafeString(image.header.encoding);
+    if (encoding == "bgr8") {
+        bgr_mat = cv::Mat(static_cast<int>(height), static_cast<int>(width), CV_8UC3, const_cast<uint8_t*>(image.data.data()), row_step);
+    } else if (encoding == "rgb8") {
+        cv::Mat rgb(static_cast<int>(height), static_cast<int>(width), CV_8UC3, const_cast<uint8_t*>(image.data.data()), row_step);
+        cv::cvtColor(rgb, bgr_mat, cv::COLOR_RGB2BGR);  // 转换为 BGR 以兼容下游编码
+    } else {
+        spdlog::warn("BuildBgrMatFromImage: unsupported encoding {}", encoding);
+        return false;
+    }
+
+    if (!bgr_mat.isContinuous()) {
+        bgr_mat = bgr_mat.clone();  // JPEG 编码需要连续内存
+    }
+    return true;
+}
+
+/**
+ * @brief 将 BGR Mat 编码为 JPEG 数据
+ * @param bgr_mat 输入的 BGR 图像
+ * @param buffer 输出的压缩数据
+ * @return 编码成功返回 true
+ */
+bool EncodeJpeg(const cv::Mat& bgr_mat, std::vector<uint8_t>& buffer)
+{
+    if (bgr_mat.empty() || bgr_mat.channels() != 3 || bgr_mat.type() != CV_8UC3) {
+        spdlog::warn("EncodeJpeg: invalid mat type {} channels {}", bgr_mat.type(), bgr_mat.channels());
+        return false;
+    }
+    constexpr int kJpegQuality = 85;
+    const std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, kJpegQuality};
+    if (!cv::imencode(".jpg", bgr_mat, buffer, params)) {
+        spdlog::warn("EncodeJpeg: imencode failed for size {}x{}", bgr_mat.cols, bgr_mat.rows);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief 将 Mid360 点云转换为 Foxglove 点云
+ */
+bool ConvertMid360ToFoxglove(const slam_common::Mid360Frame& frame, FoxglovePointCloud& message)
+{
+    constexpr uint32_t kPointStride = 20;
+    message.Clear();
+    FillTimestampFromNs(frame.frame_timestamp_ns, *message.mutable_timestamp());
+    message.set_frame_id(ToSafeString(frame.frame_id));
+    FillIdentityPose(*message.mutable_pose());
+    message.set_point_stride(kPointStride);
+
+    if (frame.point_count == 0U) {
+        return false;
+    }
+
+    message.mutable_fields()->Clear();
+    auto* x_field = message.add_fields();
+    x_field->set_name("x");
+    x_field->set_offset(0);
+    x_field->set_type(foxglove::PackedElementField_NumericType_FLOAT32);
+
+    auto* y_field = message.add_fields();
+    y_field->set_name("y");
+    y_field->set_offset(4);
+    y_field->set_type(foxglove::PackedElementField_NumericType_FLOAT32);
+
+    auto* z_field = message.add_fields();
+    z_field->set_name("z");
+    z_field->set_offset(8);
+    z_field->set_type(foxglove::PackedElementField_NumericType_FLOAT32);
+
+    auto* intensity_field = message.add_fields();
+    intensity_field->set_name("intensity");
+    intensity_field->set_offset(12);
+    intensity_field->set_type(foxglove::PackedElementField_NumericType_UINT8);
+
+    auto* tag_field = message.add_fields();
+    tag_field->set_name("tag");
+    tag_field->set_offset(13);
+    tag_field->set_type(foxglove::PackedElementField_NumericType_UINT8);
+
+    auto* line_field = message.add_fields();
+    line_field->set_name("line");
+    line_field->set_offset(14);
+    line_field->set_type(foxglove::PackedElementField_NumericType_UINT8);
+
+    auto* offset_field = message.add_fields();
+    offset_field->set_name("offset_time");
+    offset_field->set_offset(16);
+    offset_field->set_type(foxglove::PackedElementField_NumericType_UINT32);
+
+    std::string data;
+    data.resize(static_cast<std::size_t>(frame.point_count) * kPointStride, 0);
+    const uint64_t base_time = frame.frame_timestamp_ns;
+    for (uint32_t i = 0; i < frame.point_count; ++i) {
+        const std::size_t base = static_cast<std::size_t>(i) * kPointStride;
+        std::memcpy(data.data() + base + 0, &frame.points[i].x, sizeof(float));
+        std::memcpy(data.data() + base + 4, &frame.points[i].y, sizeof(float));
+        std::memcpy(data.data() + base + 8, &frame.points[i].z, sizeof(float));
+        std::memcpy(data.data() + base + 12, &frame.points[i].intensity, sizeof(uint8_t));
+        std::memcpy(data.data() + base + 13, &frame.points[i].tag, sizeof(uint8_t));
+        uint8_t line = 0;
+        std::memcpy(data.data() + base + 14, &line, sizeof(uint8_t));
+        uint32_t offset_time = 0;
+        if (frame.points[i].timestamp_ns > base_time) {
+            offset_time = static_cast<uint32_t>(frame.points[i].timestamp_ns - base_time);
+        }
+        std::memcpy(data.data() + base + 16, &offset_time, sizeof(uint32_t));
+    }
+
+    message.set_data(data);
+    return true;
+}
+
+/**
+ * @brief 将定长图像转换为 Foxglove 压缩图像
+ */
+bool ConvertImageToFoxglove(const slam_common::Image& image, FoxgloveCompressedImage& message)
+{
+    message.Clear();
+    FillTimestampFromNs(image.header.timestamp_ns, *message.mutable_timestamp());
+    message.set_frame_id(ToSafeString(image.header.frame_id));
+
+    const std::string encoding = ToSafeString(image.header.encoding);
+    if (image.header.compressed) {
+        const std::size_t payload_size = std::min<std::size_t>(image.header.payload_size, slam_common::kImageMaxDataSize);
+        if (payload_size == 0U) {
+            spdlog::warn("ConvertImageToFoxglove: compressed image payload is empty");
+            return false;
+        }
+        message.set_format(NormalizeImageFormat(encoding));
+        message.set_data(reinterpret_cast<const char*>(image.data.data()), payload_size);
+        return true;
+    }
+
+    cv::Mat bgr_mat;
+    if (!BuildBgrMatFromImage(image, bgr_mat)) {
+        return false;
+    }
+
+    std::vector<uint8_t> compressed;
+    if (!EncodeJpeg(bgr_mat, compressed)) {
+        return false;
+    }
+
+    message.set_format("jpeg");
+    message.set_data(reinterpret_cast<const char*>(compressed.data()), compressed.size());
+    return true;
+}
+
+/**
+ * @brief 将 IMU 转换为 Foxglove IMU
+ */
+bool ConvertImuToFoxglove(const slam_common::LivoxImuData& imu, FoxgloveImu& message)
+{
+    message.Clear();
+    FillTimestampFromNs(imu.timestamp_ns, *message.mutable_timestamp());
+    message.set_frame_id("");
+    auto* angular_velocity = message.mutable_angular_velocity();
+    angular_velocity->set_x(imu.angular_velocity[0]);
+    angular_velocity->set_y(imu.angular_velocity[1]);
+    angular_velocity->set_z(imu.angular_velocity[2]);
+
+    auto* linear_acc = message.mutable_linear_acceleration();
+    linear_acc->set_x(imu.linear_acceleration[0]);
+    linear_acc->set_y(imu.linear_acceleration[1]);
+    linear_acc->set_z(imu.linear_acceleration[2]);
+    return true;
+}
+
+/**
+ * @brief 将里程计数据转换为 Foxglove PoseInFrame
+ */
+bool ConvertOdomToFoxglove(const slam_common::OdomData& odom, FoxglovePoseInFrame& message)
+{
+    message.Clear();
+    FillTimestampFromNs(odom.header.timestamp_ns, *message.mutable_timestamp());
+    message.set_frame_id(ToSafeString(odom.header.frame_id));
+    auto* pose = message.mutable_pose();
+    pose->mutable_position()->set_x(odom.pose.position[0]);
+    pose->mutable_position()->set_y(odom.pose.position[1]);
+    pose->mutable_position()->set_z(odom.pose.position[2]);
+    pose->mutable_orientation()->set_x(odom.pose.orientation[0]);
+    pose->mutable_orientation()->set_y(odom.pose.orientation[1]);
+    pose->mutable_orientation()->set_z(odom.pose.orientation[2]);
+    pose->mutable_orientation()->set_w(odom.pose.orientation[3]);
+    return true;
+}
+
+/**
+ * @brief 将路径数据转换为 Foxglove PosesInFrame
+ */
+bool ConvertPathToFoxglove(const slam_common::PathData& path, FoxglovePosesInFrame& message)
+{
+    message.Clear();
+    FillTimestampFromNs(path.header.timestamp_ns, *message.mutable_timestamp());
+    message.set_frame_id(ToSafeString(path.header.frame_id));
+
+    const uint32_t count = std::min<uint32_t>(path.pose_count, slam_common::kMaxPathPoses);
+    for (uint32_t i = 0; i < count; ++i) {
+        auto* pose = message.add_poses();
+        pose->mutable_position()->set_x(path.poses[i].pose.position[0]);
+        pose->mutable_position()->set_y(path.poses[i].pose.position[1]);
+        pose->mutable_position()->set_z(path.poses[i].pose.position[2]);
+        pose->mutable_orientation()->set_x(path.poses[i].pose.orientation[0]);
+        pose->mutable_orientation()->set_y(path.poses[i].pose.orientation[1]);
+        pose->mutable_orientation()->set_z(path.poses[i].pose.orientation[2]);
+        pose->mutable_orientation()->set_w(path.poses[i].pose.orientation[3]);
+    }
+    return true;
+}
+
+/**
+ * @brief 将 TF 批处理转换为 Foxglove FrameTransforms
+ */
+bool ConvertTransformsToFoxglove(const slam_common::FrameTransformArray& transforms, FoxgloveFrameTransforms& message)
+{
+    message.Clear();
+    const uint32_t count = std::min<uint32_t>(transforms.transform_count, slam_common::kMaxFrameTransforms);
+    for (uint32_t i = 0; i < count; ++i) {
+        auto* tf_out = message.add_transforms();
+        FillTimestampFromNs(transforms.transforms[i].timestamp_ns, *tf_out->mutable_timestamp());
+        tf_out->set_parent_frame_id(ToSafeString(transforms.transforms[i].parent_frame_id));
+        tf_out->set_child_frame_id(ToSafeString(transforms.transforms[i].child_frame_id));
+        tf_out->mutable_translation()->set_x(transforms.transforms[i].transform.position[0]);
+        tf_out->mutable_translation()->set_y(transforms.transforms[i].transform.position[1]);
+        tf_out->mutable_translation()->set_z(transforms.transforms[i].transform.position[2]);
+        tf_out->mutable_rotation()->set_x(transforms.transforms[i].transform.orientation[0]);
+        tf_out->mutable_rotation()->set_y(transforms.transforms[i].transform.orientation[1]);
+        tf_out->mutable_rotation()->set_z(transforms.transforms[i].transform.orientation[2]);
+        tf_out->mutable_rotation()->set_w(transforms.transforms[i].transform.orientation[3]);
+    }
+    return true;
 }
 }  // namespace
 
 /**
- * @brief 构造函数，完成 eCAL 初始化与 WebSocket 准备
+ * @brief 构造函数，完成 iceoryx2 初始化与 WebSocket 准备
  */
 FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config) : config_(config), context_(foxglove::Context::create())
 {
@@ -55,15 +411,11 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config) : config_
     spdlog::info("  WebSocket enabled: {}", config_.websocket.enable);
     spdlog::info("  Recorder enabled: {}", config_.recorder.enable);
 
-    const int init_code = eCAL::Initialize("foxglove_websocket_bridge");
-    if (init_code < 0) {
-        throw std::runtime_error("Failed to initialize eCAL");
+    auto node_result = iox2::NodeBuilder().create<iox2::ServiceType::Ipc>();
+    if (!node_result.has_value()) {
+        throw std::runtime_error("Failed to create iceoryx2 node for foxglove bridge");
     }
-    ecal_initialized_ = true;
-    owns_ecal_ = (init_code == 0);
-    if (!owns_ecal_) {
-        spdlog::warn("eCAL already initialized, reuse existing context");
-    }
+    iox_node_ = std::make_shared<slam_common::IoxNode>(std::move(node_result.value()));
 
     if (config_.websocket.enable) {
         foxglove::WebSocketServerOptions options;
@@ -110,21 +462,73 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config) : config_
             }
             channels_[topic.name] = std::make_unique<foxglove::RawChannel>(std::move(channel_result.value()));
         }
+        slam_common::IoxPubSubConfig iox_config;
 
         if (topic.schema == "foxglove.PointCloud") {
-            pc_subs_[topic.name] = RegisterSubscriber<slam_common::FoxglovePointCloud>(topic.name, topic.schema);
+            auto converter = [](const slam_common::Mid360Frame& payload, std::string& buffer, uint64_t& timestamp_ns) {
+                FoxglovePointCloud proto;
+                if (!ConvertMid360ToFoxglove(payload, proto)) {
+                    return false;
+                }
+                timestamp_ns = FoxgloveWebSocketBridge::ToNanoseconds(proto.timestamp());
+                return FoxgloveWebSocketBridge::SerializeMessage(proto, buffer);
+            };
+            pc_subs_[topic.name] = RegisterSubscriber<slam_common::Mid360Frame>(topic.name, topic.schema, converter, iox_config);
         } else if (topic.schema == "foxglove.CompressedImage") {
-            img_subs_[topic.name] = RegisterSubscriber<slam_common::FoxgloveCompressedImage>(topic.name, topic.schema);
+            auto converter = [](const slam_common::Image& payload, std::string& buffer, uint64_t& timestamp_ns) {
+                FoxgloveCompressedImage proto;
+                if (!ConvertImageToFoxglove(payload, proto)) {
+                    return false;
+                }
+                timestamp_ns = FoxgloveWebSocketBridge::ToNanoseconds(proto.timestamp());
+                return FoxgloveWebSocketBridge::SerializeMessage(proto, buffer);
+            };
+            img_subs_[topic.name] = RegisterSubscriber<slam_common::Image>(topic.name, topic.schema, converter, iox_config);
         } else if (topic.schema == "foxglove.Imu") {
-            imu_subs_[topic.name] = RegisterSubscriber<slam_common::FoxgloveImu>(topic.name, topic.schema);
+            auto converter = [](const slam_common::LivoxImuData& payload, std::string& buffer, uint64_t& timestamp_ns) {
+                FoxgloveImu proto;
+                if (!ConvertImuToFoxglove(payload, proto)) {
+                    return false;
+                }
+                timestamp_ns = FoxgloveWebSocketBridge::ToNanoseconds(proto.timestamp());
+                return FoxgloveWebSocketBridge::SerializeMessage(proto, buffer);
+            };
+            iox_config.subscriber_max_buffer_size = 500;
+            imu_subs_[topic.name] = RegisterSubscriber<slam_common::LivoxImuData>(topic.name, topic.schema, converter, iox_config);
         } else if (topic.schema == "foxglove.PoseInFrame") {
-            pose_subs_[topic.name] = RegisterSubscriber<slam_common::FoxglovePoseInFrame>(topic.name, topic.schema);
+            auto converter = [](const slam_common::OdomData& payload, std::string& buffer, uint64_t& timestamp_ns) {
+                FoxglovePoseInFrame proto;
+                if (!ConvertOdomToFoxglove(payload, proto)) {
+                    return false;
+                }
+                timestamp_ns = FoxgloveWebSocketBridge::ToNanoseconds(proto.timestamp());
+                return FoxgloveWebSocketBridge::SerializeMessage(proto, buffer);
+            };
+            pose_subs_[topic.name] = RegisterSubscriber<slam_common::OdomData>(topic.name, topic.schema, converter, iox_config);
         } else if (topic.schema == "foxglove.PosesInFrame") {
-            poses_subs_[topic.name] = RegisterSubscriber<slam_common::FoxglovePosesInFrame>(topic.name, topic.schema);
+            auto converter = [](const slam_common::PathData& payload, std::string& buffer, uint64_t& timestamp_ns) {
+                FoxglovePosesInFrame proto;
+                if (!ConvertPathToFoxglove(payload, proto)) {
+                    return false;
+                }
+                timestamp_ns = FoxgloveWebSocketBridge::ToNanoseconds(proto.timestamp());
+                return FoxgloveWebSocketBridge::SerializeMessage(proto, buffer);
+            };
+            poses_subs_[topic.name] = RegisterSubscriber<slam_common::PathData>(topic.name, topic.schema, converter, iox_config);
         } else if (topic.schema == "foxglove.FrameTransforms") {
-            frame_tf_subs_[topic.name] = RegisterSubscriber<slam_common::FoxgloveFrameTransforms>(topic.name, topic.schema);
-        } else if (topic.schema == "foxglove.SceneUpdate") {
-            frame_marker_subs_[topic.name] = RegisterSubscriber<slam_common::FoxgloveSceneUpdate>(topic.name, topic.schema);
+            auto converter = [](const slam_common::FrameTransformArray& payload, std::string& buffer, uint64_t& timestamp_ns) {
+                FoxgloveFrameTransforms proto;
+                if (!ConvertTransformsToFoxglove(payload, proto)) {
+                    return false;
+                }
+                if (proto.transforms_size() > 0) {
+                    timestamp_ns = FoxgloveWebSocketBridge::ToNanoseconds(proto.transforms(0).timestamp());
+                } else {
+                    timestamp_ns = 0U;
+                }
+                return FoxgloveWebSocketBridge::SerializeMessage(proto, buffer);
+            };
+            frame_tf_subs_[topic.name] = RegisterSubscriber<slam_common::FrameTransformArray>(topic.name, topic.schema, converter, iox_config);
         } else {
             spdlog::warn("Unsupported schema '{}' for topic '{}', skip", topic.schema, topic.name);
         }
@@ -140,9 +544,6 @@ FoxgloveWebSocketBridge::~FoxgloveWebSocketBridge()
 {
     spdlog::info("Destroying FoxgloveWebSocketBridge...");
     Stop();
-    if (ecal_initialized_ && owns_ecal_) {
-        eCAL::Finalize();
-    }
     spdlog::info("✓ FoxgloveWebSocketBridge destroyed");
 }
 
@@ -247,6 +648,22 @@ void FoxgloveWebSocketBridge::Run()
 
     while (running_.load()) {
         try {
+            // 先从 iceoryx2 拉取数据触发回调填充缓存
+            auto poll_subscribers = [](auto& subs_map) {
+                for (auto& kv : subs_map) {
+                    if (!kv.second || !kv.second->IsReady()) {
+                        continue;
+                    }
+                    kv.second->ReceiveAll();
+                }
+            };
+            poll_subscribers(pc_subs_);
+            poll_subscribers(img_subs_);
+            poll_subscribers(imu_subs_);
+            poll_subscribers(pose_subs_);
+            poll_subscribers(poses_subs_);
+            poll_subscribers(frame_tf_subs_);
+
             for (const auto& topic : config_.topics) {
                 if (topic.enabled) {
                     PollAndForwardTopic(topic.name, topic.schema);
@@ -390,47 +807,6 @@ void FoxgloveWebSocketBridge::RecordToMcap(
 uint64_t FoxgloveWebSocketBridge::GetCurrentTimestampNs()
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-}
-
-uint64_t FoxgloveWebSocketBridge::ExtractTimestampNs(const std::string& schema, const google::protobuf::Message& message) const
-{
-    if (schema == "foxglove.PointCloud") {
-        const auto* msg = dynamic_cast<const slam_common::FoxglovePointCloud*>(&message);
-        if (msg != nullptr) {
-            return ToNanoseconds(msg->timestamp());
-        }
-    } else if (schema == "foxglove.CompressedImage") {
-        const auto* msg = dynamic_cast<const slam_common::FoxgloveCompressedImage*>(&message);
-        if (msg != nullptr) {
-            return ToNanoseconds(msg->timestamp());
-        }
-    } else if (schema == "foxglove.Imu") {
-        const auto* msg = dynamic_cast<const slam_common::FoxgloveImu*>(&message);
-        if (msg != nullptr) {
-            return ToNanoseconds(msg->timestamp());
-        }
-    } else if (schema == "foxglove.PoseInFrame") {
-        const auto* msg = dynamic_cast<const slam_common::FoxglovePoseInFrame*>(&message);
-        if (msg != nullptr) {
-            return ToNanoseconds(msg->timestamp());
-        }
-    } else if (schema == "foxglove.PosesInFrame") {
-        const auto* msg = dynamic_cast<const slam_common::FoxglovePosesInFrame*>(&message);
-        if (msg != nullptr) {
-            return ToNanoseconds(msg->timestamp());
-        }
-    } else if (schema == "foxglove.FrameTransforms") {
-        const auto* msg = dynamic_cast<const slam_common::FoxgloveFrameTransforms*>(&message);
-        if (msg != nullptr && msg->transforms_size() > 0) {
-            return ToNanoseconds(msg->transforms(0).timestamp());
-        }
-    } else if (schema == "foxglove.SceneUpdate") {
-        const auto* msg = dynamic_cast<const slam_common::FoxgloveSceneUpdate*>(&message);
-        if (msg != nullptr && msg->entities_size() > 0) {
-            return ToNanoseconds(msg->entities(0).timestamp());
-        }
-    }
-    return 0U;
 }
 
 uint64_t FoxgloveWebSocketBridge::AlignTimestamp(uint64_t message_time_ns)
@@ -579,47 +955,74 @@ FoxgloveWebSocketBridge::Statistics FoxgloveWebSocketBridge::GetStatistics() con
  * @brief 模板化订阅注册
  */
 template <typename MessageType>
-std::shared_ptr<eCAL::protobuf::CSubscriber<MessageType>> FoxgloveWebSocketBridge::RegisterSubscriber(
+std::shared_ptr<slam_common::IoxSubscriber<MessageType>> FoxgloveWebSocketBridge::RegisterSubscriber(
     const std::string& topic_name,
-    const std::string& schema_name)
+    const std::string& schema_name,
+    const std::function<bool(const MessageType&, std::string&, uint64_t&)>& converter,
+    const slam_common::IoxPubSubConfig& iox_config)
 {
-    auto subscriber = std::make_shared<eCAL::protobuf::CSubscriber<MessageType>>(topic_name);
-    subscriber->SetReceiveCallback([this, topic_name, schema_name](const eCAL::STopicId&, const MessageType& msg, long long send_time, long long) {
-        const uint64_t message_ts = ExtractTimestampNs(schema_name, msg);
-        const uint64_t fallback_ts = (send_time > 0) ? static_cast<uint64_t>(send_time) * 1000ULL : GetCurrentTimestampNs();
-        const uint64_t aligned_ts = EnsureGlobalMonotonic(AlignTimestamp(message_ts == 0U ? fallback_ts : message_ts));
+    if (!iox_node_) {
+        throw std::runtime_error("iceoryx2 node is not initialized");
+    }
 
-        std::string buffer;
-        if (!SerializeMessage(msg, buffer)) {
-            error_count_.at(topic_name)++;
-            return;
-        }
+    auto subscriber = std::make_shared<slam_common::IoxSubscriber<MessageType>>(
+        iox_node_,
+        topic_name,
+        [this, topic_name, schema_name, converter](const MessageType& payload) {
+            std::string buffer;
+            uint64_t timestamp_ns = 0;
+            if (!converter || !converter(payload, buffer, timestamp_ns)) {
+                error_count_.at(topic_name)++;
+                spdlog::warn("Converter failed for topic {}", topic_name);
+                return;
+            }
 
-        {
-            std::lock_guard<std::mutex> lock(pending_mutex_);
-            pending_packets_[topic_name].push_back({std::move(buffer), aligned_ts});
-        }
-    });
+            const uint64_t aligned_ts = EnsureGlobalMonotonic(AlignTimestamp(timestamp_ns));
+            {
+                std::lock_guard<std::mutex> lock(pending_mutex_);
+                pending_packets_[topic_name].push_back({std::move(buffer), aligned_ts});
+            }
+        }, iox_config);
 
-    spdlog::info("eCAL subscriber created for topic {} ({})", topic_name, schema_name);
+    spdlog::info("iceoryx2 subscriber created for topic {} ({})", topic_name, schema_name);
     return subscriber;
 }
 
 // 显式实例化
-template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxglovePointCloud>>
-FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxglovePointCloud>(const std::string&, const std::string&);
-template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveCompressedImage>>
-FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxgloveCompressedImage>(const std::string&, const std::string&);
-template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveImu>> FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxgloveImu>(
+template std::shared_ptr<slam_common::IoxSubscriber<slam_common::Mid360Frame>>
+FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::Mid360Frame>(
     const std::string&,
-    const std::string&);
-template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxglovePoseInFrame>>
-FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxglovePoseInFrame>(const std::string&, const std::string&);
-template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxglovePosesInFrame>>
-FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxglovePosesInFrame>(const std::string&, const std::string&);
-template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveFrameTransforms>>
-FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxgloveFrameTransforms>(const std::string&, const std::string&);
-template std::shared_ptr<eCAL::protobuf::CSubscriber<slam_common::FoxgloveSceneUpdate>>
-FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FoxgloveSceneUpdate>(const std::string&, const std::string&);
-
+    const std::string&,
+    const std::function<bool(const slam_common::Mid360Frame&, std::string&, uint64_t&)>&,
+    const slam_common::IoxPubSubConfig&);
+template std::shared_ptr<slam_common::IoxSubscriber<slam_common::Image>>
+FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::Image>(
+    const std::string&,
+    const std::string&,
+    const std::function<bool(const slam_common::Image&, std::string&, uint64_t&)>&,
+    const slam_common::IoxPubSubConfig&);
+template std::shared_ptr<slam_common::IoxSubscriber<slam_common::LivoxImuData>>
+FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::LivoxImuData>(
+    const std::string&,
+    const std::string&,
+    const std::function<bool(const slam_common::LivoxImuData&, std::string&, uint64_t&)>&,
+    const slam_common::IoxPubSubConfig&);
+template std::shared_ptr<slam_common::IoxSubscriber<slam_common::OdomData>>
+FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::OdomData>(
+    const std::string&,
+    const std::string&,
+    const std::function<bool(const slam_common::OdomData&, std::string&, uint64_t&)>&,
+    const slam_common::IoxPubSubConfig&);
+template std::shared_ptr<slam_common::IoxSubscriber<slam_common::PathData>>
+FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::PathData>(
+    const std::string&,
+    const std::string&,
+    const std::function<bool(const slam_common::PathData&, std::string&, uint64_t&)>&,
+    const slam_common::IoxPubSubConfig&);
+template std::shared_ptr<slam_common::IoxSubscriber<slam_common::FrameTransformArray>>
+FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::FrameTransformArray>(
+    const std::string&,
+    const std::string&,
+    const std::function<bool(const slam_common::FrameTransformArray&, std::string&, uint64_t&)>&,
+    const slam_common::IoxPubSubConfig&);
 }  // namespace ms_slam::slam_recorder

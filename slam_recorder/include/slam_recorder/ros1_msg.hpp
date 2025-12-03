@@ -241,6 +241,45 @@ struct ROS1CompressedImage {
 };
 
 /**
+ * @brief ROS1 原始图像消息
+ */
+struct ROS1Image {
+    ROS1Header header;          ///< 消息头
+    uint32_t height{0};         ///< 图像高度
+    uint32_t width{0};          ///< 图像宽度
+    std::string encoding;       ///< 图像编码（bgr8/rgb8 等）
+    uint8_t is_bigendian{0};    ///< 大端标志
+    uint32_t step{0};           ///< 行跨度
+    std::vector<uint8_t> data;  ///< 原始数据
+
+    /**
+     * @brief 解析原始图像消息
+     * @param msg_data 原始消息指针
+     * @param msg_size 原始消息长度
+     * @return 成功解析返回 true
+     */
+    bool Parse(const uint8_t* msg_data, size_t msg_size)
+    {
+        const uint8_t* data_ptr = msg_data;
+        size_t remaining = msg_size;
+
+        uint32_t data_length = 0;
+        if (!header.Parse(data_ptr, remaining) || !ros1_detail::ReadPrimitive(data_ptr, remaining, height) ||
+            !ros1_detail::ReadPrimitive(data_ptr, remaining, width) || !ros1_detail::ReadString(data_ptr, remaining, encoding) ||
+            !ros1_detail::ReadPrimitive(data_ptr, remaining, is_bigendian) || !ros1_detail::ReadPrimitive(data_ptr, remaining, step) ||
+            !ros1_detail::ReadPrimitive(data_ptr, remaining, data_length) || remaining < data_length) {
+            return false;
+        }
+
+        data.assign(data_ptr, data_ptr + data_length);
+        data_ptr += data_length;
+        remaining -= data_length;
+
+        return remaining == 0;
+    }
+};
+
+/**
  * @brief 三维向量
  */
 struct ROS1Vector3 {
