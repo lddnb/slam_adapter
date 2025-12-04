@@ -32,9 +32,9 @@ LivoxImuData MakeImuSample(uint32_t idx)
  * @param idx 帧序号
  * @return 点云帧
  */
-Mid360Frame MakeLidarSample(uint32_t idx)
+LivoxPointCloudDate MakeLidarSample(uint32_t idx)
 {
-    Mid360Frame frame{};
+    LivoxPointCloudDate frame{};
     frame.index = idx;
     frame.point_count = 3;
     frame.frame_timestamp_ns = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -61,20 +61,17 @@ int main()
     auto node = std::make_shared<IoxNode>(iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("Create node"));
 
     auto imu_pub = std::make_shared<IoxPublisher<LivoxImuData>>(node, "/dispatcher/imu");
-    auto lidar_pub = std::make_shared<IoxPublisher<Mid360Frame>>(node, "/dispatcher/lidar");
+    auto lidar_pub = std::make_shared<IoxPublisher<LivoxPointCloudDate>>(node, "/dispatcher/lidar");
 
     std::atomic<uint32_t> imu_count{0};
     std::atomic<uint32_t> lidar_count{0};
 
-    auto imu_sub = std::make_shared<IoxSubscriber<LivoxImuData>>(
-        node,
-        "/dispatcher/imu",
-        [&imu_count](const LivoxImuData&) { imu_count.fetch_add(1); });
+    auto imu_sub =
+        std::make_shared<IoxSubscriber<LivoxImuData>>(node, "/dispatcher/imu", [&imu_count](const LivoxImuData&) { imu_count.fetch_add(1); });
 
-    auto lidar_sub = std::make_shared<IoxSubscriber<Mid360Frame>>(
-        node,
-        "/dispatcher/lidar",
-        [&lidar_count](const Mid360Frame&) { lidar_count.fetch_add(1); });
+    auto lidar_sub = std::make_shared<IoxSubscriber<LivoxPointCloudDate>>(node, "/dispatcher/lidar", [&lidar_count](const LivoxPointCloudDate&) {
+        lidar_count.fetch_add(1);
+    });
 
     CallbackDispatcher dispatcher;
     dispatcher.SetPollInterval(std::chrono::milliseconds(1));
@@ -92,7 +89,7 @@ int main()
             imu_pub->Publish();
             if (i % 2 == 0) {
                 auto lidar_sample = MakeLidarSample(i);
-                lidar_pub->SetBuildCallback([lidar_sample](Mid360Frame& payload) { payload = lidar_sample; });
+                lidar_pub->SetBuildCallback([lidar_sample](LivoxPointCloudDate& payload) { payload = lidar_sample; });
                 lidar_pub->Publish();
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));

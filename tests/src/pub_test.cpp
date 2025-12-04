@@ -41,9 +41,9 @@ LivoxImuData MakeImuSample(uint32_t idx)
  * @param idx 帧序号
  * @return 模拟点云帧
  */
-Mid360Frame MakeLidarSample(uint32_t idx)
+LivoxPointCloudDate MakeLidarSample(uint32_t idx)
 {
-    Mid360Frame frame{};
+    LivoxPointCloudDate frame{};
     frame.index = idx;
     frame.frame_timestamp_ns = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
     frame.frame_id.fill('\0');
@@ -85,7 +85,7 @@ int main()
 
     auto node = std::make_shared<IoxNode>(iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("Create node"));
 
-    IoxPublisher<Mid360Frame> lidar_pub(node, "/test/lidar");
+    IoxPublisher<LivoxPointCloudDate> lidar_pub(node, "/test/lidar");
     IoxPublisher<LivoxImuData> imu_pub(node, "/test/imu");
 
     for (uint32_t i = 0; i < 3; ++i) {
@@ -93,17 +93,13 @@ int main()
         auto imu_sample = MakeImuSample(i);
 
         // 按需绑定构建回调，直接将本次样本写入共享内存
-        lidar_pub.SetBuildCallback([lidar_sample](Mid360Frame& payload) { payload = lidar_sample; });
+        lidar_pub.SetBuildCallback([lidar_sample](LivoxPointCloudDate& payload) { payload = lidar_sample; });
         imu_pub.SetBuildCallback([imu_sample](LivoxImuData& payload) { payload = imu_sample; });
 
         lidar_pub.Publish();
         imu_pub.Publish();
 
-        spdlog::info("Published lidar frame #{}, imu #{}, total lidar={}, imu={}",
-                     i,
-                     i,
-                     lidar_pub.GetPublishedCount(),
-                     imu_pub.GetPublishedCount());
+        spdlog::info("Published lidar frame #{}, imu #{}, total lidar={}, imu={}", i, i, lidar_pub.GetPublishedCount(), imu_pub.GetPublishedCount());
 
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }

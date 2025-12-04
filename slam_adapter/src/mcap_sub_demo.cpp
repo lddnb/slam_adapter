@@ -103,12 +103,12 @@ MessageDescriptor DescribeMessage(const mcap::MessageView& view)
 }
 
 /**
- * @brief 将 Livox 自定义点云转为 Mid360Frame
+ * @brief 将 Livox 自定义点云转为 LivoxPointCloudDate
  * @param view MCAP 消息视图
  * @param frame 输出点云帧
  * @return 转换成功返回 true
  */
-bool ConvertLivoxPointCloud(const mcap::MessageView& view, Mid360Frame& frame)
+bool ConvertLivoxPointCloud(const mcap::MessageView& view, LivoxPointCloudDate& frame)
 {
     ROS1LivoxCustomMsg livox_msg;
     if (!livox_msg.Parse(reinterpret_cast<const uint8_t*>(view.message.data), view.message.dataSize)) {
@@ -120,9 +120,8 @@ bool ConvertLivoxPointCloud(const mcap::MessageView& view, Mid360Frame& frame)
     frame.index = livox_msg.header.seq;
     frame.frame_timestamp_ns = static_cast<uint64_t>(livox_msg.header.stamp_sec) * 1000000000ULL + livox_msg.header.stamp_nsec;
     frame.frame_id.fill('\0');
-    std::memcpy(frame.frame_id.data(), livox_msg.header.frame_id.data(),
-                std::min(livox_msg.header.frame_id.size(), frame.frame_id.size() - 1));
-    const uint32_t count = std::min<uint32_t>(livox_msg.point_num, kMid360MaxPoints);
+    std::memcpy(frame.frame_id.data(), livox_msg.header.frame_id.data(), std::min(livox_msg.header.frame_id.size(), frame.frame_id.size() - 1));
+    const uint32_t count = std::min<uint32_t>(livox_msg.point_num, kLivoxMaxPoints);
     frame.point_count = count;
 
     for (uint32_t i = 0; i < count; ++i) {
@@ -145,7 +144,7 @@ bool ConvertLivoxPointCloud(const mcap::MessageView& view, Mid360Frame& frame)
  * @param frame 输出点云帧
  * @return 成功返回 true
  */
-bool ConvertPointCloud(const mcap::MessageView& view, const MessageDescriptor& descriptor, Mid360Frame& frame)
+bool ConvertPointCloud(const mcap::MessageView& view, const MessageDescriptor& descriptor, LivoxPointCloudDate& frame)
 {
     if (!descriptor.is_livox) {
         spdlog::warn("ConvertPointCloud: unsupported schema {}", view.schema ? view.schema->name : "<none>");
@@ -161,7 +160,7 @@ bool ConvertPointCloud(const mcap::MessageView& view, const MessageDescriptor& d
  * @param image_msg 输出图像
  * @return 成功返回 true
  */
-bool ConvertCompressedImage(const mcap::MessageView& view, const MessageDescriptor& descriptor, ms_slam::slam_common::Image& image_msg)
+bool ConvertCompressedImage(const mcap::MessageView& view, const MessageDescriptor& descriptor, ms_slam::slam_common::ImageDate& image_msg)
 {
     if (descriptor.kind != MessageKind::CompressedImage) {
         return false;
@@ -198,8 +197,10 @@ bool ConvertCompressedImage(const mcap::MessageView& view, const MessageDescript
     image_msg.header.timestamp_ns =
         static_cast<uint64_t>(ros_img.header.stamp_sec) * 1000000000ULL + static_cast<uint64_t>(ros_img.header.stamp_nsec);
     image_msg.header.frame_id.fill('\0');
-    std::memcpy(image_msg.header.frame_id.data(), ros_img.header.frame_id.data(),
-                std::min(ros_img.header.frame_id.size(), image_msg.header.frame_id.size() - 1));
+    std::memcpy(
+        image_msg.header.frame_id.data(),
+        ros_img.header.frame_id.data(),
+        std::min(ros_img.header.frame_id.size(), image_msg.header.frame_id.size() - 1));
     image_msg.header.encoding.fill('\0');
     constexpr std::string_view kEncoding = "bgr8";
     std::memcpy(image_msg.header.encoding.data(), kEncoding.data(), kEncoding.size());
@@ -220,7 +221,7 @@ bool ConvertCompressedImage(const mcap::MessageView& view, const MessageDescript
  * @param image_msg 输出图像
  * @return 成功返回 true
  */
-bool ConvertRawImage(const mcap::MessageView& view, const MessageDescriptor& descriptor, ms_slam::slam_common::Image& image_msg)
+bool ConvertRawImage(const mcap::MessageView& view, const MessageDescriptor& descriptor, ms_slam::slam_common::ImageDate& image_msg)
 {
     if (descriptor.kind != MessageKind::Image) {
         return false;
@@ -255,8 +256,10 @@ bool ConvertRawImage(const mcap::MessageView& view, const MessageDescriptor& des
     image_msg.header.timestamp_ns =
         static_cast<uint64_t>(ros_img.header.stamp_sec) * 1000000000ULL + static_cast<uint64_t>(ros_img.header.stamp_nsec);
     image_msg.header.frame_id.fill('\0');
-    std::memcpy(image_msg.header.frame_id.data(), ros_img.header.frame_id.data(),
-                std::min(ros_img.header.frame_id.size(), image_msg.header.frame_id.size() - 1));
+    std::memcpy(
+        image_msg.header.frame_id.data(),
+        ros_img.header.frame_id.data(),
+        std::min(ros_img.header.frame_id.size(), image_msg.header.frame_id.size() - 1));
     image_msg.header.encoding.fill('\0');
     constexpr std::string_view kEncoding = "bgr8";
     std::memcpy(image_msg.header.encoding.data(), kEncoding.data(), kEncoding.size());
@@ -292,11 +295,8 @@ bool ConvertImu(const mcap::MessageView& view, const MessageDescriptor& descript
 
     imu_msg.timestamp_ns = static_cast<uint64_t>(imu.header.stamp_sec) * 1000000000ULL + imu.header.stamp_nsec;
     imu_msg.index = imu.header.seq;
-    imu_msg.angular_velocity = {static_cast<float>(imu.angular_velocity.x), static_cast<float>(imu.angular_velocity.y), static_cast<float>(imu.angular_velocity.z)};
-    imu_msg.linear_acceleration = {
-        static_cast<float>(imu.linear_acceleration.x),
-        static_cast<float>(imu.linear_acceleration.y),
-        static_cast<float>(imu.linear_acceleration.z)};
+    imu_msg.angular_velocity = {imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z};
+    imu_msg.linear_acceleration = {imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z};
     return true;
 }
 
@@ -304,17 +304,18 @@ bool ConvertImu(const mcap::MessageView& view, const MessageDescriptor& descript
  * @brief MCAP 播放窗口配置
  */
 struct PlaybackOptions {
-    bool sync_time{true};          ///< 是否按照时间同步播放
-    double playback_rate{1.0};     ///< 播放倍率
-    double start_offset_s{0.0};    ///< 起始偏移（秒）
-    double duration_s{0.0};        ///< 播放时长（秒，为0表示到文件末尾）
+    bool sync_time{true};        ///< 是否按照时间同步播放
+    double playback_rate{1.0};   ///< 播放倍率
+    double start_offset_s{0.0};  ///< 起始偏移（秒）
+    double duration_s{0.0};      ///< 播放时长（秒，为0表示到文件末尾）
 };
 
 /**
  * @brief 从 MCAP 文件读取数据并注入 Odometry
  */
-class McapPlaybackRunner {
-public:
+class McapPlaybackRunner
+{
+  public:
     /**
      * @brief 构造函数
      * @param odom 里程计实例
@@ -324,18 +325,19 @@ public:
      * @param use_image 是否启用图像处理
      * @param exit_flag 全局退出标志
      */
-    McapPlaybackRunner(std::shared_ptr<FilterOdometry> odom,
-                       std::string mcap_path,
-                       PlaybackOptions options,
-                       double blind_dist,
-                       bool use_image,
-                       std::atomic<bool>& exit_flag)
-        : odom_(std::move(odom))
-        , mcap_path_(std::move(mcap_path))
-        , options_(options)
-        , blind_dist_(blind_dist)
-        , use_image_(use_image)
-        , exit_flag_(&exit_flag)
+    McapPlaybackRunner(
+        std::shared_ptr<FilterOdometry> odom,
+        std::string mcap_path,
+        PlaybackOptions options,
+        double blind_dist,
+        bool use_image,
+        std::atomic<bool>& exit_flag)
+    : odom_(std::move(odom)),
+      mcap_path_(std::move(mcap_path)),
+      options_(options),
+      blind_dist_(blind_dist),
+      use_image_(use_image),
+      exit_flag_(&exit_flag)
     {
     }
 
@@ -357,7 +359,7 @@ public:
         }
     }
 
-private:
+  private:
     /**
      * @brief 线程入口，负责读取 MCAP 并调用 Odometry
      */
@@ -376,9 +378,7 @@ private:
             spdlog::warn("Failed to read MCAP summary: {}", summary_status.message);
         }
 
-        const uint64_t start_offset_ns = options_.start_offset_s > 0.0
-                                             ? static_cast<uint64_t>(std::llround(options_.start_offset_s * 1e9))
-                                             : 0U;
+        const uint64_t start_offset_ns = options_.start_offset_s > 0.0 ? static_cast<uint64_t>(std::llround(options_.start_offset_s * 1e9)) : 0U;
         const uint64_t duration_ns = options_.duration_s > 0.0 ? static_cast<uint64_t>(std::llround(options_.duration_s * 1e9)) : 0U;
         const double rate = options_.playback_rate > 0.0 ? options_.playback_rate : 1.0;
 
@@ -387,8 +387,8 @@ private:
         std::optional<uint64_t> process_end_ns;
         std::optional<std::chrono::steady_clock::time_point> wall_start;
 
-        auto pc_frame = std::make_shared<Mid360Frame>();
-        auto image_msg = std::make_shared<ms_slam::slam_common::Image>();
+        auto pc_frame = std::make_shared<LivoxPointCloudDate>();
+        auto image_msg = std::make_shared<ms_slam::slam_common::ImageDate>();
         auto imu_msg = std::make_shared<LivoxImuData>();
 
         auto messages = reader.readMessages();
@@ -431,8 +431,8 @@ private:
                         continue;
                     }
                     auto cloud = std::make_shared<PointCloud<PointXYZITDescriptor>>();
-                    if (!ConvertMid360Frame(*pc_frame, cloud, blind_dist_)) {
-                        spdlog::warn("Failed to convert Mid360Frame to slam_core cloud");
+                    if (!ConvertLivoxPointCloudDate(*pc_frame, cloud, blind_dist_)) {
+                        spdlog::warn("Failed to convert LivoxPointCloudDate to slam_core cloud");
                         continue;
                     }
                     odom_->AddLidarData(cloud);
@@ -561,8 +561,8 @@ int main(int argc, char** argv)
     IoxPublisher<OdomData> odom_pub(node, "/odom");
     IoxPublisher<FrameTransformArray> tf_pub(node, "/tf");
     IoxPublisher<PathData> path_pub(node, "/path");
-    IoxPublisher<Mid360Frame> map_cloud_pub(node, "/cloud_registered");
-    IoxPublisher<Mid360Frame> local_map_pub(node, "/local_map");
+    IoxPublisher<LivoxPointCloudDate> map_cloud_pub(node, "/cloud_registered");
+    IoxPublisher<LivoxPointCloudDate> local_map_pub(node, "/local_map");
 
     McapPlaybackRunner playback_runner(odom, input_path, playback_options, blind_dist, use_img, shouldExit);
     playback_runner.Start();
@@ -633,17 +633,15 @@ int main(int argc, char** argv)
             }
             const double ts_sec = cloud->empty() ? 0.0 : cloud->timestamp(0);
             const uint64_t ts_ns = ts_sec > 0.0 ? static_cast<uint64_t>(std::llround(ts_sec * 1e9)) : 0ULL;
-            map_cloud_pub.PublishWithBuilder([&](Mid360Frame& payload) {
-                return BuildMid360FrameFromPointCloud(*cloud, ts_ns, payload, "odom");
-            });
+            map_cloud_pub.PublishWithBuilder(
+                [&](LivoxPointCloudDate& payload) { return BuildMid360FrameFromPointCloud(*cloud, ts_ns, payload, "odom"); });
         }
 
         // 发布局部地图
         odom->GetLocalMap(local_map);
         if (local_map && local_map->size() > 0) {
-            local_map_pub.PublishWithBuilder([&](Mid360Frame& payload) {
-                return BuildMid360FrameFromPointCloud(*local_map, 0ULL, payload, "odom");
-            });
+            local_map_pub.PublishWithBuilder(
+                [&](LivoxPointCloudDate& payload) { return BuildMid360FrameFromPointCloud(*local_map, 0ULL, payload, "odom"); });
         }
 
         EASY_END_BLOCK;

@@ -38,7 +38,10 @@ inline constexpr double kNsToSeconds = 1e-9;
  */
 inline double ToSeconds(uint64_t timestamp_ns) noexcept
 {
-    return static_cast<double>(timestamp_ns) * kNsToSeconds;
+    // 拆分秒与纳秒再合成，避免大整数直接转 double 造成的精度损失
+    const uint64_t sec = timestamp_ns / 1000000000ULL;
+    const uint64_t nsec = timestamp_ns % 1000000000ULL;
+    return static_cast<double>(sec) + static_cast<double>(nsec) * kNsToSeconds;
 }
 
 /// @brief 记录上一帧末尾点的时间戳（秒），保证跨帧时间单调
@@ -46,22 +49,23 @@ inline double g_last_tail_timestamp = -std::numeric_limits<double>::infinity();
 }  // namespace
 
 /**
- * @brief 将 Mid360 点云帧转换为 slam_core 点云
- * @param frame 输入的 Mid360 点云帧
+ * @brief 将 Livox 点云帧转换为 slam_core 点云
+ * @param frame 输入的 Livox 点云帧
  * @param cloud 目标点云容器
  * @param blind_dist 盲区半径（米）
  * @return 转换成功返回 true
  */
-inline bool ConvertMid360Frame(const slam_common::Mid360Frame& frame,
-                               const std::shared_ptr<slam_core::PointCloud<slam_core::PointXYZITDescriptor>>& cloud,
-                               double blind_dist = 0.5)
+inline bool ConvertLivoxPointCloudDate(
+    const slam_common::LivoxPointCloudDate& frame,
+    const std::shared_ptr<slam_core::PointCloud<slam_core::PointXYZITDescriptor>>& cloud,
+    double blind_dist = 0.5)
 {
     if (!cloud) {
-        spdlog::warn("ConvertMid360Frame: cloud pointer is null");
+        spdlog::warn("ConvertLivoxPointCloudMessage: cloud pointer is null");
         return false;
     }
 
-    const uint32_t count = std::min<uint32_t>(frame.point_count, slam_common::kMid360MaxPoints);
+    const uint32_t count = std::min<uint32_t>(frame.point_count, slam_common::kLivoxMaxPoints);
     if (count == 0) {
         cloud->clear();
         return false;
@@ -76,8 +80,7 @@ inline bool ConvertMid360Frame(const slam_common::Mid360Frame& frame,
 
     for (uint32_t i = 0; i < count; ++i) {
         const auto& p = frame.points[i];
-        const double norm_sq = static_cast<double>(p.x) * static_cast<double>(p.x) + static_cast<double>(p.y) * static_cast<double>(p.y) +
-                               static_cast<double>(p.z) * static_cast<double>(p.z);
+        const double norm_sq = p.x * p.x + p.y * p.y + p.z * p.z;
         const double timestamp = ToSeconds(p.timestamp_ns);
 
         // 过滤掉盲区点及时间戳回退的点，确保下一帧的点时间始终大于上一帧尾部
@@ -126,7 +129,7 @@ inline bool ConvertLivoxImuData(const slam_common::LivoxImuData& imu_in, slam_co
  * @param image_out 输出的 slam_core::Image
  * @return 解码成功返回 true
  */
-inline bool DecodeImageMessage(const slam_common::Image& message, slam_core::Image& image_out)
+inline bool DecodeImageMessage(const slam_common::ImageDate& message, slam_core::Image& image_out)
 {
     const auto& header = message.header;
     if (header.compressed) {

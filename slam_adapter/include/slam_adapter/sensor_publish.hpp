@@ -86,10 +86,7 @@ inline void FillPose(const Eigen::Vector3d& translation, const Eigen::Quaternion
  * @param message 输出里程计
  * @return 成功返回 true
  */
-inline bool BuildOdomData(const State& state,
-                          std::string_view frame_id,
-                          std::string_view child_frame_id,
-                          slam_common::OdomData& message)
+inline bool BuildOdomData(const State& state, std::string_view frame_id, std::string_view child_frame_id, slam_common::OdomData& message)
 {
     detail::FillTimestampHeader(state.timestamp(), message.header);
     detail::CopyString(frame_id, message.header.frame_id);
@@ -182,12 +179,9 @@ inline bool BuildFrameTransformArray(std::span<const FrameTransformData> transfo
  * @return 成功返回 true
  */
 template <typename ImageStruct>
-inline bool BuildImageMessage(const slam_core::Image& image,
-                              std::string_view frame_id,
-                              std::string_view encoding,
-                              ImageStruct& message)
+inline bool BuildImageMessage(const slam_core::Image& image, std::string_view frame_id, std::string_view encoding, ImageStruct& message)
 {
-    static_assert(std::is_same_v<ImageStruct, slam_common::Image>, "Unsupported image struct");
+    static_assert(std::is_same_v<ImageStruct, slam_common::ImageDate>, "Unsupported image struct");
 
     const auto& mat = image.data();
     if (mat.empty() || mat.channels() != 3 || mat.type() != CV_8UC3) {
@@ -227,10 +221,11 @@ inline bool BuildImageMessage(const slam_core::Image& image,
  * @return 成功返回 true
  */
 template <typename PointCloudT>
-inline bool BuildMid360FrameFromPointCloud(const PointCloudT& cloud,
-                                           uint64_t frame_timestamp_ns,
-                                           slam_common::Mid360Frame& frame,
-                                           std::string_view frame_id = "")
+inline bool BuildMid360FrameFromPointCloud(
+    const PointCloudT& cloud,
+    uint64_t frame_timestamp_ns,
+    slam_common::LivoxPointCloudDate& frame,
+    std::string_view frame_id = "")
 {
     using Descriptor = typename PointCloudT::descriptor_type;
     static_assert(slam_core::has_field_v<slam_core::PositionTag, Descriptor>, "Point cloud descriptor must provide PositionTag");
@@ -238,7 +233,7 @@ inline bool BuildMid360FrameFromPointCloud(const PointCloudT& cloud,
     constexpr bool kHasIntensity = slam_core::has_field_v<slam_core::IntensityTag, Descriptor>;
     constexpr bool kHasTimestamp = slam_core::has_field_v<slam_core::TimestampTag, Descriptor>;
 
-    const std::size_t point_count = std::min<std::size_t>(cloud.size(), slam_common::kMid360MaxPoints);
+    const std::size_t point_count = std::min<std::size_t>(cloud.size(), slam_common::kLivoxMaxPoints);
     if (point_count == 0) {
         spdlog::warn("BuildMid360FrameFromPointCloud: empty cloud");
         frame.point_count = 0;

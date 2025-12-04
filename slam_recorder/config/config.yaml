@@ -51,9 +51,8 @@ Foxglove:
 
 BagTool:
   input:
-    path: /home/ubuntu/data/odom_test.mcap
+    path: /home/ubuntu/data/indoor5.mcap
     type: ros1_mcap
-    loop: false
 
   playback:
     enable: true
@@ -71,7 +70,7 @@ BagTool:
         schema: livox_ros_driver2/CustomMsg
         playback_enabled: true
         publish_service: /livox/lidar
-      - name: /camera/image_raw/compressed
+      - name: /camera_forward/image_raw/compressed # /camera/image_raw/compressed
         schema: sensor_msgs/CompressedImage
         playback_enabled: true
         publish_service: /camera/image_raw

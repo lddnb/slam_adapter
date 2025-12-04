@@ -63,7 +63,7 @@ void Odometry<Estimator>::AddIMUData(const IMU& imu_data)
         last_timestamp_imu_ = 0.0;
         last_index_imu_ = 0;
         return;
-    } else if (imu_data.index() - last_index_imu_ > 1) {
+    } else if ((last_index_imu_ > 0) && (imu_data.index() - last_index_imu_ > 1)) {
         spdlog::warn("IMU data lost, last index {}, current index {}", last_index_imu_, imu_data.index());
     }
     last_index_imu_ = imu_data.index();

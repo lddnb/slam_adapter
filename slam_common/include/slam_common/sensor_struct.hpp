@@ -22,17 +22,17 @@ inline constexpr std::size_t kImageEncodingMaxLength = 32;
 struct LivoxImuData {
     uint64_t timestamp_ns{0};                    ///< 统一纳秒时间戳（通常来源于硬件时钟）
     uint32_t index{0};                           ///< 帧序号或驱动提供的递增索引
-    std::array<float, 3> angular_velocity{};     ///< 角速度 (rad/s)
-    std::array<float, 3> linear_acceleration{};  ///< 线加速度 (m/s^2)
+    std::array<double, 3> angular_velocity{};     ///< 角速度 (rad/s)
+    std::array<double, 3> linear_acceleration{};  ///< 线加速度 (m/s^2)
 };
 
-/// @brief Mid360 单帧最大点数，固定 20000 便于零拷贝传输
-inline constexpr std::size_t kMid360MaxPoints = 20000;
+/// @brief Livox 单帧最大点数，固定 24000 便于零拷贝传输，Avia 点数为 24000，Mid360 点数为 20000
+inline constexpr std::size_t kLivoxMaxPoints = 24000;
 
 /**
- * @brief Mid360 单点定长结构
+ * @brief Livox 单点定长结构
  */
-struct Mid360Point {
+struct LivoxPoint {
     float x{0.0F};             ///< 点的 x 坐标（米）
     float y{0.0F};             ///< 点的 y 坐标（米）
     float z{0.0F};             ///< 点的 z 坐标（米）
@@ -42,14 +42,14 @@ struct Mid360Point {
 };
 
 /**
- * @brief Mid360 点云定长帧
+ * @brief Livox 点云定长帧
  */
-struct Mid360Frame {
+struct LivoxPointCloudDate {
     uint32_t index{0};                                   ///< 帧序号
-    uint32_t point_count{0};                             ///< 实际点数，<= kMid360MaxPoints
+    uint32_t point_count{0};                             ///< 实际点数，<= kLivoxMaxPoints
     uint64_t frame_timestamp_ns{0};                      ///< 帧级时间戳（纳秒）
     std::array<char, kFrameIdMaxLength> frame_id{};      ///< 坐标系 ID（以 '\0' 结尾）
-    std::array<Mid360Point, kMid360MaxPoints> points{};  ///< 点云定长数组
+    std::array<LivoxPoint, kLivoxMaxPoints> points{};  ///< 点云定长数组
 };
 
 /**
@@ -88,7 +88,7 @@ inline constexpr std::size_t kImageMaxDataSize = 2592U * 1944U * 3U;
 /**
  * @brief 图像定长结构
  */
-struct Image {
+struct ImageDate {
     ImageHeader header;                                  ///< 头部信息
     std::array<std::uint8_t, kImageMaxDataSize> data{};  ///< 图像数据
 };
@@ -148,10 +148,10 @@ struct FrameTransformArray {
 };
 
 static_assert(std::is_trivially_copyable_v<LivoxImuData>, "LivoxImuData must be trivially copyable for zero-copy transport");
-static_assert(std::is_trivially_copyable_v<Mid360Point>, "Mid360Point must be trivially copyable for zero-copy transport");
-static_assert(std::is_trivially_copyable_v<Mid360Frame>, "Mid360Frame must be trivially copyable for zero-copy transport");
+static_assert(std::is_trivially_copyable_v<LivoxPoint>, "LivoxPoint must be trivially copyable for zero-copy transport");
+static_assert(std::is_trivially_copyable_v<LivoxPointCloudDate>, "LivoxPointCloudDate must be trivially copyable for zero-copy transport");
 static_assert(std::is_trivially_copyable_v<ImageHeader>, "ImageHeader must be trivially copyable for zero-copy transport");
-static_assert(std::is_trivially_copyable_v<Image>, "Image must be trivially copyable for zero-copy transport");
+static_assert(std::is_trivially_copyable_v<ImageDate>, "ImageDate must be trivially copyable for zero-copy transport");
 static_assert(std::is_trivially_copyable_v<PathPose>, "PathPose must be trivially copyable for zero-copy transport");
 static_assert(std::is_trivially_copyable_v<PathData>, "PathData must be trivially copyable for zero-copy transport");
 static_assert(std::is_trivially_copyable_v<OdomData>, "OdomData must be trivially copyable for zero-copy transport");

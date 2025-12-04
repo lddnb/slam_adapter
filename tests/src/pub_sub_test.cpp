@@ -40,16 +40,16 @@ LivoxImuData MakeImuSample(uint32_t idx)
  * @param point_count 点数
  * @return 点云帧
  */
-Mid360Frame MakeLidarSample(uint32_t idx, uint32_t point_count)
+LivoxPointCloudDate MakeLidarSample(uint32_t idx, uint32_t point_count)
 {
-    Mid360Frame frame{};
+    LivoxPointCloudDate frame{};
     frame.index = idx;
     frame.frame_timestamp_ns = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
     frame.frame_id.fill('\0');
     constexpr char kFrameId[] = "test_lidar";
     const std::size_t copy_len = std::min<std::size_t>(sizeof(kFrameId) - 1, frame.frame_id.size() - 1);
     std::copy_n(kFrameId, copy_len, frame.frame_id.begin());
-    frame.point_count = std::min(point_count, static_cast<uint32_t>(kMid360MaxPoints));
+    frame.point_count = std::min(point_count, static_cast<uint32_t>(kLivoxMaxPoints));
 
     thread_local std::mt19937 gen(std::random_device{}());
     thread_local std::uniform_real_distribution<float> dist(-5.0F, 5.0F);
@@ -74,8 +74,8 @@ int main()
 
     auto node = std::make_shared<IoxNode>(iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("Create node"));
 
-    IoxPublisher<Mid360Frame> pc_pub(node, "/test/lidar");
-    IoxSubscriber<Mid360Frame> pc_sub(node, "/test/lidar");
+    IoxPublisher<LivoxPointCloudDate> pc_pub(node, "/test/lidar");
+    IoxSubscriber<LivoxPointCloudDate> pc_sub(node, "/test/lidar");
 
     IoxPublisher<LivoxImuData> imu_pub(node, "/test/imu");
     IoxSubscriber<LivoxImuData> imu_sub(node, "/test/imu");
@@ -83,7 +83,7 @@ int main()
     std::atomic<uint32_t> pc_recv{0};
     std::atomic<uint32_t> imu_recv{0};
 
-    pc_sub.SetReceiveCallback([&pc_recv](const Mid360Frame& msg) {
+    pc_sub.SetReceiveCallback([&pc_recv](const LivoxPointCloudDate& msg) {
         ++pc_recv;
         spdlog::info("Received lidar frame #{} with {} points", msg.index, msg.point_count);
     });
@@ -94,7 +94,7 @@ int main()
 
     for (uint32_t i = 0; i < 3; ++i) {
         auto frame = MakeLidarSample(i, 8 + i * 2);
-        pc_pub.SetBuildCallback([frame](Mid360Frame& payload) { payload = frame; });
+        pc_pub.SetBuildCallback([frame](LivoxPointCloudDate& payload) { payload = frame; });
         pc_pub.Publish();
 
         auto imu = MakeImuSample(i);

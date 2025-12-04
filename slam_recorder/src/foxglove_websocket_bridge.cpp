@@ -141,7 +141,7 @@ std::string NormalizeImageFormat(const std::string& encoding)
  * @param bgr_mat 输出的 BGR Mat
  * @return 转换成功返回 true
  */
-bool BuildBgrMatFromImage(const slam_common::Image& image, cv::Mat& bgr_mat)
+bool BuildBgrMatFromImage(const slam_common::ImageDate& image, cv::Mat& bgr_mat)
 {
     constexpr uint32_t kChannels = 3U;
     const uint32_t width = image.header.width;
@@ -208,7 +208,7 @@ bool EncodeJpeg(const cv::Mat& bgr_mat, std::vector<uint8_t>& buffer)
 /**
  * @brief 将 Mid360 点云转换为 Foxglove 点云
  */
-bool ConvertMid360ToFoxglove(const slam_common::Mid360Frame& frame, FoxglovePointCloud& message)
+bool ConvertMid360ToFoxglove(const slam_common::LivoxPointCloudDate& frame, FoxglovePointCloud& message)
 {
     constexpr uint32_t kPointStride = 20;
     message.Clear();
@@ -283,7 +283,7 @@ bool ConvertMid360ToFoxglove(const slam_common::Mid360Frame& frame, FoxglovePoin
 /**
  * @brief 将定长图像转换为 Foxglove 压缩图像
  */
-bool ConvertImageToFoxglove(const slam_common::Image& image, FoxgloveCompressedImage& message)
+bool ConvertImageToFoxglove(const slam_common::ImageDate& image, FoxgloveCompressedImage& message)
 {
     message.Clear();
     FillTimestampFromNs(image.header.timestamp_ns, *message.mutable_timestamp());
@@ -465,7 +465,7 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config) : config_
         slam_common::IoxPubSubConfig iox_config;
 
         if (topic.schema == "foxglove.PointCloud") {
-            auto converter = [](const slam_common::Mid360Frame& payload, std::string& buffer, uint64_t& timestamp_ns) {
+            auto converter = [](const slam_common::LivoxPointCloudDate& payload, std::string& buffer, uint64_t& timestamp_ns) {
                 FoxglovePointCloud proto;
                 if (!ConvertMid360ToFoxglove(payload, proto)) {
                     return false;
@@ -473,9 +473,9 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config) : config_
                 timestamp_ns = FoxgloveWebSocketBridge::ToNanoseconds(proto.timestamp());
                 return FoxgloveWebSocketBridge::SerializeMessage(proto, buffer);
             };
-            pc_subs_[topic.name] = RegisterSubscriber<slam_common::Mid360Frame>(topic.name, topic.schema, converter, iox_config);
+            pc_subs_[topic.name] = RegisterSubscriber<slam_common::LivoxPointCloudDate>(topic.name, topic.schema, converter, iox_config);
         } else if (topic.schema == "foxglove.CompressedImage") {
-            auto converter = [](const slam_common::Image& payload, std::string& buffer, uint64_t& timestamp_ns) {
+            auto converter = [](const slam_common::ImageDate& payload, std::string& buffer, uint64_t& timestamp_ns) {
                 FoxgloveCompressedImage proto;
                 if (!ConvertImageToFoxglove(payload, proto)) {
                     return false;
@@ -483,7 +483,7 @@ FoxgloveWebSocketBridge::FoxgloveWebSocketBridge(const Config& config) : config_
                 timestamp_ns = FoxgloveWebSocketBridge::ToNanoseconds(proto.timestamp());
                 return FoxgloveWebSocketBridge::SerializeMessage(proto, buffer);
             };
-            img_subs_[topic.name] = RegisterSubscriber<slam_common::Image>(topic.name, topic.schema, converter, iox_config);
+            img_subs_[topic.name] = RegisterSubscriber<slam_common::ImageDate>(topic.name, topic.schema, converter, iox_config);
         } else if (topic.schema == "foxglove.Imu") {
             auto converter = [](const slam_common::LivoxImuData& payload, std::string& buffer, uint64_t& timestamp_ns) {
                 FoxgloveImu proto;
@@ -982,24 +982,24 @@ std::shared_ptr<slam_common::IoxSubscriber<MessageType>> FoxgloveWebSocketBridge
                 std::lock_guard<std::mutex> lock(pending_mutex_);
                 pending_packets_[topic_name].push_back({std::move(buffer), aligned_ts});
             }
-        }, iox_config);
+        },
+        iox_config);
 
     spdlog::info("iceoryx2 subscriber created for topic {} ({})", topic_name, schema_name);
     return subscriber;
 }
 
 // 显式实例化
-template std::shared_ptr<slam_common::IoxSubscriber<slam_common::Mid360Frame>>
-FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::Mid360Frame>(
+template std::shared_ptr<slam_common::IoxSubscriber<slam_common::LivoxPointCloudDate>>
+FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::LivoxPointCloudDate>(
     const std::string&,
     const std::string&,
-    const std::function<bool(const slam_common::Mid360Frame&, std::string&, uint64_t&)>&,
+    const std::function<bool(const slam_common::LivoxPointCloudDate&, std::string&, uint64_t&)>&,
     const slam_common::IoxPubSubConfig&);
-template std::shared_ptr<slam_common::IoxSubscriber<slam_common::Image>>
-FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::Image>(
+template std::shared_ptr<slam_common::IoxSubscriber<slam_common::ImageDate>> FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::ImageDate>(
     const std::string&,
     const std::string&,
-    const std::function<bool(const slam_common::Image&, std::string&, uint64_t&)>&,
+    const std::function<bool(const slam_common::ImageDate&, std::string&, uint64_t&)>&,
     const slam_common::IoxPubSubConfig&);
 template std::shared_ptr<slam_common::IoxSubscriber<slam_common::LivoxImuData>>
 FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::LivoxImuData>(
@@ -1007,14 +1007,12 @@ FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::LivoxImuData>(
     const std::string&,
     const std::function<bool(const slam_common::LivoxImuData&, std::string&, uint64_t&)>&,
     const slam_common::IoxPubSubConfig&);
-template std::shared_ptr<slam_common::IoxSubscriber<slam_common::OdomData>>
-FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::OdomData>(
+template std::shared_ptr<slam_common::IoxSubscriber<slam_common::OdomData>> FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::OdomData>(
     const std::string&,
     const std::string&,
     const std::function<bool(const slam_common::OdomData&, std::string&, uint64_t&)>&,
     const slam_common::IoxPubSubConfig&);
-template std::shared_ptr<slam_common::IoxSubscriber<slam_common::PathData>>
-FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::PathData>(
+template std::shared_ptr<slam_common::IoxSubscriber<slam_common::PathData>> FoxgloveWebSocketBridge::RegisterSubscriber<slam_common::PathData>(
     const std::string&,
     const std::string&,
     const std::function<bool(const slam_common::PathData&, std::string&, uint64_t&)>&,

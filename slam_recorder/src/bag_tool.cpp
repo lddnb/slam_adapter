@@ -49,12 +49,12 @@ namespace
 {
 
 using ms_slam::slam_common::FrameTransformArray;
-using ms_slam::slam_common::Image;
+using ms_slam::slam_common::ImageDate;
+using ms_slam::slam_common::kLivoxMaxPoints;
 using ms_slam::slam_common::kMaxFrameTransforms;
 using ms_slam::slam_common::kMaxPathPoses;
-using ms_slam::slam_common::kMid360MaxPoints;
 using ms_slam::slam_common::LivoxImuData;
-using ms_slam::slam_common::Mid360Frame;
+using ms_slam::slam_common::LivoxPointCloudDate;
 using ms_slam::slam_common::OdomData;
 using ms_slam::slam_common::PathData;
 using ms_slam::slam_common::TimeFrameHeader;
@@ -189,8 +189,8 @@ struct PlaybackContext {
     double rate{1.0};
     slam_common::IoxPubSubConfig pubsub_config{};
     std::shared_ptr<slam_common::IoxNode> node;
-    std::unordered_map<std::string, std::unique_ptr<slam_common::IoxPublisher<Mid360Frame>>> pointcloud_publishers;
-    std::unordered_map<std::string, std::unique_ptr<slam_common::IoxPublisher<Image>>> image_publishers;
+    std::unordered_map<std::string, std::unique_ptr<slam_common::IoxPublisher<LivoxPointCloudDate>>> pointcloud_publishers;
+    std::unordered_map<std::string, std::unique_ptr<slam_common::IoxPublisher<ImageDate>>> image_publishers;
     std::unordered_map<std::string, std::unique_ptr<slam_common::IoxPublisher<LivoxImuData>>> imu_publishers;
     std::unordered_map<std::string, std::unique_ptr<slam_common::IoxPublisher<OdomData>>> odom_publishers;
     std::unordered_map<std::string, std::unique_ptr<slam_common::IoxPublisher<PathData>>> path_publishers;
@@ -296,8 +296,7 @@ slam_common::IoxPublisher<Payload>* EnsureIoxPublisher(
         return nullptr;
     }
 
-    auto publisher =
-        std::make_unique<slam_common::IoxPublisher<Payload>>(ctx.node, service_name, nullptr, ctx.pubsub_config);
+    auto publisher = std::make_unique<slam_common::IoxPublisher<Payload>>(ctx.node, service_name, nullptr, ctx.pubsub_config);
     auto* raw_ptr = publisher.get();
     cache.emplace(service_name, std::move(publisher));
     spdlog::info("Iox publisher created for {}", service_name);
@@ -373,7 +372,7 @@ inline uint64_t ToNanoseconds(uint32_t sec, uint32_t nsec)
 }
 
 /**
- * @brief 使用 BGR 数据填充 Image 结构
+ * @brief 使用 BGR 数据填充 ImageDate 结构
  * @param timestamp_ns 时间戳（纳秒）
  * @param frame_id 坐标系 ID
  * @param width 图像宽度
@@ -384,7 +383,13 @@ inline uint64_t ToNanoseconds(uint32_t sec, uint32_t nsec)
  * @return 成功填充返回 true
  */
 bool FillBgrImage(
-    uint64_t timestamp_ns, const std::string& frame_id, uint32_t width, uint32_t height, const uint8_t* payload, std::size_t payload_size, Image& image)
+    uint64_t timestamp_ns,
+    const std::string& frame_id,
+    uint32_t width,
+    uint32_t height,
+    const uint8_t* payload,
+    std::size_t payload_size,
+    ImageDate& image)
 {
     constexpr std::size_t kChannels = 3U;
     const std::size_t width_sz = static_cast<std::size_t>(width);
@@ -393,7 +398,8 @@ bool FillBgrImage(
         spdlog::warn("FillBgrImage: invalid image size {}x{}", width, height);
         return false;
     }
-    if (width_sz > std::numeric_limits<std::size_t>::max() / height_sz || width_sz * height_sz > std::numeric_limits<std::size_t>::max() / kChannels) {
+    if (width_sz > std::numeric_limits<std::size_t>::max() / height_sz ||
+        width_sz * height_sz > std::numeric_limits<std::size_t>::max() / kChannels) {
         spdlog::warn("FillBgrImage: image size overflow {}x{}", width, height);
         return false;
     }
@@ -425,7 +431,7 @@ bool FillBgrImage(
     return true;
 }
 
-bool ConvertPointCloud(const mcap::MessageView& view, const MessageDescriptor& descriptor, Mid360Frame& frame)
+bool ConvertPointCloud(const mcap::MessageView& view, const MessageDescriptor& descriptor, LivoxPointCloudDate& frame)
 {
     if (!descriptor.is_ros) {
         spdlog::warn("Non-ROS pointcloud unsupported");
@@ -445,7 +451,7 @@ bool ConvertPointCloud(const mcap::MessageView& view, const MessageDescriptor& d
         frame.index = livox_msg.header.seq;
         frame.frame_timestamp_ns = ToNanoseconds(livox_msg.header.stamp_sec, livox_msg.header.stamp_nsec);
         CopyStringToArray(livox_msg.header.frame_id, frame.frame_id);
-        frame.point_count = static_cast<uint32_t>(std::min<std::size_t>(livox_msg.points.size(), kMid360MaxPoints));
+        frame.point_count = static_cast<uint32_t>(std::min<std::size_t>(livox_msg.points.size(), kLivoxMaxPoints));
         for (uint32_t i = 0; i < frame.point_count; ++i) {
             const auto& src = livox_msg.points[i];
             auto& dst = frame.points[i];
@@ -507,7 +513,7 @@ bool ConvertPointCloud(const mcap::MessageView& view, const MessageDescriptor& d
     frame.index = pc2.header.seq;
     frame.frame_timestamp_ns = ToNanoseconds(pc2.header.stamp_sec, pc2.header.stamp_nsec);
     CopyStringToArray(pc2.header.frame_id, frame.frame_id);
-    frame.point_count = static_cast<uint32_t>(std::min<std::size_t>(total_points, kMid360MaxPoints));
+    frame.point_count = static_cast<uint32_t>(std::min<std::size_t>(total_points, kLivoxMaxPoints));
 
     for (uint32_t i = 0; i < frame.point_count; ++i) {
         const auto* base_ptr = pc2.data.data() + i * stride;
@@ -539,7 +545,7 @@ bool ConvertPointCloud(const mcap::MessageView& view, const MessageDescriptor& d
  * @param image 输出图像
  * @return 成功返回 true
  */
-bool ConvertCompressedImage(const mcap::MessageView& view, const MessageDescriptor& descriptor, Image& image)
+bool ConvertCompressedImage(const mcap::MessageView& view, const MessageDescriptor& descriptor, ImageDate& image)
 {
     if (!descriptor.is_ros) {
         return false;
@@ -581,7 +587,13 @@ bool ConvertCompressedImage(const mcap::MessageView& view, const MessageDescript
         return false;
     }
     return FillBgrImage(
-        ToNanoseconds(ros_img.header.stamp_sec, ros_img.header.stamp_nsec), ros_img.header.frame_id, width, height, decoded.data, payload_size, image);
+        ToNanoseconds(ros_img.header.stamp_sec, ros_img.header.stamp_nsec),
+        ros_img.header.frame_id,
+        width,
+        height,
+        decoded.data,
+        payload_size,
+        image);
 }
 
 /**
@@ -591,7 +603,7 @@ bool ConvertCompressedImage(const mcap::MessageView& view, const MessageDescript
  * @param image 输出图像
  * @return 成功返回 true
  */
-bool ConvertRawImage(const mcap::MessageView& view, const MessageDescriptor& descriptor, Image& image)
+bool ConvertRawImage(const mcap::MessageView& view, const MessageDescriptor& descriptor, ImageDate& image)
 {
     if (!descriptor.is_ros) {
         return false;
@@ -990,7 +1002,7 @@ int RunToolImpl(const ToolConfig& config)
             case MessageKind::PointCloud: {
                 auto* pub = EnsureIoxPublisher(runtime.playback.pointcloud_publishers, runtime.playback, topic_settings.publish_service);
                 if (pub != nullptr) {
-                    const bool sent = pub->PublishWithBuilder([&](Mid360Frame& payload) {
+                    const bool sent = pub->PublishWithBuilder([&](LivoxPointCloudDate& payload) {
                         if (!ConvertPointCloud(view, descriptor, payload)) {
                             return false;
                         }
@@ -1006,7 +1018,7 @@ int RunToolImpl(const ToolConfig& config)
             case MessageKind::Image: {
                 auto* pub = EnsureIoxPublisher(runtime.playback.image_publishers, runtime.playback, topic_settings.publish_service);
                 if (pub != nullptr) {
-                    const bool sent = pub->PublishWithBuilder([&](Image& payload) {
+                    const bool sent = pub->PublishWithBuilder([&](ImageDate& payload) {
                         if (!ConvertRawImage(view, descriptor, payload)) {
                             return false;
                         }
@@ -1022,7 +1034,7 @@ int RunToolImpl(const ToolConfig& config)
             case MessageKind::CompressedImage: {
                 auto* pub = EnsureIoxPublisher(runtime.playback.image_publishers, runtime.playback, topic_settings.publish_service);
                 if (pub != nullptr) {
-                    const bool sent = pub->PublishWithBuilder([&](Image& payload) {
+                    const bool sent = pub->PublishWithBuilder([&](ImageDate& payload) {
                         if (!ConvertCompressedImage(view, descriptor, payload)) {
                             return false;
                         }
@@ -1238,12 +1250,6 @@ int main(int argc, char** argv)
         logger->flush_on(spdlog::level::warn);
 
         spdlog::set_default_logger(logger);
-
-        if (!SLAM_CRASH_LOGGER_INIT(logger)) {
-            spdlog::error("Failed to initialize crash logger!");
-            return 1;
-        }
-        spdlog::info("Crash logger initialized successfully");
 
         auto config = ms_slam::slam_recorder::LoadBagToolConfig(config_path);
         return ms_slam::slam_recorder::RunTool(config);

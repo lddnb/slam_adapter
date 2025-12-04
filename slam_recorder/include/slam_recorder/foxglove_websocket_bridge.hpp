@@ -310,8 +310,8 @@ class FoxgloveWebSocketBridge
     std::shared_ptr<slam_common::IoxNode> iox_node_;
 
     // iceoryx2 订阅者（topic_name -> subscriber）
-    std::unordered_map<std::string, std::shared_ptr<slam_common::IoxSubscriber<slam_common::Mid360Frame>>> pc_subs_;
-    std::unordered_map<std::string, std::shared_ptr<slam_common::IoxSubscriber<slam_common::Image>>> img_subs_;
+    std::unordered_map<std::string, std::shared_ptr<slam_common::IoxSubscriber<slam_common::LivoxPointCloudDate>>> pc_subs_;
+    std::unordered_map<std::string, std::shared_ptr<slam_common::IoxSubscriber<slam_common::ImageDate>>> img_subs_;
     std::unordered_map<std::string, std::shared_ptr<slam_common::IoxSubscriber<slam_common::LivoxImuData>>> imu_subs_;
     std::unordered_map<std::string, std::shared_ptr<slam_common::IoxSubscriber<slam_common::OdomData>>> pose_subs_;
     std::unordered_map<std::string, std::shared_ptr<slam_common::IoxSubscriber<slam_common::PathData>>> poses_subs_;
