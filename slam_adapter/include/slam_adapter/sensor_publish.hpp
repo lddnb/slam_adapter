@@ -23,9 +23,6 @@
 #include <slam_core/point_cloud.hpp>
 #include <slam_core/point_types.hpp>
 
-using State = ms_slam::slam_core::FilterState;
-using States = ms_slam::slam_core::FilterStates;
-
 namespace ms_slam::slam_adapter
 {
 /**
@@ -86,7 +83,7 @@ inline void FillPose(const Eigen::Vector3d& translation, const Eigen::Quaternion
  * @param message 输出里程计
  * @return 成功返回 true
  */
-inline bool BuildOdomData(const State& state, std::string_view frame_id, std::string_view child_frame_id, slam_common::OdomData& message)
+inline bool BuildOdomData(const slam_core::CommonState& state, std::string_view frame_id, std::string_view child_frame_id, slam_common::OdomData& message)
 {
     detail::FillTimestampHeader(state.timestamp(), message.header);
     detail::CopyString(frame_id, message.header.frame_id);
@@ -122,7 +119,7 @@ inline bool BuildOdomData(const State& state, std::string_view frame_id, std::st
  * @param message 输出路径
  * @return 成功返回 true
  */
-inline bool BuildPathData(const std::vector<State>& states, std::string_view frame_id, slam_common::PathData& message)
+inline bool BuildPathData(const std::vector<slam_core::CommonState>& states, std::string_view frame_id, slam_common::PathData& message)
 {
     if (states.empty()) {
         spdlog::warn("BuildPathData: empty states");

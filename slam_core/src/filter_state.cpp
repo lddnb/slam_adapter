@@ -286,6 +286,22 @@ void FilterStateTemplate<kObsDim, kResDim>::ClearHModels()
     h_models_.clear();
 }
 
+template<int kObsDim, int kResDim>
+CommonState FilterStateTemplate<kObsDim, kResDim>::ExportCommonState() const
+{
+    CommonState payload;
+    payload.p(p());
+    payload.R(R());
+    payload.v(v());
+    payload.b_g(b_g());
+    payload.b_a(b_a());
+    payload.g(g());
+    payload.timestamp(timestamp());
+    Eigen::Matrix<double, CommonState::DoF, CommonState::DoF> cov = P. template block<CommonState::DoF, CommonState::DoF>(0, 0);
+    payload.cov(cov);
+    return payload;
+}
+
 template class FilterStateTemplate<6, 1>;
 
 }  // namespace ms_slam::slam_core

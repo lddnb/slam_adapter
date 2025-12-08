@@ -26,7 +26,7 @@
 #include <slam_common/iceoryx_pub_sub.hpp>
 #include <slam_common/sensor_struct.hpp>
 #include <slam_recorder/ros1_msg.hpp>
-#include <slam_core/odometry.hpp>
+#include <slam_core/mapping.hpp>
 #include <yaml-cpp/yaml.h>
 
 #include "slam_adapter/config_loader.hpp"
@@ -311,7 +311,7 @@ struct PlaybackOptions {
 };
 
 /**
- * @brief 从 MCAP 文件读取数据并注入 Odometry
+ * @brief 从 MCAP 文件读取数据并注入 Mapping
  */
 class McapPlaybackRunner
 {
@@ -326,7 +326,7 @@ class McapPlaybackRunner
      * @param exit_flag 全局退出标志
      */
     McapPlaybackRunner(
-        std::shared_ptr<FilterOdometry> odom,
+        std::shared_ptr<Mapping> odom,
         std::string mcap_path,
         PlaybackOptions options,
         double blind_dist,
@@ -361,7 +361,7 @@ class McapPlaybackRunner
 
   private:
     /**
-     * @brief 线程入口，负责读取 MCAP 并调用 Odometry
+     * @brief 线程入口，负责读取 MCAP 并调用 Mapping
      */
     void Run()
     {
@@ -494,7 +494,7 @@ class McapPlaybackRunner
         spdlog::info("MCAP playback finished");
     }
 
-    std::shared_ptr<FilterOdometry> odom_;
+    std::shared_ptr<Mapping> odom_;
     std::string mcap_path_;
     PlaybackOptions options_;
     double blind_dist_{0.5};
@@ -506,7 +506,7 @@ class McapPlaybackRunner
 }  // namespace
 
 /**
- * @brief 程序入口，使用 MCAP 数据驱动 Odometry 并通过 iceoryx2 发布
+ * @brief 程序入口，使用 MCAP 数据驱动 Mapping 并通过 iceoryx2 发布
  * @param argc 参数数量
  * @param argv 参数数组（可选：指定 BagTool 配置路径）
  * @return 进程退出码
@@ -556,7 +556,7 @@ int main(int argc, char** argv)
     playback_options.duration_s = bag_node["time_window"]["duration_seconds"].as<double>();
     const std::string input_path = (argc > 1) ? std::string(argv[1]) : bag_node["input"]["path"].as<std::string>();
 
-    auto odom = std::make_shared<FilterOdometry>();
+    auto odom = std::make_shared<Mapping>();
 
     IoxPublisher<OdomData> odom_pub(node, "/odom");
     IoxPublisher<FrameTransformArray> tf_pub(node, "/tf");
@@ -567,8 +567,8 @@ int main(int argc, char** argv)
     McapPlaybackRunner playback_runner(odom, input_path, playback_options, blind_dist, use_img, shouldExit);
     playback_runner.Start();
 
-    States lidar_states_buffer;
-    std::vector<State> states_buffer;
+    std::vector<CommonState> lidar_states_buffer;
+    std::vector<CommonState> states_buffer;
     OdomData odom_msg{};
     FrameTransformArray tf_msg{};
     PathData path_msg{};

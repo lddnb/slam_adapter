@@ -1,4 +1,4 @@
-#include "slam_core/filter_estimator.hpp"
+#include "slam_core/filter_odom.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -16,8 +16,8 @@
 namespace ms_slam::slam_core
 {
 template <typename LocalMap>
-FilterEstimator<LocalMap>::FilterEstimator()
-: EstimatorBase<LocalMap>(),
+FilterOdom<LocalMap>::FilterOdom()
+: OdomBaseImpl<LocalMap>(),
   init_imu_count_(0),
   init_gyro_avg_(Eigen::Vector3d::Zero()),
   init_accel_avg_(Eigen::Vector3d::Zero()),
@@ -27,23 +27,40 @@ FilterEstimator<LocalMap>::FilterEstimator()
 #ifdef USE_VOXELMAP
     static_assert(!std::is_same_v<LocalMap, VoxelMap>, "VoxelMap path will be handled separately");
 #endif
-    EstimatorBase<LocalMap>::InitializeFromConfig(cfg_);
+    OdomBaseImpl<LocalMap>::InitializeFromConfig(cfg_);
     state_ = StateType();
     state_.AddHModel(
         "lidar",
-        std::bind(&FilterEstimator<LocalMap>::ObsModel, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
-    spdlog::info("FilterEstimator constructed");
+        std::bind(&FilterOdom<LocalMap>::ObsModel, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+    spdlog::info("FilterOdom constructed");
 }
 
 template <typename LocalMap>
-typename FilterEstimator<LocalMap>::StateType FilterEstimator<LocalMap>::GetStateSnapshot() const
+typename FilterOdom<LocalMap>::StateType FilterOdom<LocalMap>::GetStateSnapshot() const
 {
     std::lock_guard<std::mutex> lock(this->state_mutex_);
     return state_;
 }
 
 template <typename LocalMap>
-void FilterEstimator<LocalMap>::ExportLidarStates(StatesType& out)
+CommonState FilterOdom<LocalMap>::GetState()  const
+{
+    std::lock_guard<std::mutex> lock(this->state_mutex_);
+    CommonState view{};
+    view.p(state_.p());
+    view.quat(state_.quat());
+    view.v(state_.v());
+    view.b_g(state_.b_g());
+    view.b_a(state_.b_a());
+    view.g(state_.g());
+    view.timestamp(state_.timestamp());
+    Eigen::Matrix<double, CommonState::DoF, CommonState::DoF> cov = state_.cov().block<CommonState::DoF, CommonState::DoF>(0, 0);
+    view.cov(cov);
+    return view;
+}
+
+template <typename LocalMap>
+void FilterOdom<LocalMap>::ExportLidarStates(std::vector<CommonState>& out)
 {
     std::lock_guard<std::mutex> lock(this->state_mutex_);
     out.clear();
@@ -53,7 +70,7 @@ void FilterEstimator<LocalMap>::ExportLidarStates(StatesType& out)
 }
 
 template <typename LocalMap>
-void FilterEstimator<LocalMap>::ProcessSyncData(const SyncData& sync_data)
+void FilterOdom<LocalMap>::ProcessSyncData(const SyncData& sync_data)
 {
     EASY_FUNCTION(profiler::colors::Lime700);
     if (!this->initialized_) {
@@ -87,18 +104,18 @@ void FilterEstimator<LocalMap>::ProcessSyncData(const SyncData& sync_data)
 }
 
 template <typename LocalMap>
-void FilterEstimator<LocalMap>::PushLidarState(const StateType& state)
+void FilterOdom<LocalMap>::PushLidarState(const StateType& state)
 {
     std::unique_lock<std::mutex> lock(this->state_mutex_, std::try_to_lock);
     if (lock.owns_lock()) {
-        lidar_state_buffer_.emplace_back(state);
+        lidar_state_buffer_.emplace_back(state.ExportCommonState());
     } else {
         spdlog::info("Skip lidar_state_buffer push: state_mutex busy at {:.3f}s", state.timestamp());
     }
 }
 
 template <typename LocalMap>
-void FilterEstimator<LocalMap>::TryInitialize(const SyncData& sync_data)
+void FilterOdom<LocalMap>::TryInitialize(const SyncData& sync_data)
 {
     EASY_FUNCTION(profiler::colors::LightBlue300);
     for (size_t i = 0; i + 1 < sync_data.imu_data.size(); ++i) {
@@ -184,7 +201,7 @@ void FilterEstimator<LocalMap>::TryInitialize(const SyncData& sync_data)
 }
 
 template <typename LocalMap>
-void FilterEstimator<LocalMap>::ProcessImuData(const SyncData& sync_data)
+void FilterOdom<LocalMap>::ProcessImuData(const SyncData& sync_data)
 {
     EASY_FUNCTION(profiler::colors::Pink300);
     if (sync_data.imu_data.size() < 10) {
@@ -248,7 +265,7 @@ void FilterEstimator<LocalMap>::ProcessImuData(const SyncData& sync_data)
 }
 
 template <typename LocalMap>
-PointCloudType::Ptr FilterEstimator<LocalMap>::Deskew(const PointCloudType::ConstPtr& cloud) const
+PointCloudType::Ptr FilterOdom<LocalMap>::Deskew(const PointCloudType::ConstPtr& cloud) const
 {
     EASY_FUNCTION(profiler::colors::Teal300);
     if (!cloud) {
@@ -298,7 +315,7 @@ PointCloudType::Ptr FilterEstimator<LocalMap>::Deskew(const PointCloudType::Cons
 
 #ifdef USE_PCL
 template <typename LocalMap>
-PointCloudT::Ptr FilterEstimator<LocalMap>::PCLDeskew(const PointCloudT::ConstPtr& cloud) const
+PointCloudT::Ptr FilterOdom<LocalMap>::PCLDeskew(const PointCloudT::ConstPtr& cloud) const
 {
     EASY_FUNCTION(profiler::colors::Teal900);
     if (!cloud) {
@@ -348,7 +365,7 @@ PointCloudT::Ptr FilterEstimator<LocalMap>::PCLDeskew(const PointCloudT::ConstPt
 #endif
 
 template <typename LocalMap>
-void FilterEstimator<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, StateType::NoiseDiag& noise_inv)
+void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, StateType::NoiseDiag& noise_inv)
 {
     EASY_FUNCTION(profiler::colors::Green500);
     H.resize(0, FilterState::DoFObs);
@@ -432,21 +449,21 @@ void FilterEstimator<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z,
 }
 
 template <typename LocalMap>
-void FilterEstimator<LocalMap>::UpdateWithModel()
+void FilterOdom<LocalMap>::UpdateWithModel()
 {
     EASY_FUNCTION(profiler::colors::DeepPurpleA400);
     state_.UpdateWithModel("lidar");
 }
 
 template <typename LocalMap>
-void FilterEstimator<LocalMap>::UpdateLocalMap()
+void FilterOdom<LocalMap>::UpdateLocalMap()
 {
     EASY_FUNCTION(profiler::colors::DarkBrown);
     const Eigen::Isometry3d world_T_lidar = state_.isometry3d() * this->T_i_l_;
-    EstimatorBase<LocalMap>::UpdateLocalMap(world_T_lidar, state_.p(), this->deskewed_cloud_, this->downsampled_cloud_);
+    OdomBaseImpl<LocalMap>::UpdateLocalMap(world_T_lidar, state_.p(), this->deskewed_cloud_, this->downsampled_cloud_);
 }
 
-template class FilterEstimator<VDBMap>;
-template class FilterEstimator<VoxelHashMap>;
-template class FilterEstimator<thuni::Octree>;
+template class FilterOdom<VDBMap>;
+template class FilterOdom<VoxelHashMap>;
+template class FilterOdom<thuni::Octree>;
 }  // namespace ms_slam::slam_core

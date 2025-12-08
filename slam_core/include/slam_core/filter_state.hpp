@@ -10,7 +10,10 @@
 
 #include <Eigen/Core>
 #include <Eigen/Dense>
+#include <Eigen/Geometry>
 #include <manif/manif.h>
+
+#include "slam_core/common_state.hpp"
 
 namespace ms_slam::slam_core
 {
@@ -125,6 +128,12 @@ class FilterStateTemplate
     inline ProcessMatrix cov() const noexcept { return P; }
     inline double timestamp() const noexcept { return stamp; }
     void timestamp(double in) noexcept { stamp = in; }
+
+    /**
+     * @brief 导出跨模块通用的状态快照
+     * @return CommonState 格式的状态量
+     */
+    [[nodiscard]] CommonState ExportCommonState() const;
 
     /**
      * @brief 设置单一观测模型，旧接口保持兼容（内部清空后追加）

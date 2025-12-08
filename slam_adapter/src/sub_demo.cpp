@@ -11,7 +11,7 @@
 #include <slam_common/crash_logger.hpp>
 #include <slam_common/iceoryx_pub_sub.hpp>
 #include <slam_common/sensor_struct.hpp>
-#include <slam_core/odometry.hpp>
+#include <slam_core/mapping.hpp>
 
 #include "slam_adapter/config_loader.hpp"
 #include "slam_adapter/sensor_publish.hpp"
@@ -76,7 +76,7 @@ int main()
     const double blind_dist = config_inst.common_params.blind;
     const bool use_img = config_inst.common_params.render_en;
 
-    auto odom = std::make_shared<FilterOdometry>();
+    auto odom = std::make_shared<Mapping>();
 
     ms_slam::slam_common::IoxPublisher<ms_slam::slam_common::OdomData> odom_pub(node, "/odom");
     ms_slam::slam_common::IoxPublisher<ms_slam::slam_common::FrameTransformArray> tf_pub(node, "/tf");
@@ -133,8 +133,8 @@ int main()
         IoxPubSubConfig{.subscriber_max_buffer_size = 500});
     spdlog::info("IMU subscriber started on service {}", config_inst.common_params.imu_topic);
 
-    States lidar_states_buffer;
-    std::vector<State> states_buffer;
+    std::vector<CommonState> lidar_states_buffer;
+    std::vector<CommonState> states_buffer;
     ms_slam::slam_common::OdomData odom_msg{};
     ms_slam::slam_common::FrameTransformArray tf_msg{};
     ms_slam::slam_common::PathData path_msg{};

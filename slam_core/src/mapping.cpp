@@ -1,4 +1,4 @@
-#include "slam_core/odometry.hpp"
+#include "slam_core/mapping.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -16,44 +16,66 @@
 
 namespace ms_slam::slam_core
 {
+/**
+ * @brief 创建滤波里程计后端的工厂函数
+ * @param type 里程计后端类型
+ * @return 里程计实例
+ */
+std::unique_ptr<OdomBase> CreateOdomEstimator(OdomType type)
+{
+    switch (type) {
+        case OdomType::kFilterVoxelHash:
+            spdlog::info("Creating FilterOdom with VoxelHashMap");
+            return std::make_unique<FilterOdom<VoxelHashMap>>();
+        case OdomType::kFilterOctree:
+            spdlog::info("Creating FilterOdom with Octree");
+            return std::make_unique<FilterOdom<thuni::Octree>>();
+        case OdomType::kFilterVdb:
+        default:
+            spdlog::info("Creating FilterOdom with VDBMap");
+            return std::make_unique<FilterOdom<VDBMap>>();
+    }
+}
 
-template<EstimatorConcept Estimator>
-Odometry<Estimator>::Odometry()
+Mapping::Mapping(OdomType type)
+    : visual_enable_(false),
+      estimator_(nullptr),
+      mapping_thread_(nullptr),
+      last_timestamp_imu_(0.0),
+      last_index_imu_(0),
+      running_(true)
 {
     EASY_FUNCTION(profiler::colors::Amber100);
     const auto& cfg = Config::GetInstance();
-    running_ = true;
     visual_enable_ = cfg.common_params.render_en;
-    last_timestamp_imu_ = 0.0;
-    last_index_imu_ = 0;
-    odometry_thread_ = std::make_unique<std::thread>(&Odometry::RunOdometry, this);
-    spdlog::info("Odometry thread initialized");
+    estimator_ = CreateOdomEstimator(type);
+    if (!estimator_) {
+        spdlog::error("Failed to create odom estimator for type {}", static_cast<int>(type));
+    }
+    mapping_thread_ = std::make_unique<std::thread>(&Mapping::RunMapping, this);
+    spdlog::info("Mapping thread initialized with odometry {}", static_cast<int>(type));
 }
 
-template<EstimatorConcept Estimator>
-Odometry<Estimator>::~Odometry()
+Mapping::~Mapping()
 {
     EASY_FUNCTION();
     Stop();
 }
 
-template<EstimatorConcept Estimator>
-void Odometry<Estimator>::Stop()
+void Mapping::Stop()
 {
     EASY_FUNCTION();
     if (!running_.exchange(false)) {
         return;
     }
-    if (odometry_thread_ && odometry_thread_->joinable()) {
-        odometry_thread_->join();
+    if (mapping_thread_ && mapping_thread_->joinable()) {
+        mapping_thread_->join();
     }
-    odometry_thread_.reset();
-    spdlog::info("Odometry thread stopped");
+    mapping_thread_.reset();
+    spdlog::info("Mapping thread stopped");
 }
 
-// TODO: 设置缓冲区
-template<EstimatorConcept Estimator>
-void Odometry<Estimator>::AddIMUData(const IMU& imu_data)
+void Mapping::AddIMUData(const IMU& imu_data)
 {
     std::unique_lock<std::mutex> lock(data_mutex_);
     if (imu_data.timestamp() <= last_timestamp_imu_) {
@@ -71,22 +93,19 @@ void Odometry<Estimator>::AddIMUData(const IMU& imu_data)
     imu_buffer_.emplace_back(imu_data);
 }
 
-template<EstimatorConcept Estimator>
-void Odometry<Estimator>::AddLidarData(const PointCloudType::ConstPtr& lidar_data)
+void Mapping::AddLidarData(const PointCloudType::ConstPtr& lidar_data)
 {
     std::unique_lock<std::mutex> lock(data_mutex_);
     lidar_buffer_.emplace_back(lidar_data);
 }
 
-template<EstimatorConcept Estimator>
-void Odometry<Estimator>::AddImageData(const Image& image_data)
+void Mapping::AddImageData(const Image& image_data)
 {
     std::unique_lock<std::mutex> lock(data_mutex_);
     image_buffer_.emplace_back(image_data);
 }
 
-template<EstimatorConcept Estimator>
-std::vector<SyncData> Odometry<Estimator>::SyncPackages()
+std::vector<SyncData> Mapping::SyncPackages()
 {
     EASY_FUNCTION(profiler::colors::Cyan);
     LOG_EVERY_N(info, 1000, "buff size: lidar {}, imu {}, image {}", lidar_buffer_.size(), imu_buffer_.size(), image_buffer_.size());
@@ -208,10 +227,9 @@ std::vector<SyncData> Odometry<Estimator>::SyncPackages()
     return sync_data_list;
 }
 
-template<EstimatorConcept Estimator>
-void Odometry<Estimator>::RunOdometry()
+void Mapping::RunMapping()
 {
-    EASY_THREAD_SCOPE("OdometryThread");
+    EASY_THREAD_SCOPE("MappingThread");
     while (running_) {
         std::vector<SyncData> sync_data_list = SyncPackages();
         if (sync_data_list.empty()) {
@@ -220,10 +238,14 @@ void Odometry<Estimator>::RunOdometry()
         }
 
         for (const auto& sync_data : sync_data_list) {
-            EASY_VALUE("frame_index", static_cast<int>(estimator_.FrameIndex()));
+            if (!estimator_) {
+                spdlog::error("Estimator is null, skip frame");
+                continue;
+            }
+            EASY_VALUE("frame_index", static_cast<int>(estimator_->FrameIndex()));
             spdlog::info(
                 "Frame [{}]: PC ts: {:.3f} --> {:.3f}, size: {}, IMU ts: {:.3f} --> {:.3f}, size: {}",
-                estimator_.FrameIndex(),
+                estimator_->FrameIndex(),
                 sync_data.lidar_beg_time,
                 sync_data.lidar_end_time,
                 sync_data.lidar_data->size(),
@@ -234,66 +256,66 @@ void Odometry<Estimator>::RunOdometry()
                 spdlog::info("Synchronized images ts: {:.3f}", sync_data_list.front().image_data.timestamp());
             }
 
-            estimator_.ProcessSyncData(sync_data);
-            if (!estimator_.IsInitialized()) {
-                spdlog::warn("Estimator is initializing, skip update at pc ts {:.3f}", sync_data.lidar_beg_time);
+            estimator_->ProcessSyncData(sync_data);
+            if (!estimator_->IsInitialized()) {
+                spdlog::warn("Odom estimator is initializing, skip update at pc ts {:.3f}", sync_data.lidar_beg_time);
                 continue;
             }
-            const auto state_snapshot = estimator_.GetStateSnapshot();
+            const auto state_view = estimator_->GetState();
             spdlog::info(
                 "[state] update pos: {:.6f} {:.6f} {:.6f}, quat: {:.6f} {:.6f} {:.6f} {:.6f}",
-                state_snapshot.p().x(),
-                state_snapshot.p().y(),
-                state_snapshot.p().z(),
-                state_snapshot.quat().x(),
-                state_snapshot.quat().y(),
-                state_snapshot.quat().z(),
-                state_snapshot.quat().w());
+                state_view.p().x(),
+                state_view.p().y(),
+                state_view.p().z(),
+                state_view.quat().x(),
+                state_view.quat().y(),
+                state_view.quat().z(),
+                state_view.quat().w());
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 
-template<EstimatorConcept Estimator>
-void Odometry<Estimator>::GetLidarState(typename Estimator::StatesType& buffer)
+void Mapping::GetLidarState(std::vector<CommonState>& buffer)
 {
-    estimator_.ExportLidarStates(buffer);
+    if (estimator_) {
+        estimator_->ExportLidarStates(buffer);
+    } else {
+        buffer.clear();
+    }
 }
 
-template<EstimatorConcept Estimator>
-void Odometry<Estimator>::GetMapCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
+void Mapping::GetMapCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
 {
-    estimator_.ExportMapCloud(cloud_buffer);
+    if (estimator_) {
+        estimator_->ExportMapCloud(cloud_buffer);
+    }
 }
 
-template<EstimatorConcept Estimator>
-void Odometry<Estimator>::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
+void Mapping::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
 {
     EASY_FUNCTION();
-    std::unique_ptr<typename Estimator::LocalMapType> placeholder;
-    estimator_.ExportLocalMap(placeholder);
-    if (local_map) {
+    if (estimator_) {
+        estimator_->ExportLocalMap(local_map);
+    } else if (local_map) {
         local_map->clear();
     }
 }
 
 #ifdef USE_PCL
-template<EstimatorConcept Estimator>
-void Odometry<Estimator>::PCLAddLidarData(const PointCloudT::ConstPtr& lidar_data)
+void Mapping::PCLAddLidarData(const PointCloudT::ConstPtr& lidar_data)
 {
     std::unique_lock<std::mutex> lock(data_mutex_);
     pcl_lidar_buffer_.emplace_back(lidar_data);
 }
 
-template<EstimatorConcept Estimator>
-void Odometry<Estimator>::GetPCLMapCloud(std::vector<PointCloudT::Ptr>& cloud_buffer)
+void Mapping::GetPCLMapCloud(std::vector<PointCloudT::Ptr>& cloud_buffer)
 {
-    estimator_.ExportPclMapCloud(cloud_buffer);
+    if (estimator_) {
+        estimator_->ExportPclMapCloud(cloud_buffer);
+    }
 }
 #endif
-
-// 显式实例化默认滤波器版本
-template class Odometry<DefaultEstimator>;
 
 }  // namespace ms_slam::slam_core
