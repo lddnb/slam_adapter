@@ -12,12 +12,10 @@
 #include <spdlog/spdlog.h>
 
 #include "slam_core/config.hpp"
-#include "slam_core/localmap_traits.hpp"
-#include "slam_core/odom_common.hpp"
-#include "slam_core/filter_state.hpp"
-#ifdef USE_PCL
-#include "slam_core/PCL.hpp"
-#endif
+#include "slam_core/map/map_traits.hpp"
+#include "slam_core/odometry/filter_state.hpp"
+#include "slam_core/odometry/odom_common.hpp"
+#include "slam_core/local_mapping/local_mapping_types.hpp"
 
 namespace ms_slam::slam_core
 {
@@ -58,16 +56,9 @@ class OdomBase
      * @param out 状态缓存
      * @return void
      */
-    virtual void ExportLidarStates(std::vector<CommonState>& out) { out.clear(); }
+    virtual void ExportStates(std::vector<CommonState>& out) { out.clear(); }
 
-#ifdef USE_PCL
-    /**
-     * @brief 导出 PCL 格式地图点云
-     * @param out PCL 点云缓存
-     * @return void
-     */
-    virtual void ExportPclMapCloud(std::vector<PointCloudT::Ptr>& out) = 0;
-#endif
+    [[nodiscard]] virtual Eigen::Isometry3d T_i_l() const = 0;
 
     /**
      * @brief 是否完成初始化
@@ -86,6 +77,8 @@ class OdomBase
      * @return 状态摘要
      */
     [[nodiscard]] virtual CommonState GetState() const = 0;
+
+    [[nodiscard]] virtual local_mapping::OdometryOutput GetOdomRes() const = 0;
 };
 
 /**
@@ -142,16 +135,7 @@ class OdomBaseImpl : public OdomBase
      * @param out 状态缓存
      * @return void
      */
-    void ExportLidarStates(std::vector<CommonState>& out) override { out.clear(); }
-
-#ifdef USE_PCL
-    /**
-     * @brief 导出 PCL 地图点云
-     * @param out PCL 点云缓存
-     * @return void
-     */
-    void ExportPclMapCloud(std::vector<PointCloudT::Ptr>& out) override;
-#endif
+    void ExportStates(std::vector<CommonState>& out) override { out.clear(); }
 
     /**
      * @brief 是否完成初始化
@@ -164,6 +148,8 @@ class OdomBaseImpl : public OdomBase
      * @return 当前帧编号
      */
     [[nodiscard]] std::size_t FrameIndex() const override;
+
+    [[nodiscard]] Eigen::Isometry3d T_i_l() const override { return T_i_l_; };
 
   protected:
     /**
@@ -207,13 +193,9 @@ class OdomBaseImpl : public OdomBase
     PointCloudType::Ptr deskewed_cloud_;    ///< 去畸变点云
     PointCloudType::Ptr downsampled_cloud_; ///< 下采样点云
 
-#ifdef USE_PCL
-    PointCloudT::Ptr pcl_deskewed_cloud_;                ///< PCL 去畸变点云
-    PointCloudT::Ptr pcl_downsampled_cloud_;             ///< PCL 下采样点云
-    std::vector<PointCloudT::Ptr> pcl_map_cloud_buffer_; ///< PCL 可视化缓存
-#endif
-
     std::vector<PointCloudType::Ptr> map_cloud_buffer_; ///< 可视化缓存
+
+    local_mapping::OdometryOutput odom_res;  ///< 里程计输出缓存
 
     mutable std::mutex state_mutex_; ///< 状态与地图互斥锁
 };
@@ -228,10 +210,6 @@ OdomBaseImpl<LocalMap>::OdomBaseImpl()
 {
     deskewed_cloud_ = std::make_shared<PointCloudType>();
     downsampled_cloud_ = std::make_shared<PointCloudType>();
-#ifdef USE_PCL
-    pcl_deskewed_cloud_ = PointCloudT::Ptr(new PointCloudT);
-    pcl_downsampled_cloud_ = PointCloudT::Ptr(new PointCloudT);
-#endif
 }
 
 template<typename LocalMap>
@@ -250,9 +228,6 @@ void OdomBaseImpl<LocalMap>::InitializeFromConfig(const Config& cfg)
     frame_index_.store(0);
     initialized_.store(false);
     map_cloud_buffer_.clear();
-#ifdef USE_PCL
-    pcl_map_cloud_buffer_.clear();
-#endif
     spdlog::info("OdomBase initialized: lidar_cov {:.6f}", lidar_measurement_cov_);
 }
 
@@ -315,15 +290,6 @@ void OdomBaseImpl<LocalMap>::UpdateLocalMap(
         map_cloud_buffer_.emplace_back(cloud_world);
     }
 
-#ifdef USE_PCL
-    if (pcl_deskewed_cloud_) {
-        PointCloudT::Ptr pcl_clone(new PointCloudT(*pcl_deskewed_cloud_));
-        const Eigen::Matrix4f tf = world_T_lidar.matrix().cast<float>();
-        pcl::transformPointCloud(*pcl_clone, *pcl_clone, tf);
-        pcl_map_cloud_buffer_.emplace_back(pcl_clone);
-    }
-#endif
-
     if (downsampled && local_map_) {
         auto ori_points = downsampled->positions_vec3();
         if constexpr (std::is_same_v<LocalMap, thuni::Octree>) {
@@ -340,18 +306,6 @@ void OdomBaseImpl<LocalMap>::UpdateLocalMap(
         frame_index_.fetch_add(1, std::memory_order_relaxed);
     }
 }
-
-#ifdef USE_PCL
-template<typename LocalMap>
-void OdomBaseImpl<LocalMap>::ExportPclMapCloud(std::vector<PointCloudT::Ptr>& out)
-{
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    out.clear();
-    if (!pcl_map_cloud_buffer_.empty()) {
-        out.swap(pcl_map_cloud_buffer_);
-    }
-}
-#endif
 
 template<typename LocalMap>
 void OdomBaseImpl<LocalMap>::BumpFrame()

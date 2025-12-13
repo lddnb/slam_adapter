@@ -672,10 +672,10 @@ class PointCloud
             t.linear();
             t.translation();
         }
-    [[nodiscard]] PointCloud transformed(const TransformType& transform) const
+    [[nodiscard]] PointCloud::Ptr transformed(const TransformType& transform) const
     {
-        PointCloud copy(*this);
-        copy.transform(transform);
+        PointCloud::Ptr copy = std::make_shared<PointCloud>(*this);
+        copy->transform(transform);
         return copy;
     }
 

@@ -14,7 +14,7 @@
 #include <pcl/point_types.h>
 
 #include "slam_core/filter.hpp"
-#include "slam_core/ply_io.hpp"
+#include "slam_core/utils/ply_io.hpp"
 #include "slam_core/point_cloud.hpp"
 #include "slam_core/point_types.hpp"
 

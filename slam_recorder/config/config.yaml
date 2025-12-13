@@ -21,10 +21,10 @@ Foxglove:
     - name: /livox/lidar
       schema: foxglove.PointCloud
       enabled: true
-    - name: /cloud_registered
+    - name: /odom_pc
       schema: foxglove.PointCloud
       enabled: true
-    - name: /deskewed_cloud
+    - name: /local_pc
       schema: foxglove.PointCloud
       enabled: true
     - name: /local_map
@@ -39,7 +39,10 @@ Foxglove:
     - name: /path
       schema: foxglove.PosesInFrame
       enabled: true
-    - name: /odom
+    - name: /odom_state
+      schema: foxglove.PoseInFrame
+      enabled: true
+    - name: /local_state
       schema: foxglove.PoseInFrame
       enabled: true
     - name: /tf

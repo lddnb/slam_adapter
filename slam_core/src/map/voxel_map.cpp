@@ -1,4 +1,4 @@
-#include "slam_core/voxel_map.hpp"
+#include "slam_core/map/voxel_map.hpp"
 
 #include <algorithm>
 #include <atomic>

@@ -7,14 +7,14 @@
 #include <spdlog/spdlog.h>
 
 #include "slam_core/common_state.hpp"
-#include "slam_core/imu.hpp"
+#include "slam_core/sensor/imu.hpp"
 
 #define DIM 15
 
 namespace ms_slam::slam_core::voxelslam
 {
 
-// Don't forget to init
+//! Don't forget to init
 inline double imupre_scale_gravity = 1.0;
 inline Eigen::Matrix<double, 6, 6> noiseMeas, noiseWalk;
 
@@ -97,7 +97,7 @@ public:
   void add_imu(Eigen::Vector3d &cur_gyr, Eigen::Vector3d &cur_acc, double dt)
   {
     dtime += dt;
-    Eigen::Matrix3d R_inc = manif::SO3d(cur_gyr * dt).rotation();
+    Eigen::Matrix3d R_inc = manif::SO3Tangentd(cur_gyr * dt).exp().rotation();
     Eigen::Matrix3d R_jr(manif::SO3Tangentd(cur_gyr * dt).rjac());
     
     Eigen::Matrix3d R_dt = dt * R_delta;
@@ -162,7 +162,7 @@ public:
     Eigen::Matrix<double, DIM, 1> rr;
     joca.setZero(); jocb.setZero(); rr.setZero();
 
-    Eigen::Matrix3d R_correct = R_delta * manif::SO3d(R_bg * dbg).rotation();
+    Eigen::Matrix3d R_correct = R_delta * manif::SO3Tangentd(R_bg * dbg).exp().rotation();
     Eigen::Vector3d t_correct = p_delta + p_bg*dbg + p_ba*dba;
     Eigen::Vector3d v_correct = v_delta + v_bg*dbg + v_ba*dba;
 
@@ -177,7 +177,7 @@ public:
 
     double b_wei = 1;
 
-    rr.block<3, 1>(0, 0) = manif::SO3d(res_r).log().coeffs();
+    rr.block<3, 1>(0, 0) = manif::SO3d(Eigen::Quaterniond(res_r)).log().coeffs();
     rr.block<3, 1>(3, 0) = res_t;
     rr.block<3, 1>(6, 0) = res_v;
     rr.block<3, 1>(9, 0) = res_bg*b_wei;
@@ -189,7 +189,7 @@ public:
 
     if(jac_enable)
     {
-      Eigen::Matrix3d JR_inv = manif::SO3Tangentd(res_r).rjacinv();
+      Eigen::Matrix3d JR_inv = manif::SO3d(Eigen::Quaterniond(res_r)).log().rjacinv();
       // joca.block<3, 3>(0, 0) = -JR_inv * st1.R.transpose() * st2.R;
       joca.block<3, 3>(0, 0) = -JR_inv * st2.R().transpose() * st1.R();
       jocb.block<3, 3>(0, 0) =  JR_inv;

@@ -12,7 +12,7 @@
 #include <spdlog/spdlog.h>
 
 #include "slam_core/config.hpp"
-#include "slam_core/logging_utils.hpp"
+#include "slam_core/utils/logging_utils.hpp"
 
 namespace ms_slam::slam_core
 {
@@ -37,13 +37,18 @@ std::unique_ptr<OdomBase> CreateOdomEstimator(OdomType type)
     }
 }
 
+std::unique_ptr<local_mapping::LocalMapper> CreateLocalMapper()
+{
+    return std::make_unique<local_mapping::BalmLocalMapper>(local_mapping::LocalMapperConfig());
+}
+
 Mapping::Mapping(OdomType type)
-    : visual_enable_(false),
-      estimator_(nullptr),
-      mapping_thread_(nullptr),
-      last_timestamp_imu_(0.0),
-      last_index_imu_(0),
-      running_(true)
+: visual_enable_(false),
+  estimator_(nullptr),
+  mapping_thread_(nullptr),
+  last_timestamp_imu_(0.0),
+  last_index_imu_(0),
+  running_(true)
 {
     EASY_FUNCTION(profiler::colors::Amber100);
     const auto& cfg = Config::GetInstance();
@@ -51,6 +56,10 @@ Mapping::Mapping(OdomType type)
     estimator_ = CreateOdomEstimator(type);
     if (!estimator_) {
         spdlog::error("Failed to create odom estimator for type {}", static_cast<int>(type));
+    }
+    local_mapper_ = CreateLocalMapper();
+    if (!local_mapper_) {
+        spdlog::error("Failed to create local mapper");
     }
     mapping_thread_ = std::make_unique<std::thread>(&Mapping::RunMapping, this);
     spdlog::info("Mapping thread initialized with odometry {}", static_cast<int>(type));
@@ -115,22 +124,11 @@ std::vector<SyncData> Mapping::SyncPackages()
     std::unique_lock<std::mutex> lock(data_mutex_);
 
     while (!lidar_buffer_.empty()) {
-#ifdef USE_PCL
-        if (pcl_lidar_buffer_.empty()) break;
-        const auto& pcl_cloud = pcl_lidar_buffer_.front();
-#endif
-
         const auto& lidar_cloud = lidar_buffer_.front();
         const auto timestamps = lidar_cloud->field_view<TimestampTag>();
 
         const double lidar_beg_time = timestamps.front();
         const double lidar_end_time = timestamps.back();
-
-#ifdef USE_PCL
-        const double pcl_beg_time = pcl_cloud->points.front().timestamp;
-        const double pcl_end_time = pcl_cloud->points.back().timestamp;
-        CHECK(lidar_beg_time - pcl_beg_time < 1e-6 && pcl_end_time - lidar_end_time < 1e-6);
-#endif
 
         if (imu_buffer_.size() < 10) {
             break;
@@ -142,9 +140,6 @@ std::vector<SyncData> Mapping::SyncPackages()
             const double gap = first_imu_time - lidar_beg_time;
             spdlog::warn("Discard lidar frame at {:.3f}s: earliest IMU {:.3f}s, gap {:.3f}s exceeds tolerance", lidar_beg_time, first_imu_time, gap);
             lidar_buffer_.pop_front();
-#ifdef USE_PCL
-            pcl_lidar_buffer_.pop_front();
-#endif
             continue;
         }
         if (imu_buffer_.back().timestamp() < lidar_end_time) {
@@ -153,9 +148,6 @@ std::vector<SyncData> Mapping::SyncPackages()
 
         SyncData sync_data;
         sync_data.lidar_data = lidar_cloud;
-#ifdef USE_PCL
-        sync_data.pcl_lidar_data = pcl_cloud;
-#endif
         sync_data.lidar_beg_time = lidar_beg_time;
         sync_data.lidar_end_time = lidar_end_time;
 
@@ -218,9 +210,6 @@ std::vector<SyncData> Mapping::SyncPackages()
             imu_buffer_.erase(imu_buffer_.begin(), imu_buffer_.begin() + static_cast<std::ptrdiff_t>(imu_consumed - 2));
         }
         lidar_buffer_.pop_front();
-#ifdef USE_PCL
-        pcl_lidar_buffer_.pop_front();
-#endif
         sync_data_list.emplace_back(std::move(sync_data));
     }
 
@@ -261,61 +250,84 @@ void Mapping::RunMapping()
                 spdlog::warn("Odom estimator is initializing, skip update at pc ts {:.3f}", sync_data.lidar_beg_time);
                 continue;
             }
-            const auto state_view = estimator_->GetState();
+            const auto odom_res = estimator_->GetOdomRes();
+            if (!odom_res.cloud) {
+                continue;
+            }
+            lidar_data_buffer_.emplace(odom_res.index, odom_res.orig_cloud);
             spdlog::info(
                 "[state] update pos: {:.6f} {:.6f} {:.6f}, quat: {:.6f} {:.6f} {:.6f} {:.6f}",
-                state_view.p().x(),
-                state_view.p().y(),
-                state_view.p().z(),
-                state_view.quat().x(),
-                state_view.quat().y(),
-                state_view.quat().z(),
-                state_view.quat().w());
+                odom_res.state.p().x(),
+                odom_res.state.p().y(),
+                odom_res.state.p().z(),
+                odom_res.state.quat().x(),
+                odom_res.state.quat().y(),
+                odom_res.state.quat().z(),
+                odom_res.state.quat().w());
+
+            local_mapper_->PushOdometryOutput(odom_res);
+            auto local_res = local_mapper_->TryProcess();
+            if (local_res) {
+                spdlog::info(
+                    "Local mapping optimized state pos: {:.6f} {:.6f} {:.6f}, quat: {:.6f} {:.6f} {:.6f} {:.6f}, index: {}",
+                    local_res->optimized_state.p().x(),
+                    local_res->optimized_state.p().y(),
+                    local_res->optimized_state.p().z(),
+                    local_res->optimized_state.quat().x(),
+                    local_res->optimized_state.quat().y(),
+                    local_res->optimized_state.quat().z(),
+                    local_res->optimized_state.quat().w(),
+                    local_res->index);
+            }
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 
-void Mapping::GetLidarState(std::vector<CommonState>& buffer)
+void Mapping::GetOdomState(std::vector<CommonState>& buffer)
 {
     if (estimator_) {
-        estimator_->ExportLidarStates(buffer);
+        estimator_->ExportStates(buffer);
     } else {
         buffer.clear();
     }
 }
 
-void Mapping::GetMapCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
+void Mapping::GetOdomCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
 {
     if (estimator_) {
         estimator_->ExportMapCloud(cloud_buffer);
     }
 }
 
-void Mapping::GetLocalMap(PointCloud<PointXYZDescriptor>::Ptr& local_map)
+void Mapping::GetLocalState(std::vector<CommonState>& buffer)
 {
-    EASY_FUNCTION();
-    if (estimator_) {
-        estimator_->ExportLocalMap(local_map);
-    } else if (local_map) {
-        local_map->clear();
+    buffer.clear();
+    if (local_mapper_) {
+        std::unordered_map<int, CommonState> temp_buffer;
+        local_mapper_->ExportStates(temp_buffer);
+        for (const auto& kv : temp_buffer) {
+            buffer.emplace_back(kv.second);
+            if (lidar_data_buffer_.count(kv.first)) {
+                PointCloudType::Ptr local_map_pc = lidar_data_buffer_[kv.first]->transformed(Eigen::Isometry3d::Identity()); //kv.second.isometry3d() * estimator_->T_i_l()
+                local_map_buffer_.emplace_back(local_map_pc);
+                lidar_data_buffer_.erase(kv.first);
+            }
+        }
     }
 }
 
-#ifdef USE_PCL
-void Mapping::PCLAddLidarData(const PointCloudT::ConstPtr& lidar_data)
+void Mapping::GetLocalCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
 {
-    std::unique_lock<std::mutex> lock(data_mutex_);
-    pcl_lidar_buffer_.emplace_back(lidar_data);
-}
-
-void Mapping::GetPCLMapCloud(std::vector<PointCloudT::Ptr>& cloud_buffer)
-{
-    if (estimator_) {
-        estimator_->ExportPclMapCloud(cloud_buffer);
+    if (local_mapper_) {
+        cloud_buffer.clear();
+        // spdlog::warn("Export {} local map clouds", local_map_buffer_.size());
+        // if (!local_map_buffer_.empty()) {
+        //     cloud_buffer.swap(local_map_buffer_);
+        // }
+        local_mapper_->ExportMapCloud(cloud_buffer);
     }
 }
-#endif
 
 }  // namespace ms_slam::slam_core

@@ -1,4 +1,4 @@
-#include <slam_core/ply_io.hpp>
+#include <slam_core/utils/ply_io.hpp>
 #include <slam_core/filter.hpp>
 #include <spdlog/spdlog.h>
 #include <pcl/filters/voxel_grid.h>

@@ -1,8 +1,8 @@
-#include "slam_core/filter_state.hpp"
+#include "slam_core/odometry/filter_state.hpp"
 
 #include <algorithm>
 
-#include "slam_core/logging_utils.hpp"
+#include "slam_core/utils/logging_utils.hpp"
 #include "slam_core/config.hpp"
 
 namespace ms_slam::slam_core

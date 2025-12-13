@@ -11,8 +11,8 @@
 #include <spdlog/spdlog.h>
 
 #include "slam_core/config.hpp"
-#include "slam_core/odom_base.hpp"
-#include "slam_core/filter_state.hpp"
+#include "slam_core/odometry/filter_state.hpp"
+#include "slam_core/odometry/odom_base.hpp"
 
 namespace ms_slam::slam_core
 {
@@ -35,7 +35,7 @@ class FilterOdom : public OdomBaseImpl<LocalMap>
      * @param sync_data 同步数据
      * @return void
      */
-    void ProcessSyncData(const SyncData& sync_data) override;
+    void ProcessSyncData(const SyncData& sync_data) override final;
 
     /**
      * @brief 导出当前状态
@@ -47,28 +47,30 @@ class FilterOdom : public OdomBaseImpl<LocalMap>
      * @brief 获取状态
      * @return 状态摘要
      */
-    [[nodiscard]] CommonState GetState() const override;
+    [[nodiscard]] CommonState GetState() const override final;
+
+    [[nodiscard]] local_mapping::OdometryOutput GetOdomRes() const override final;
 
     /**
      * @brief 导出可视化地图点云
      * @param out 点云缓存
      * @return void
      */
-    void ExportMapCloud(std::vector<PointCloudType::Ptr>& out) override { OdomBaseImpl<LocalMap>::ExportMapCloud(out); }
+    void ExportMapCloud(std::vector<PointCloudType::Ptr>& out) override final { OdomBaseImpl<LocalMap>::ExportMapCloud(out); }
 
     /**
      * @brief 导出 LiDAR 状态序列
      * @param out 状态序列
      * @return void
      */
-    void ExportLidarStates(std::vector<CommonState>& out) override;
+    void ExportStates(std::vector<CommonState>& out) override final;
 
     /**
      * @brief 导出局部地图占位接口
      * @param out 输出点云
      * @return void
      */
-    void ExportLocalMap(PointCloud<PointXYZDescriptor>::Ptr& out) override { OdomBaseImpl<LocalMap>::ExportLocalMap(out); }
+    void ExportLocalMap(PointCloud<PointXYZDescriptor>::Ptr& out) override final { OdomBaseImpl<LocalMap>::ExportLocalMap(out); }
 
     /**
      * @brief 导出局部地图实例，便于派生逻辑复用
@@ -77,26 +79,17 @@ class FilterOdom : public OdomBaseImpl<LocalMap>
      */
     void ExportLocalMap(std::unique_ptr<LocalMapType>& out) { OdomBaseImpl<LocalMap>::ExportLocalMap(out); }
 
-#ifdef USE_PCL
-    /**
-     * @brief 导出 PCL 地图点云
-     * @param out PCL 点云缓存
-     * @return void
-     */
-    void ExportPclMapCloud(std::vector<PointCloudT::Ptr>& out) override { OdomBaseImpl<LocalMap>::ExportPclMapCloud(out); }
-#endif
-
     /**
      * @brief 是否完成初始化
      * @return 是否已完成初始化
      */
-    [[nodiscard]] bool IsInitialized() const override { return OdomBaseImpl<LocalMap>::IsInitialized(); }
+    [[nodiscard]] bool IsInitialized() const override final { return OdomBaseImpl<LocalMap>::IsInitialized(); }
 
     /**
      * @brief 当前帧索引
      * @return 当前帧编号
      */
-    [[nodiscard]] std::size_t FrameIndex() const override { return OdomBaseImpl<LocalMap>::FrameIndex(); }
+    [[nodiscard]] std::size_t FrameIndex() const override final { return OdomBaseImpl<LocalMap>::FrameIndex(); }
 
   private:
     /**
@@ -120,15 +113,6 @@ class FilterOdom : public OdomBaseImpl<LocalMap>
      */
     [[nodiscard]] PointCloudType::Ptr Deskew(const PointCloudType::ConstPtr& cloud) const;
 
-#ifdef USE_PCL
-    /**
-     * @brief PCL 版本去畸变
-     * @param cloud 输入 PCL 点云
-     * @return 去畸变后的点云
-     */
-    [[nodiscard]] PointCloudT::Ptr PCLDeskew(const PointCloudT::ConstPtr& cloud) const;
-#endif
-
     /**
      * @brief 点面观测模型（滤波专用）
      * @param H 观测雅可比矩阵
@@ -150,16 +134,9 @@ class FilterOdom : public OdomBaseImpl<LocalMap>
      */
     void UpdateLocalMap();
 
-    /**
-     * @brief 推入新的 LiDAR 状态
-     * @param state 状态数据
-     * @return void
-     */
-    void PushLidarState(const StateType& state);
-
     StateType state_;                ///< 当前滤波状态
     StatesType imu_state_buffer_;    ///< IMU 时刻状态缓存
-    std::vector<CommonState> lidar_state_buffer_;  ///< LiDAR 时刻状态缓存
+    std::vector<CommonState> output_state_buffer_;  ///< 状态缓存
 
     int init_imu_count_;             ///< 初始化累计 IMU 数
     Eigen::Vector3d init_gyro_avg_;  ///< 初始化陀螺均值

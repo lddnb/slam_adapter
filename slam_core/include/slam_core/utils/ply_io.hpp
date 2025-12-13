@@ -1,8 +1,8 @@
 #pragma once
 
-#include "slam_core/point_cloud.hpp"
+#include "slam_core/sensor/point_cloud.hpp"
 #define TINYPLY_IMPLEMENTATION
-#include "slam_core/tinyply.h"
+#include "slam_core/utils/tinyply.h"
 
 #include <algorithm>
 #include <cstddef>

@@ -1,4 +1,4 @@
-#include "slam_core/filter_odom.hpp"
+#include "slam_core/odometry/filter_odom.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -10,8 +10,8 @@
 #include <easy/arbitrary_value.h>
 #include <easy/profiler.h>
 
-#include "slam_core/logging_utils.hpp"
-#include "slam_core/localmap_traits.hpp"
+#include "slam_core/utils/logging_utils.hpp"
+#include "slam_core/map/map_traits.hpp"
 
 namespace ms_slam::slam_core
 {
@@ -29,9 +29,7 @@ FilterOdom<LocalMap>::FilterOdom()
 #endif
     OdomBaseImpl<LocalMap>::InitializeFromConfig(cfg_);
     state_ = StateType();
-    state_.AddHModel(
-        "lidar",
-        std::bind(&FilterOdom<LocalMap>::ObsModel, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+    state_.AddHModel("lidar", std::bind(&FilterOdom<LocalMap>::ObsModel, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
     spdlog::info("FilterOdom constructed");
 }
 
@@ -43,29 +41,26 @@ typename FilterOdom<LocalMap>::StateType FilterOdom<LocalMap>::GetStateSnapshot(
 }
 
 template <typename LocalMap>
-CommonState FilterOdom<LocalMap>::GetState()  const
+CommonState FilterOdom<LocalMap>::GetState() const
 {
     std::lock_guard<std::mutex> lock(this->state_mutex_);
-    CommonState view{};
-    view.p(state_.p());
-    view.quat(state_.quat());
-    view.v(state_.v());
-    view.b_g(state_.b_g());
-    view.b_a(state_.b_a());
-    view.g(state_.g());
-    view.timestamp(state_.timestamp());
-    Eigen::Matrix<double, CommonState::DoF, CommonState::DoF> cov = state_.cov().block<CommonState::DoF, CommonState::DoF>(0, 0);
-    view.cov(cov);
-    return view;
+    return state_.ExportCommonState();
 }
 
 template <typename LocalMap>
-void FilterOdom<LocalMap>::ExportLidarStates(std::vector<CommonState>& out)
+local_mapping::OdometryOutput FilterOdom<LocalMap>::GetOdomRes() const
+{
+    std::lock_guard<std::mutex> lock(this->state_mutex_);
+    return this->odom_res;
+}
+
+template <typename LocalMap>
+void FilterOdom<LocalMap>::ExportStates(std::vector<CommonState>& out)
 {
     std::lock_guard<std::mutex> lock(this->state_mutex_);
     out.clear();
-    if (!lidar_state_buffer_.empty()) {
-        out.swap(lidar_state_buffer_);
+    if (!output_state_buffer_.empty()) {
+        out.swap(output_state_buffer_);
     }
 }
 
@@ -89,29 +84,19 @@ void FilterOdom<LocalMap>::ProcessSyncData(const SyncData& sync_data)
     EASY_END_BLOCK;
     spdlog::info("[Lidar] downsize {}", this->downsampled_cloud_->size());
 
-#ifdef USE_PCL
-    this->pcl_deskewed_cloud_ = PCLDeskew(sync_data.pcl_lidar_data);
-    pcl::VoxelGrid<PointT> voxel_grid;
-    voxel_grid.setInputCloud(this->pcl_deskewed_cloud_);
-    voxel_grid.setLeafSize(0.5f, 0.5f, 0.5f);
-    this->pcl_downsampled_cloud_ = PointCloudT::Ptr(new PointCloudT);
-    voxel_grid.filter(*this->pcl_downsampled_cloud_);
-    spdlog::info("[PCL Lidar] downsize {}", this->pcl_downsampled_cloud_->size());
-#endif
-
     UpdateWithModel();
     UpdateLocalMap();
-}
-
-template <typename LocalMap>
-void FilterOdom<LocalMap>::PushLidarState(const StateType& state)
-{
     std::unique_lock<std::mutex> lock(this->state_mutex_, std::try_to_lock);
     if (lock.owns_lock()) {
-        lidar_state_buffer_.emplace_back(state.ExportCommonState());
-    } else {
-        spdlog::info("Skip lidar_state_buffer push: state_mutex busy at {:.3f}s", state.timestamp());
+        output_state_buffer_.emplace_back(state_.ExportCommonState());
     }
+    this->odom_res.index = this->FrameIndex();
+    this->odom_res.imu_buffer.clear();
+    this->odom_res.imu_buffer.assign(sync_data.imu_data.begin() + 1, sync_data.imu_data.end() - 1);
+    this->odom_res.state = state_.ExportCommonState();
+    this->odom_res.orig_cloud = this->deskewed_cloud_;
+    this->odom_res.cloud = this->downsampled_cloud_;
+    // spdlog::info("odom_res.deskewed_cloud size: {}", this->odom_res.cloud->size());
 }
 
 template <typename LocalMap>
@@ -254,8 +239,6 @@ void FilterOdom<LocalMap>::ProcessImuData(const SyncData& sync_data)
                 state_.quat().y(),
                 state_.quat().z(),
                 state_.quat().w());
-
-            PushLidarState(state_);
         }
         this->imu_state_buffer_.emplace_back(state_);
     }
@@ -312,57 +295,6 @@ PointCloudType::Ptr FilterOdom<LocalMap>::Deskew(const PointCloudType::ConstPtr&
 
     return DeskewPointCloud(cloud, pose_query, state_.isometry3d(), this->T_i_l_);
 }
-
-#ifdef USE_PCL
-template <typename LocalMap>
-PointCloudT::Ptr FilterOdom<LocalMap>::PCLDeskew(const PointCloudT::ConstPtr& cloud) const
-{
-    EASY_FUNCTION(profiler::colors::Teal900);
-    if (!cloud) {
-        spdlog::warn("PCLDeskew received null cloud");
-        return PointCloudT::Ptr(new PointCloudT);
-    }
-
-    if (cloud->points.empty()) {
-        return PointCloudT::Ptr(new PointCloudT(*cloud));
-    }
-
-    if (cloud->points.front().timestamp < this->imu_state_buffer_.front().timestamp()) {
-        spdlog::error(
-            "PCL cloud timestamp is earlier than buffer timestamp, cloud ts {:.3f}, buffer ts {:.3f}",
-            cloud->points.front().timestamp,
-            this->imu_state_buffer_.front().timestamp());
-    } else if (cloud->points.back().timestamp > this->imu_state_buffer_.back().timestamp()) {
-        spdlog::error(
-            "PCL cloud timestamp is later than buffer timestamp, cloud ts {:.3f}, buffer ts {:.3f}",
-            cloud->points.back().timestamp,
-            this->imu_state_buffer_.back().timestamp());
-    }
-
-    PoseAtTimeFn pose_query = [&](double target_time) -> std::optional<Eigen::Isometry3d> {
-        auto it = std::lower_bound(
-            this->imu_state_buffer_.begin(),
-            this->imu_state_buffer_.end(),
-            target_time,
-            [](const FilterState& state_item, double t) { return state_item.timestamp() < t; });
-
-        if (it == this->imu_state_buffer_.end()) {
-            spdlog::error("Lower bound search failed for time {:.3f} (PCL)", target_time);
-            return std::nullopt;
-        }
-
-        const FilterState& reference_state = (it->timestamp() == target_time) ? *it : *std::prev(it);
-        auto predicted = reference_state.Predict(target_time);
-        if (!predicted) {
-            spdlog::error("Failed to predict PCL point at time {:.3f}", target_time);
-            return std::nullopt;
-        }
-        return predicted.value();
-    };
-
-    return DeskewPclPointCloud(cloud, pose_query, state_.isometry3d(), this->T_i_l_);
-}
-#endif
 
 template <typename LocalMap>
 void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, StateType::NoiseDiag& noise_inv)

@@ -18,12 +18,9 @@
 #include <Eigen/Dense>
 #include <spdlog/spdlog.h>
 
-#ifdef USE_PCL
-#include "slam_core/PCL.hpp"
-#endif
-#include "slam_core/imu.hpp"
-#include "slam_core/image.hpp"
-#include "slam_core/point_cloud.hpp"
+#include "slam_core/sensor/image.hpp"
+#include "slam_core/sensor/imu.hpp"
+#include "slam_core/sensor/point_cloud.hpp"
 
 namespace ms_slam::slam_core
 {
@@ -32,9 +29,6 @@ using PointCloudType = PointCloud<PointType>;
 
 struct SyncData {
     PointCloudType::ConstPtr lidar_data;
-#ifdef USE_PCL
-    PointCloudT::ConstPtr pcl_lidar_data;
-#endif
     double lidar_beg_time;
     double lidar_end_time;
     Image image_data;
@@ -467,46 +461,5 @@ inline PointCloudType::Ptr DeskewPointCloud(const PointCloudType::ConstPtr& clou
 
     return deskewed_cloud;
 }
-
-#ifdef USE_PCL
-/**
- * @brief 通用去畸变（PCL 点云）
- */
-inline PointCloudT::Ptr DeskewPclPointCloud(const PointCloudT::ConstPtr& cloud, const PoseAtTimeFn& pose_query, const Eigen::Isometry3d& ref_pose, const Eigen::Isometry3d& T_i_l)
-{
-    if (!cloud) {
-        spdlog::warn("DeskewPclPointCloud received null cloud");
-        return PointCloudT::Ptr(new PointCloudT);
-    }
-
-    PointCloudT::Ptr deskewed_cloud(new PointCloudT);
-    *deskewed_cloud = *cloud;
-    if (cloud->points.empty()) {
-        return deskewed_cloud;
-    }
-
-    std::vector<std::size_t> indices(cloud->points.size());
-    std::iota(indices.begin(), indices.end(), 0);
-    const Eigen::Isometry3f T_ref = (ref_pose * T_i_l).cast<float>();
-
-    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](std::size_t idx) {
-        const double point_time = cloud->points[idx].timestamp;
-        const auto pose_opt = pose_query(point_time);
-        if (!pose_opt) {
-            spdlog::error("Pose query failed for PCL timestamp {:.6f}", point_time);
-            return;
-        }
-        const Eigen::Isometry3f T_point = (pose_opt.value() * T_i_l).cast<float>();
-        Eigen::Vector3f p(cloud->points[idx].x, cloud->points[idx].y, cloud->points[idx].z);
-        Eigen::Vector3f deskewed = T_ref.inverse() * T_point * p;
-        auto& dst = deskewed_cloud->points[idx];
-        dst.x = deskewed.x();
-        dst.y = deskewed.y();
-        dst.z = deskewed.z();
-    });
-
-    return deskewed_cloud;
-}
-#endif
 
 }  // namespace ms_slam::slam_core

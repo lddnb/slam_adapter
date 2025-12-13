@@ -56,6 +56,10 @@ if(USE_PCL)
     target_compile_definitions(${PROJECT_NAME} PUBLIC PCL_NO_PRECOMPILE USE_PCL)
 endif()
 
+target_compile_options(${PROJECT_NAME} PRIVATE
+    -Wno-stringop-overflow
+)
+
 # ============================================================================
 # Installation
 # ============================================================================

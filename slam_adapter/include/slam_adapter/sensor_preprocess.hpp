@@ -16,10 +16,10 @@
 #include <spdlog/spdlog.h>
 
 #include <slam_common/sensor_struct.hpp>
-#include <slam_core/image.hpp>
-#include <slam_core/imu.hpp>
-#include <slam_core/point_cloud.hpp>
-#include <slam_core/point_types.hpp>
+#include <slam_core/sensor/image.hpp>
+#include <slam_core/sensor/imu.hpp>
+#include <slam_core/sensor/point_cloud.hpp>
+#include <slam_core/sensor/point_types.hpp>
 #ifdef USE_PCL
 #include <slam_core/PCL.hpp>
 #endif

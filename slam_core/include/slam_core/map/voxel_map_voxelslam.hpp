@@ -12,7 +12,7 @@
 #include <Eigen/Eigenvalues>
 #include <spdlog/spdlog.h>
 
-#include "slam_core/preintegration.hpp"
+#include "slam_core/local_mapping/preintegration.hpp"
 
 #define HASH_P 116101
 #define MAX_N 10000000000
@@ -75,13 +75,13 @@ struct Plane
 
 };
 
-Eigen::Vector4d min_point;
-double min_eigen_value;
-int max_layer = 2;
-int max_points = 100;
-double voxel_size = 1.0;
-int min_ba_point = 20;
-std::vector<double> plane_eigen_value_thre;
+inline Eigen::Vector4d min_point;
+inline double min_eigen_value;
+inline int max_layer = 2;
+inline int max_points = 100;
+inline double voxel_size = 1.0;
+inline int min_ba_point = 20;
+inline std::vector<double> plane_eigen_value_thre;
 
 /**
  * @brief 计算单个点在点簇中的协方差
@@ -90,7 +90,7 @@ std::vector<double> plane_eigen_value_thre;
  * @param bcov 
  * @param vec 
  */
-void Bf_var(const pointVar &pv, Eigen::Matrix<double, 9, 9> &bcov, const Eigen::Vector3d &vec)
+inline void Bf_var(const pointVar &pv, Eigen::Matrix<double, 9, 9> &bcov, const Eigen::Vector3d &vec)
 {
   // 和论文中分成两部分计算，下面还有个 3x3 的单位阵
   Eigen::Matrix<double, 6, 3> Bi;
@@ -250,63 +250,65 @@ public:
         if(i != kk)
           umumT += 2.0/(lmbd[kk] - lmbd[i]) * u[i] * u[i].transpose();
 
-      for(int i=0; i<win_size; i++)
+      for(int i=0; i<win_size; i++) {
       // for(int i=1; i<win_size; i++)
-      if(sig_orig[i].N != 0)
-      {
-        Eigen::Matrix3d Pi = sig_orig[i].P;
-        Eigen::Vector3d vi = sig_orig[i].v;
-        Eigen::Matrix3d Ri = xs[i].R();
-        double ni = sig_orig[i].N;
+        if(sig_orig[i].N != 0)
+        {
+          Eigen::Matrix3d Pi = sig_orig[i].P;
+          Eigen::Vector3d vi = sig_orig[i].v;
+          Eigen::Matrix3d Ri = xs[i].R();
+          double ni = sig_orig[i].N;
 
-        Eigen::Matrix3d vihat; vihat << manif::skew(vi);
-        Eigen::Vector3d RiTuk = Ri.transpose() * uk;
-        Eigen::Matrix3d RiTukhat; RiTukhat << manif::skew(RiTuk);
+          Eigen::Matrix3d vihat; vihat << manif::skew(vi);
+          Eigen::Vector3d RiTuk = Ri.transpose() * uk;
+          Eigen::Matrix3d RiTukhat; RiTukhat << manif::skew(RiTuk);
 
-        Eigen::Vector3d PiRiTuk = Pi * RiTuk;
-        viRiTuk[i] = vihat * RiTuk;
-        viRiTukukT[i] = viRiTuk[i] * uk.transpose();
-        
-        Eigen::Vector3d ti_v = xs[i].p() - vBar;
-        double ukTti_v = uk.dot(ti_v);
+          Eigen::Vector3d PiRiTuk = Pi * RiTuk;
+          viRiTuk[i] = vihat * RiTuk;
+          viRiTukukT[i] = viRiTuk[i] * uk.transpose();
 
-        Eigen::Matrix3d combo1 = manif::skew(PiRiTuk) + vihat * ukTti_v;
-        Eigen::Vector3d combo2 = Ri*vi + ni*ti_v;
-        Auk[i].block<3, 3>(0, 0) = (Ri*Pi + ti_v*vi.transpose()) * RiTukhat - Ri*combo1;
-        Auk[i].block<3, 3>(0, 3) = combo2 * uk.transpose() + combo2.dot(uk) * Eigen::Matrix3d::Identity();
-        Auk[i] /= NN;
+          Eigen::Vector3d ti_v = xs[i].p() - vBar;
+          double ukTti_v = uk.dot(ti_v);
 
-        const Eigen::Matrix<double, 6, 1> &jjt = Auk[i].transpose() * uk;
-        JacT.block<6, 1>(6*i, 0) += coe * jjt;
+          Eigen::Matrix3d combo1 = manif::skew(PiRiTuk) + vihat * ukTti_v;
+          Eigen::Vector3d combo2 = Ri*vi + ni*ti_v;
+          Auk[i].block<3, 3>(0, 0) = (Ri*Pi + ti_v*vi.transpose()) * RiTukhat - Ri*combo1;
+          Auk[i].block<3, 3>(0, 3) = combo2 * uk.transpose() + combo2.dot(uk) * Eigen::Matrix3d::Identity();
+          Auk[i] /= NN;
 
-        // 计算对角部分 Hessian
-        const Eigen::Matrix3d &HRt = 2.0/NN * (1.0-ni/NN) * viRiTukukT[i];
-        Eigen::Matrix<double, 6, 6> Hb = Auk[i].transpose() * umumT * Auk[i];
-        Hb.block<3, 3>(0, 0) += 2.0/NN * (combo1 - RiTukhat*Pi) * RiTukhat - 2.0/NN/NN * viRiTuk[i] * viRiTuk[i].transpose() - 0.5*manif::skew(jjt.block<3, 1>(0, 0));
-        Hb.block<3, 3>(0, 3) += HRt;
-        Hb.block<3, 3>(3, 0) += HRt.transpose();
-        Hb.block<3, 3>(3, 3) += 2.0/NN * (ni - ni*ni/NN) * ukukT;
+          const Eigen::Matrix<double, 6, 1> &jjt = Auk[i].transpose() * uk;
+          JacT.block<6, 1>(6*i, 0) += coe * jjt;
 
-        Hess.block<6, 6>(6*i, 6*i) += coe * Hb;
+          // 计算对角部分 Hessian
+          const Eigen::Matrix3d &HRt = 2.0/NN * (1.0-ni/NN) * viRiTukukT[i];
+          Eigen::Matrix<double, 6, 6> Hb = Auk[i].transpose() * umumT * Auk[i];
+          Hb.block<3, 3>(0, 0) += 2.0/NN * (combo1 - RiTukhat*Pi) * RiTukhat - 2.0/NN/NN * viRiTuk[i] * viRiTuk[i].transpose() - 0.5*manif::skew(jjt.block<3, 1>(0, 0));
+          Hb.block<3, 3>(0, 3) += HRt;
+          Hb.block<3, 3>(3, 0) += HRt.transpose();
+          Hb.block<3, 3>(3, 3) += 2.0/NN * (ni - ni*ni/NN) * ukukT;
+
+          Hess.block<6, 6>(6*i, 6*i) += coe * Hb;
+        }
       }
 
       // 计算非对角部分 Hessian
-      for(int i=0; i<win_size-1; i++)
       // for(int i=1; i<win_size-1; i++)
-      if(sig_orig[i].N != 0)
-      {
-        double ni = sig_orig[i].N;
-        for(int j=i+1; j<win_size; j++)
-        if(sig_orig[j].N != 0)
+      for(int i=0; i<win_size-1; i++) {
+        if(sig_orig[i].N != 0)
         {
-          double nj = sig_orig[j].N;
-          Eigen::Matrix<double, 6, 6> Hb = Auk[i].transpose() * umumT * Auk[j];
-          Hb.block<3, 3>(0, 0) += -2.0/NN/NN * viRiTuk[i] * viRiTuk[j].transpose();
-          Hb.block<3, 3>(0, 3) += -2.0*nj/NN/NN * viRiTukukT[i];
-          Hb.block<3, 3>(3, 0) += -2.0*ni/NN/NN * viRiTukukT[j].transpose();
-          Hb.block<3, 3>(3, 3) += -2.0*ni*nj/NN/NN * ukukT;
-
-          Hess.block<6, 6>(6*i, 6*j) += coe * Hb;
+          double ni = sig_orig[i].N;
+          for(int j=i+1; j<win_size; j++)
+          if(sig_orig[j].N != 0)
+          {
+            double nj = sig_orig[j].N;
+            Eigen::Matrix<double, 6, 6> Hb = Auk[i].transpose() * umumT * Auk[j];
+            Hb.block<3, 3>(0, 0) += -2.0/NN/NN * viRiTuk[i] * viRiTuk[j].transpose();
+            Hb.block<3, 3>(0, 3) += -2.0*nj/NN/NN * viRiTukukT[i];
+            Hb.block<3, 3>(3, 0) += -2.0*ni/NN/NN * viRiTukukT[j].transpose();
+            Hb.block<3, 3>(3, 3) += -2.0*ni*nj/NN/NN * ukukT;
+          
+            Hess.block<6, 6>(6*i, 6*j) += coe * Hb;
+          }
         }
       }
       
@@ -334,11 +336,12 @@ public:
       const std::vector<PointCluster> &sig_orig = plvec_voxels[a];
       PointCluster sig = sig_vecs[a];
 
-      for(int i=0; i<win_size; i++)
-      if(sig_orig[i].N != 0)
-      {
-        pcr.transform(sig_orig[i], xs[i]);
-        sig += pcr;
+      for(int i=0; i<win_size; i++) {
+        if(sig_orig[i].N != 0)
+        {
+          pcr.transform(sig_orig[i], xs[i]);
+          sig += pcr;
+        }
       }
 
       Eigen::Vector3d vBar = sig.v / sig.N;
@@ -369,7 +372,7 @@ public:
 
 };
 
-double imu_coef = 1e-4;
+inline double imu_coef = 1e-4;
 // double imu_coef = 1e-8;
 #define DVEL 6
 // The LiDAR-Inertial BA optimizer
@@ -425,6 +428,7 @@ public:
     int g_size = voxhess.plvec_voxels.size();
     if(g_size < tthd_num) tthd_num = 1;
     double part = 1.0 * g_size / tthd_num;
+    // spdlog::info("divide_thread start: win_size={} g_size={} tthd_num={} imu_factor_size={}", win_size, g_size, tthd_num, imus_factor.size());
 
     std::vector<std::thread*> mthreads(tthd_num);
     // for(int i=0; i<tthd_num; i++)
@@ -567,11 +571,11 @@ public:
       // 更新滑窗状态
       for(int j=0; j<win_size; j++)
       {
-        x_stats_temp[j].R() = x_stats[j].R() * manif::SO3d(dxi.block<3, 1>(DIM*j, 0)).rotation();
-        x_stats_temp[j].p() = x_stats[j].p() + dxi.block<3, 1>(DIM*j+3, 0);
-        x_stats_temp[j].v() = x_stats[j].v() + dxi.block<3, 1>(DIM*j+6, 0);
-        x_stats_temp[j].b_g() = x_stats[j].b_g() + dxi.block<3, 1>(DIM*j+9, 0);
-        x_stats_temp[j].b_a() = x_stats[j].b_a() + dxi.block<3, 1>(DIM*j+12, 0);
+        x_stats_temp[j].R(x_stats[j].R() * manif::SO3Tangentd(dxi.block<3, 1>(DIM*j, 0)).exp().rotation());
+        x_stats_temp[j].p(x_stats[j].p() + dxi.block<3, 1>(DIM*j+3, 0));
+        x_stats_temp[j].v(x_stats[j].v() + dxi.block<3, 1>(DIM*j+6, 0));
+        x_stats_temp[j].b_g(x_stats[j].b_g() + dxi.block<3, 1>(DIM*j+9, 0));
+        x_stats_temp[j].b_a(x_stats[j].b_a() + dxi.block<3, 1>(DIM*j+12, 0));
       }
 
       for(int j=0; j<win_size-1; j++)
@@ -586,6 +590,8 @@ public:
       // resitime += tl2 - tl1;
 
       q = (residual1-residual2);
+      // spdlog::info("iter{}: resi1: {:.6f} resi2: {:.6f} u: {:.6f} v: {:.1f} q: {:.6f} q1: {:.6f} q/q1: {:.6f}", 
+      //               i, residual1, residual2, u, v, q, q1, q/q1);
       // printf("iter%d: (%lf %lf) u: %lf v: %.1lf q: %.2lf %lf %lf\n", i, residual1, residual2, u, v, q/q1, q1, q);
 
       // Nielsen法调整阻尼系数
@@ -663,7 +669,7 @@ public:
 
 // The octotree map for odometry and local mapping
 // You can re-write it in your own project
-int* mp;
+inline int* mp;
 class OctoTree
 {
 public:
@@ -894,16 +900,17 @@ public:
     double nv = 1.0 / pcr_add.N;
 
     Eigen::Matrix<double, 3, 9> u_c; u_c.setZero();
-    for(int k=0; k<3; k++)
-    if(k != l)
-    {
-      Eigen::Matrix3d ukl = u[k] * u[l].transpose();
-      Eigen::Matrix<double, 1, 9> fkl;
-      fkl.head(6) << ukl(0, 0), ukl(1, 0)+ukl(0, 1), ukl(2, 0)+ukl(0, 2), 
-                     ukl(1, 1), ukl(1, 2)+ukl(2, 1),           ukl(2, 2);
-      fkl.tail(3) = -(u[k].dot(plane.center) * u[l] + u[l].dot(plane.center) * u[k]);
-      
-      u_c += nv / (eig_value[l]-eig_value[k]) * u[k] * fkl;
+    for(int k=0; k<3; k++) {
+      if(k != l)
+      {
+        Eigen::Matrix3d ukl = u[k] * u[l].transpose();
+        Eigen::Matrix<double, 1, 9> fkl;
+        fkl.head(6) << ukl(0, 0), ukl(1, 0)+ukl(0, 1), ukl(2, 0)+ukl(0, 2), 
+                       ukl(1, 1), ukl(1, 2)+ukl(2, 1),           ukl(2, 2);
+        fkl.tail(3) = -(u[k].dot(plane.center) * u[l] + u[l].dot(plane.center) * u[k]);
+        
+        u_c += nv / (eig_value[l]-eig_value[k]) * u[k] * fkl;
+      }
     }
 
     Eigen::Matrix<double, 3, 9> Jc = u_c * cov_add;
@@ -1022,11 +1029,12 @@ public:
       else
       {
         pcr_add = pcr_fix;
-        for(int i=0; i<win_count; i++)
-        if(sw->pcrs_local[mp[i]].N != 0)
-        {
-          pcrs_world[i].transform(sw->pcrs_local[mp[i]], x_buf[i]);
-          pcr_add += pcrs_world[i];
+        for(int i=0; i<win_count; i++) {
+          if(sw->pcrs_local[mp[i]].N != 0)
+          {
+            pcrs_world[i].transform(sw->pcrs_local[mp[i]], x_buf[i]);
+            pcr_add += pcrs_world[i];
+          }
         }
 
         if(plane.is_plane)
@@ -1038,11 +1046,12 @@ public:
         
       }
 
-      if(pcr_fix.N < max_points && plane.is_plane)
-      if(pcr_add.N - last_num >= 5 || last_num <= 10)
-      {
-        plane_update();
-        last_num = pcr_add.N;
+      if(pcr_fix.N < max_points && plane.is_plane) {
+        if(pcr_add.N - last_num >= 5 || last_num <= 10)
+        {
+          plane_update();
+          last_num = pcr_add.N;
+        }
       }
 
       // 将边缘化的点云帧作为固定点
@@ -1071,11 +1080,12 @@ public:
           PVec().swap(point_fix);
       }
 
-      for(int i=0; i<mgsize; i++)
-      if(sw->pcrs_local[mp[i]].N != 0)
-      {
-        sw->pcrs_local[mp[i]].clear();
-        sw->points[mp[i]].clear();
+      for(int i=0; i<mgsize; i++) {
+        if(sw->pcrs_local[mp[i]].N != 0)
+        {
+          sw->pcrs_local[mp[i]].clear();
+          sw->points[mp[i]].clear();
+        }
       }
       
       // 如果剩下的点数小于固定点数，就删除该voxel
@@ -1265,7 +1275,7 @@ public:
 
 };
 
-void cut_voxel(std::unordered_map<VOXEL_LOC, OctoTree*> &feat_map, PVecPtr pvec, int win_count, std::unordered_map<VOXEL_LOC, OctoTree*> &feat_tem_map, int wdsize, std::vector<Eigen::Vector3d> &pwld, std::vector<SlideWindow*> &sws)
+inline void cut_voxel(std::unordered_map<VOXEL_LOC, OctoTree*> &feat_map, PVecPtr pvec, int win_count, std::unordered_map<VOXEL_LOC, OctoTree*> &feat_tem_map, int wdsize, std::vector<Eigen::Vector3d> &pwld, std::vector<SlideWindow*> &sws)
 {
   int plsize = pvec->size();
   for(int i=0; i<plsize; i++)
@@ -1308,7 +1318,7 @@ void cut_voxel(std::unordered_map<VOXEL_LOC, OctoTree*> &feat_map, PVecPtr pvec,
  * @brief 将点云添加到地图中，并用多线程加速更新每个节点的滑窗
  * 
  */
-void cut_voxel_multi(std::unordered_map<VOXEL_LOC, OctoTree*> &feat_map, PVecPtr pvec, int win_count, std::unordered_map<VOXEL_LOC, OctoTree*> &feat_tem_map, int wdsize, std::vector<Eigen::Vector3d> &pwld, std::vector<std::vector<SlideWindow*>> &sws)
+inline void cut_voxel_multi(std::unordered_map<VOXEL_LOC, OctoTree*> &feat_map, PVecPtr pvec, int win_count, std::unordered_map<VOXEL_LOC, OctoTree*> &feat_tem_map, int wdsize, std::vector<Eigen::Vector3d> &pwld, std::vector<std::vector<SlideWindow*>> &sws)
 {
   // 计算每个点落在哪个voxel中，但没放进去
   std::unordered_map<OctoTree*, std::vector<int>> map_pvec;
@@ -1416,7 +1426,7 @@ void cut_voxel_multi(std::unordered_map<VOXEL_LOC, OctoTree*> &feat_map, PVecPtr
  * @param wdsize 
  * @param jour 
  */
-void cut_voxel(std::unordered_map<VOXEL_LOC, OctoTree*> &feat_map, PVec &pvec, int wdsize, double jour)
+inline void cut_voxel(std::unordered_map<VOXEL_LOC, OctoTree*> &feat_map, PVec &pvec, int wdsize, double jour)
 {
   for(pointVar &pv: pvec)
   {
@@ -1460,7 +1470,7 @@ void cut_voxel(std::unordered_map<VOXEL_LOC, OctoTree*> &feat_map, PVec &pvec, i
  * @param oc 
  * @return int 
  */
-int match(std::unordered_map<VOXEL_LOC, OctoTree*> &feat_map, Eigen::Vector3d &wld, Plane* &pla, Eigen::Matrix3d &var_wld, double &sigma_d, OctoTree* &oc)
+inline int match(std::unordered_map<VOXEL_LOC, OctoTree*> &feat_map, Eigen::Vector3d &wld, Plane* &pla, Eigen::Matrix3d &var_wld, double &sigma_d, OctoTree* &oc)
 {
   int flag = 0;
 

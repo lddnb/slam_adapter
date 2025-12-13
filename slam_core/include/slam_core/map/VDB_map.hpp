@@ -6,7 +6,7 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
-#include "slam_core/bonxai/bonxai.hpp"
+#include "slam_core/map/bonxai/bonxai.hpp"
 
 namespace ms_slam::slam_core
 {

@@ -1,4 +1,4 @@
-#include "slam_core/VDB_map.hpp"
+#include "slam_core/map/VDB_map.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -7,7 +7,7 @@
 #include <Eigen/Core>
 #include <spdlog/spdlog.h>
 
-#include "slam_core/bonxai/grid_coord.hpp"
+#include "slam_core/map/bonxai/grid_coord.hpp"
 
 namespace
 {

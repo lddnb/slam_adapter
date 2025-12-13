@@ -18,10 +18,10 @@
 #include <spdlog/spdlog.h>
 
 #include <slam_common/sensor_struct.hpp>
-#include <slam_core/filter_state.hpp>
-#include <slam_core/image.hpp>
-#include <slam_core/point_cloud.hpp>
-#include <slam_core/point_types.hpp>
+#include <slam_core/odometry/filter_state.hpp>
+#include <slam_core/sensor/image.hpp>
+#include <slam_core/sensor/point_cloud.hpp>
+#include <slam_core/sensor/point_types.hpp>
 
 namespace ms_slam::slam_adapter
 {

@@ -6,9 +6,9 @@
 #include <Eigen/Core>
 
 #include "slam_core/config.hpp"
-#include "slam_core/VDB_map.hpp"
-#include "slam_core/hash_map.hpp"
-#include "slam_core/Octree.hpp"
+#include "slam_core/map/VDB_map.hpp"
+#include "slam_core/map/Octree.hpp"
+#include "slam_core/map/hash_map.hpp"
 
 namespace ms_slam::slam_core
 {

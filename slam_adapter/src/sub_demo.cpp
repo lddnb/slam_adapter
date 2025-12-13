@@ -76,25 +76,27 @@ int main()
     const double blind_dist = config_inst.common_params.blind;
     const bool use_img = config_inst.common_params.render_en;
 
-    auto odom = std::make_shared<Mapping>();
+    auto mapper = std::make_shared<Mapping>();
 
-    ms_slam::slam_common::IoxPublisher<ms_slam::slam_common::OdomData> odom_pub(node, "/odom");
-    ms_slam::slam_common::IoxPublisher<ms_slam::slam_common::FrameTransformArray> tf_pub(node, "/tf");
-    ms_slam::slam_common::IoxPublisher<ms_slam::slam_common::PathData> path_pub(node, "/path");
-    ms_slam::slam_common::IoxPublisher<ms_slam::slam_common::LivoxPointCloudDate> map_cloud_pub(node, "/cloud_registered");
-    ms_slam::slam_common::IoxPublisher<ms_slam::slam_common::LivoxPointCloudDate> local_map_pub(node, "/local_map");
+    IoxPublisher<OdomData> odom_pub(node, "/odom_state");
+    IoxPublisher<OdomData> local_pub(node, "/local_state");
+    IoxPublisher<FrameTransformArray> tf_pub(node, "/tf");
+    IoxPublisher<PathData> path_pub(node, "/path");
+    IoxPublisher<LivoxPointCloudDate> odom_cloud_pub(node, "/odom_pc");
+    IoxPublisher<LivoxPointCloudDate> local_cloud_pub(node, "/local_pc");
+    IoxPublisher<LivoxPointCloudDate> local_map_pub(node, "/local_map");
 
     auto pc_subscriber = std::make_shared<ms_slam::slam_common::IoxSubscriber<ms_slam::slam_common::LivoxPointCloudDate>>(
         node,
         config_inst.common_params.lid_topic,
-        [&odom, blind_dist](const ms_slam::slam_common::LivoxPointCloudDate& frame) {
+        [&mapper, blind_dist](const ms_slam::slam_common::LivoxPointCloudDate& frame) {
             EASY_BLOCK("pc_cb", profiler::colors::Green);
             auto cloud = std::make_shared<PointCloud<PointXYZITDescriptor>>();
             if (!ConvertLivoxPointCloudDate(frame, cloud, blind_dist)) {
                 spdlog::warn("Failed to convert Mid360 frame to point cloud");
                 return;
             }
-            odom->AddLidarData(cloud);
+            mapper->AddLidarData(cloud);
         });
     spdlog::info("Mid360 subscriber started on service {}", config_inst.common_params.lid_topic);
 
@@ -103,7 +105,7 @@ int main()
         img_subscriber = std::make_shared<ms_slam::slam_common::IoxSubscriber<ms_slam::slam_common::ImageDate>>(
             node,
             config_inst.common_params.img_topics[0],
-            [&odom, use_img](const ms_slam::slam_common::ImageDate& img_msg) {
+            [&mapper, use_img](const ms_slam::slam_common::ImageDate& img_msg) {
                 EASY_BLOCK("img_cb", profiler::colors::Coral);
                 ms_slam::slam_core::Image image;
                 if (!DecodeImageMessage(img_msg, image)) {
@@ -111,7 +113,7 @@ int main()
                     return;
                 }
                 if (use_img) {
-                    odom->AddImageData(image);
+                    mapper->AddImageData(image);
                 }
             });
         spdlog::info("Image subscriber started on service {}", config_inst.common_params.img_topics[0]);
@@ -122,24 +124,25 @@ int main()
     auto imu_subscriber = std::make_shared<ms_slam::slam_common::IoxSubscriber<ms_slam::slam_common::LivoxImuData>>(
         node,
         config_inst.common_params.imu_topic,
-        [&odom](const ms_slam::slam_common::LivoxImuData& imu_msg) {
+        [&mapper](const ms_slam::slam_common::LivoxImuData& imu_msg) {
             IMU cur_imu;
             if (!ConvertLivoxImuData(imu_msg, cur_imu)) {
                 spdlog::warn("Failed to convert IMU message");
                 return;
             }
-            odom->AddIMUData(cur_imu);
+            mapper->AddIMUData(cur_imu);
         },
         IoxPubSubConfig{.subscriber_max_buffer_size = 500});
     spdlog::info("IMU subscriber started on service {}", config_inst.common_params.imu_topic);
 
-    std::vector<CommonState> lidar_states_buffer;
+    std::vector<CommonState> odom_states_buffer;
+    std::vector<CommonState> local_states_buffer;
     std::vector<CommonState> states_buffer;
-    ms_slam::slam_common::OdomData odom_msg{};
-    ms_slam::slam_common::FrameTransformArray tf_msg{};
-    ms_slam::slam_common::PathData path_msg{};
-    std::vector<PointCloudType::Ptr> deskewed_clouds;
-    PointCloud<PointXYZDescriptor>::Ptr local_map = std::make_shared<PointCloud<PointXYZDescriptor>>();
+    OdomData odom_msg{};
+    FrameTransformArray tf_msg{};
+    PathData path_msg{};
+    std::vector<PointCloudType::Ptr> odom_clouds;
+    std::vector<PointCloudType::Ptr> local_clouds;
 
     while (!shouldExit.load()) {
         EASY_BLOCK("Adapter Publish", profiler::colors::Orange);
@@ -149,12 +152,12 @@ int main()
             img_subscriber->ReceiveAll();
         }
 
-        odom->GetLidarState(lidar_states_buffer);
+        mapper->GetOdomState(odom_states_buffer);
 
         std::vector<FrameTransformData> transform_data;
-        transform_data.reserve(lidar_states_buffer.size() * 2);
+        transform_data.reserve(odom_states_buffer.size() * 2);
 
-        for (const auto& state : lidar_states_buffer) {
+        for (const auto& state : odom_states_buffer) {
             if (!BuildOdomData(state, "odom", "base_link", odom_msg)) {
                 spdlog::warn("BuildOdomData failed");
                 continue;
@@ -197,24 +200,38 @@ int main()
             path_pub.Publish();
         }
 
+        mapper->GetLocalState(local_states_buffer);
+        for (const auto& state : local_states_buffer) {
+            if (!BuildOdomData(state, "odom", "base_link", odom_msg)) {
+                spdlog::warn("BuildOdomData failed");
+                continue;
+            }
+            local_pub.SetBuildCallback([odom_msg](OdomData& payload) { payload = odom_msg; });
+            local_pub.Publish();
+        }
+
         // 发布 deskew 后地图点云
-        odom->GetMapCloud(deskewed_clouds);
-        for (const auto& cloud : deskewed_clouds) {
+        mapper->GetOdomCloud(odom_clouds);
+        for (const auto& cloud : odom_clouds) {
             if (!cloud) {
                 continue;
             }
             const double ts_sec = cloud->empty() ? 0.0 : cloud->timestamp(0);
             const uint64_t ts_ns = ts_sec > 0.0 ? static_cast<uint64_t>(std::llround(ts_sec * 1e9)) : 0ULL;
-            map_cloud_pub.PublishWithBuilder(
+            odom_cloud_pub.PublishWithBuilder(
                 [&](ms_slam::slam_common::LivoxPointCloudDate& payload) { return BuildMid360FrameFromPointCloud(*cloud, ts_ns, payload, "odom"); });
         }
 
-        // 发布局部地图
-        odom->GetLocalMap(local_map);
-        if (local_map && local_map->size() > 0) {
-            local_map_pub.PublishWithBuilder([&](ms_slam::slam_common::LivoxPointCloudDate& payload) {
-                return BuildMid360FrameFromPointCloud(*local_map, 0ULL, payload, "odom");
-            });
+        // 发布局部建图优化后的地图点云
+        mapper->GetLocalCloud(local_clouds);
+        for (const auto& cloud : local_clouds) {
+            if (!cloud) {
+                continue;
+            }
+            const double ts_sec = cloud->empty() ? 0.0 : cloud->timestamp(0);
+            const uint64_t ts_ns = ts_sec > 0.0 ? static_cast<uint64_t>(std::llround(ts_sec * 1e9)) : 0ULL;
+            local_cloud_pub.PublishWithBuilder(
+                [&](LivoxPointCloudDate& payload) { return BuildMid360FrameFromPointCloud(*cloud, ts_ns, payload, "odom"); });
         }
 
         EASY_END_BLOCK;
@@ -224,7 +241,7 @@ int main()
 
     spdlog::info("接收到退出信号，正在收尾");
 
-    odom->Stop();
+    mapper->Stop();
 
     const auto dumped_blocks = profiler::dumpBlocksToFile(kProfileDumpPath);
     if (dumped_blocks == 0) {
