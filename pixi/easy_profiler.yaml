@@ -1,0 +1,36 @@
+context:
+  name: easy_profiler
+  version: 2.1.0
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  url: https://github.com/yse/easy_profiler/archive/refs/tags/v${{ version }}.tar.gz
+  sha256: fabf95d59ede9da4873aebd52ef8a762fa8578dcdbcc6d7cdd811b5a7c3367ad
+
+build:
+  number: 0
+  script: |
+    cmake $CMAKE_ARGS \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=$PREFIX \
+      -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+      -DBUILD_SHARED_LIBS=ON \
+      -B $SRC_DIR/../build \
+      -S .
+
+    cmake --build $SRC_DIR/../build --target install -j2
+
+requirements:
+  build:
+    - ${{ compiler('cxx') }}
+    - ${{ compiler('c') }}
+    - cmake =3.24.3
+    - make
+    - pkg-config
+  host:
+
+  run:
+    

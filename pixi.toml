@@ -1,0 +1,31 @@
+[workspace]
+channels = ["./pixi/output", "conda-forge"]
+name = "slam_adapter"
+platforms = ["linux-aarch64", "linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+compilers = ">=1.11.0,<2"
+cmake = "3.30.*"
+rust = ">=1.92.0,<1.93"
+yaml-cpp = ">=0.8.0,<0.9"
+spdlog = ">=1.17.0,<2"
+manif = ">=0.0.5,<0.0.6"
+tsl_robin_map = ">=1.4.0,<2"
+clang = ">=21.1.7,<22"
+libclang = ">=21.1.7,<22"
+eigen = ">=3.4.0,<4"
+opencv = ">=4.12.0,<5"
+tbb-devel = "2021.13.0.*"
+pkg-config = ">=0.29.2,<0.30"
+libdwarf-dev = ">=2.1.0,<3"
+
+[target.linux-64.dependencies]
+
+[target.linux-aarch64.dependencies]
+iceoryx2-cxx = ">=0.8.0,<0.9"
+cpptrace = ">=1.0.4,<2"
+easy_profiler = ">=2.1.0,<3"
+mcap = "0.0.1.*"

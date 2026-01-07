@@ -41,7 +41,7 @@ namespace
 {
 
 std::atomic<bool> shouldExit{false};
-constexpr char kProfileDumpPath[] = "/home/ubuntu/data/mcap_profile.prof";
+constexpr char kProfileDumpPath[] = "/ID/mcap_profile.prof";
 
 /**
  * @brief 处理SIGINT信号并设置退出标记
@@ -541,7 +541,12 @@ int main(int argc, char** argv)
     }
     spdlog::info("Crash logger initialized successfully");
 
-    auto node = std::make_shared<IoxNode>(iox2::NodeBuilder().create<iox2::ServiceType::Ipc>().expect("Create iceoryx2 node"));
+    auto node_result = iox2::NodeBuilder().create<iox2::ServiceType::Ipc>();
+    if (!node_result.has_value()) {
+        spdlog::error("Failed to create iceoryx2 node for playback, error={}", static_cast<int>(node_result.error()));
+        return 1;
+    }
+    auto node = std::make_shared<IoxNode>(std::move(node_result).value());
     spdlog::info("iceoryx2 node created for playback pipeline");
 
     LogConfig();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -19,13 +20,12 @@ namespace ms_slam::slam_common
 /**
  * @brief iceoryx2 发布订阅配置（定长数据版本）
  */
-struct IoxPubSubConfig
-{
-    uint32_t max_publishers{1};                 ///< 发布者数量上限
-    uint32_t max_subscribers{3};                ///< 订阅者数量上限
-    uint32_t subscriber_max_buffer_size{10};    ///< 单订阅者缓冲区深度
-    uint32_t history_size{1};                   ///< 订阅者历史缓存深度
-    bool enable_safe_overflow{true};            ///< 是否启用安全溢出策略
+struct IoxPubSubConfig {
+    uint32_t max_publishers{1};               ///< 发布者数量上限
+    uint32_t max_subscribers{3};              ///< 订阅者数量上限
+    uint32_t subscriber_max_buffer_size{10};  ///< 单订阅者缓冲区深度
+    uint32_t history_size{1};                 ///< 订阅者历史缓存深度
+    bool enable_safe_overflow{true};          ///< 是否启用安全溢出策略
 };
 
 /// 复用的 iceoryx2 节点类型
@@ -52,32 +52,52 @@ class IoxPublisher
      * @param config 发布订阅配置
      * @return 无
      */
-    IoxPublisher(std::shared_ptr<IoxNode> node,
-                 std::string service_name,
-                 BuildCallback build_callback = nullptr,
-                 IoxPubSubConfig config = {})
-    : node_(std::move(node))
-    , service_name_(std::move(service_name))
-    , build_callback_(std::move(build_callback))
-    , config_(config)
-    , published_count_(0)
+    IoxPublisher(std::shared_ptr<IoxNode> node, std::string service_name, BuildCallback build_callback = nullptr, IoxPubSubConfig config = {})
+    : node_(std::move(node)),
+      service_name_(std::move(service_name)),
+      build_callback_(std::move(build_callback)),
+      config_(config),
+      published_count_(0)
     {
         static_assert(std::is_trivially_copyable_v<MessageType>, "MessageType must be trivially copyable for zero-copy transport");
 
-        auto iox_service_name = iox2::ServiceName::create(service_name_.c_str()).expect("Valid service name");
+        if (!node_) {
+            spdlog::error("IoxPublisher requires a valid node, service={}", service_name_);
+            return;
+        }
+
+        auto service_name_result = iox2::ServiceName::create(service_name_.c_str());
+        if (!service_name_result.has_value()) {
+            spdlog::error("Invalid iceoryx2 service name '{}', error={}", service_name_, static_cast<int>(service_name_result.error()));
+            return;
+        }
+        auto iox_service_name = std::move(service_name_result).value();
 
         // 配置服务，全部采用定长 Payload，关闭 Slice 依赖
-        service_ = node_->service_builder(iox_service_name)
-                       .publish_subscribe<MessageType>()
-                       .max_publishers(config_.max_publishers)
-                       .max_subscribers(config_.max_subscribers)
-                       .subscriber_max_buffer_size(config_.subscriber_max_buffer_size)
-                       .history_size(config_.history_size)
-                       .enable_safe_overflow(config_.enable_safe_overflow)
-                       .open_or_create()
-                       .expect("Open or create service");
+        auto service_result = node_->service_builder(iox_service_name)
+                                  .publish_subscribe<MessageType>()
+                                  .max_publishers(config_.max_publishers)
+                                  .max_subscribers(config_.max_subscribers)
+                                  .subscriber_max_buffer_size(config_.subscriber_max_buffer_size)
+                                  .history_size(config_.history_size)
+                                  .enable_safe_overflow(config_.enable_safe_overflow)
+                                  .open_or_create();
 
-        publisher_ = service_->publisher_builder().create().expect("Create publisher");
+        if (!service_result.has_value()) {
+            spdlog::error("Failed to open_or_create iceoryx2 service '{}', error={}", service_name_, static_cast<int>(service_result.error()));
+            return;
+        }
+        service_.emplace(std::move(service_result).value());
+
+        auto publisher_result = service_->publisher_builder().create();
+        if (!publisher_result.has_value()) {
+            spdlog::error(
+                "Failed to create iceoryx2 publisher for service '{}', error={}",
+                service_name_,
+                static_cast<int>(publisher_result.error()));
+            return;
+        }
+        publisher_.emplace(std::move(publisher_result).value());
 
         spdlog::info(
             "IoxPublisher ready: service={}, max_pub={}, max_sub={}, buffer={}",
@@ -104,12 +124,21 @@ class IoxPublisher
         }
 
         // 通过 loan_uninit 获取未初始化的共享内存块，并原地构造 payload
-        auto sample_uninit = publisher_->loan_uninit().expect("Acquire shared memory block");
+        auto loan_result = publisher_->loan_uninit();
+        if (!loan_result.has_value()) {
+            spdlog::error("IoxPublisher failed to loan shared memory for service {}, error={}", service_name_, static_cast<int>(loan_result.error()));
+            return false;
+        }
+        auto sample_uninit = std::move(loan_result).value();
         MessageType& payload = sample_uninit.payload_mut();  // 共享内存中的可写引用
         build_callback_(payload);                            // 原地填充数据
 
         auto sample_init = iox2::assume_init(std::move(sample_uninit));
-        iox2::send(std::move(sample_init)).expect("Publish failed");
+        auto send_result = iox2::send(std::move(sample_init));
+        if (!send_result.has_value()) {
+            spdlog::error("IoxPublisher failed to send sample for service {}, error={}", service_name_, static_cast<int>(send_result.error()));
+            return false;
+        }
 
         ++published_count_;
         return true;
@@ -132,7 +161,12 @@ class IoxPublisher
             return false;
         }
 
-        auto sample_uninit = publisher_->loan_uninit().expect("Acquire shared memory block");
+        auto loan_result = publisher_->loan_uninit();
+        if (!loan_result.has_value()) {
+            spdlog::error("IoxPublisher failed to loan shared memory for service {}, error={}", service_name_, static_cast<int>(loan_result.error()));
+            return false;
+        }
+        auto sample_uninit = std::move(loan_result).value();
         MessageType& payload = sample_uninit.payload_mut();  // 共享内存中的可写引用
         const bool ok = builder(payload);
         if (!ok) {
@@ -141,7 +175,11 @@ class IoxPublisher
         }
 
         auto sample_init = iox2::assume_init(std::move(sample_uninit));
-        iox2::send(std::move(sample_init)).expect("Publish failed");
+        auto send_result = iox2::send(std::move(sample_init));
+        if (!send_result.has_value()) {
+            spdlog::error("IoxPublisher failed to send sample for service {}, error={}", service_name_, static_cast<int>(send_result.error()));
+            return false;
+        }
 
         ++published_count_;
         return true;
@@ -183,8 +221,8 @@ class IoxPublisher
     IoxPubSubConfig config_;
     std::atomic<uint64_t> published_count_;
 
-    iox::optional<iox2::PortFactoryPublishSubscribe<iox2::ServiceType::Ipc, MessageType, void>> service_;
-    iox::optional<iox2::Publisher<iox2::ServiceType::Ipc, MessageType, void>> publisher_;
+    iox2::bb::Optional<iox2::PortFactoryPublishSubscribe<iox2::ServiceType::Ipc, MessageType, void>> service_;
+    iox2::bb::Optional<iox2::Publisher<iox2::ServiceType::Ipc, MessageType, void>> publisher_;
 };
 
 /**
@@ -206,31 +244,51 @@ class IoxSubscriber
      * @param config 发布订阅配置
      * @return 无
      */
-    IoxSubscriber(std::shared_ptr<IoxNode> node,
-                  std::string service_name,
-                  ReceiveCallback receive_callback = nullptr,
-                  IoxPubSubConfig config = {})
-    : node_(std::move(node))
-    , service_name_(std::move(service_name))
-    , receive_callback_(std::move(receive_callback))
-    , config_(config)
-    , received_count_(0)
+    IoxSubscriber(std::shared_ptr<IoxNode> node, std::string service_name, ReceiveCallback receive_callback = nullptr, IoxPubSubConfig config = {})
+    : node_(std::move(node)),
+      service_name_(std::move(service_name)),
+      receive_callback_(std::move(receive_callback)),
+      config_(config),
+      received_count_(0)
     {
         static_assert(std::is_trivially_copyable_v<MessageType>, "MessageType 必须可平凡拷贝以支持零拷贝读取");
 
-        auto iox_service_name = iox2::ServiceName::create(service_name_.c_str()).expect("Valid service name");
+        if (!node_) {
+            spdlog::error("IoxSubscriber requires a valid node, service={}", service_name_);
+            return;
+        }
 
-        service_ = node_->service_builder(iox_service_name)
-                       .publish_subscribe<MessageType>()
-                       .max_publishers(config_.max_publishers)
-                       .max_subscribers(config_.max_subscribers)
-                       .subscriber_max_buffer_size(config_.subscriber_max_buffer_size)
-                       .history_size(config_.history_size)
-                       .enable_safe_overflow(config_.enable_safe_overflow)
-                       .open_or_create()
-                       .expect("Open or create service");
+        auto service_name_result = iox2::ServiceName::create(service_name_.c_str());
+        if (!service_name_result.has_value()) {
+            spdlog::error("Invalid iceoryx2 service name '{}', error={}", service_name_, static_cast<int>(service_name_result.error()));
+            return;
+        }
+        auto iox_service_name = std::move(service_name_result).value();
 
-        subscriber_ = service_->subscriber_builder().create().expect("Create subscriber");
+        auto service_result = node_->service_builder(iox_service_name)
+                                  .publish_subscribe<MessageType>()
+                                  .max_publishers(config_.max_publishers)
+                                  .max_subscribers(config_.max_subscribers)
+                                  .subscriber_max_buffer_size(config_.subscriber_max_buffer_size)
+                                  .history_size(config_.history_size)
+                                  .enable_safe_overflow(config_.enable_safe_overflow)
+                                  .open_or_create();
+
+        if (!service_result.has_value()) {
+            spdlog::error("Failed to open_or_create iceoryx2 service '{}', error={}", service_name_, static_cast<int>(service_result.error()));
+            return;
+        }
+        service_.emplace(std::move(service_result).value());
+
+        auto subscriber_result = service_->subscriber_builder().create();
+        if (!subscriber_result.has_value()) {
+            spdlog::error(
+                "Failed to create iceoryx2 subscriber for service '{}', error={}",
+                service_name_,
+                static_cast<int>(subscriber_result.error()));
+            return;
+        }
+        subscriber_.emplace(std::move(subscriber_result).value());
 
         spdlog::info(
             "IoxSubscriber ready: service={}, max_pub={}, max_sub={}, buffer={}",
@@ -256,12 +314,17 @@ class IoxSubscriber
             return false;
         }
 
-        auto sample = subscriber_->receive().expect("Receive invocation failed");
+        auto receive_result = subscriber_->receive();
+        if (!receive_result.has_value()) {
+            spdlog::error("Receive invocation failed for service {}, error={}", service_name_, static_cast<int>(receive_result.error()));
+            return false;
+        }
+        auto sample = std::move(receive_result).value();
         if (!sample.has_value()) {
             return false;
         }
 
-        const MessageType& payload = sample->payload();  // 直接引用共享内存中的数据
+        const MessageType& payload = sample.value().payload();  // 直接引用共享内存中的数据
         receive_callback_(payload);
         ++received_count_;
         return true;
@@ -284,13 +347,23 @@ class IoxSubscriber
         }
 
         uint64_t handled = 0;
-        auto sample = subscriber_->receive().expect("Receive invocation failed");
+        auto receive_result = subscriber_->receive();
+        if (!receive_result.has_value()) {
+            spdlog::error("Receive invocation failed for service {}, error={}", service_name_, static_cast<int>(receive_result.error()));
+            return 0;
+        }
+        auto sample = std::move(receive_result).value();
         while (sample.has_value()) {
-            const MessageType& payload = sample->payload();  // 直接引用共享内存中的数据
+            const MessageType& payload = sample.value().payload();  // 直接引用共享内存中的数据
             receive_callback_(payload);
             ++received_count_;
             ++handled;
-            sample = subscriber_->receive().expect("Receive invocation failed");
+            receive_result = subscriber_->receive();
+            if (!receive_result.has_value()) {
+                spdlog::error("Receive invocation failed for service {}, error={}", service_name_, static_cast<int>(receive_result.error()));
+                break;
+            }
+            sample = std::move(receive_result).value();
         }
         return handled;
     }
@@ -331,8 +404,8 @@ class IoxSubscriber
     IoxPubSubConfig config_;
     std::atomic<uint64_t> received_count_;
 
-    iox::optional<iox2::PortFactoryPublishSubscribe<iox2::ServiceType::Ipc, MessageType, void>> service_;
-    iox::optional<iox2::Subscriber<iox2::ServiceType::Ipc, MessageType, void>> subscriber_;
+    iox2::bb::Optional<iox2::PortFactoryPublishSubscribe<iox2::ServiceType::Ipc, MessageType, void>> service_;
+    iox2::bb::Optional<iox2::Subscriber<iox2::ServiceType::Ipc, MessageType, void>> subscriber_;
 };
 
 }  // namespace ms_slam::slam_common

@@ -1,0 +1,73 @@
+context:
+  name: iceoryx2-cxx
+  version: 0.8.0
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  url: https://github.com/eclipse-iceoryx/iceoryx2/archive/refs/tags/v${{ version }}.tar.gz
+  sha256: d6bd4de7955d9c73027184c62efd99950b546b021d010c377c41ff6d9b604723
+
+build:
+  number: 0
+  script: |
+    export LIBCLANG_PATH=$BUILD_PREFIX/lib
+    echo "Building Rust FFI..."
+    cargo build --release --package iceoryx2-ffi-c
+    RUST_ARTIFACT_PATH=$SRC_DIR/target/release
+
+    echo "Installing CMake Modules..."
+    cmake -S iceoryx2-cmake-modules -B build_modules \
+      ${CMAKE_ARGS} \
+      -DCMAKE_INSTALL_PREFIX=$PREFIX 
+
+    cmake --build build_modules
+    cmake --install build_modules
+
+    echo "Building C Binding..."
+    cmake -S iceoryx2-c -B build_c \
+      ${CMAKE_ARGS} \
+      -DCMAKE_INSTALL_PREFIX=$PREFIX \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DRUST_BUILD_ARTIFACT_PATH=$RUST_ARTIFACT_PATH \
+      -DBUILD_SHARED_LIBS=ON
+
+    cmake --build build_c -j2
+    cmake --install build_c
+
+    echo "Building BitBytes C++..."
+    cmake -S iceoryx2-bb/cxx -B build_bb \
+      ${CMAKE_ARGS} \
+      -DCMAKE_INSTALL_PREFIX=$PREFIX \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=ON
+
+    cmake --build build_bb -j2
+    cmake --install build_bb
+
+    echo "Building CXX Binding..."
+    cmake -S iceoryx2-cxx -B build_cxx \
+      ${CMAKE_ARGS} \
+      -DCMAKE_INSTALL_PREFIX=$PREFIX \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=ON
+
+    cmake --build build_cxx -j2
+    cmake --install build_cxx
+
+requirements:
+  build:
+    - ${{ compiler('cxx') }}
+    - ${{ compiler('c') }}
+    - cmake =3.24.3
+    - make
+    - pkg-config
+    - rust
+    - clang
+    - libclang
+  host:
+
+  run:
+    

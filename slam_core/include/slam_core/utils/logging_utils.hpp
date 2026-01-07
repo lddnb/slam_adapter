@@ -46,7 +46,7 @@ struct fmt::formatter<EigenWrap<Derived>> {
     }
 
     template <class FormatContext>
-    auto format(const EigenWrap<Derived>& wrapper, FormatContext& ctx)
+    auto format(const EigenWrap<Derived>& wrapper, FormatContext& ctx) const
     {
         auto out = ctx.out();
         const auto rows = wrapper.matrix.rows();

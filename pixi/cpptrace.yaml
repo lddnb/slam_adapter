@@ -1,0 +1,45 @@
+context:
+  name: cpptrace
+  version: 1.0.4
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  url: https://github.com/jeremy-rifkin/cpptrace/archive/refs/tags/v${{ version }}.tar.gz
+  sha256: 5c9f5b301e903714a4d01f1057b9543fa540f7bfcc5e3f8bd1748e652e24f9ea
+
+build:
+  number: 0
+  script: |
+    cmake $CMAKE_ARGS \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=$PREFIX \
+      -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+      -DBUILD_SHARED_LIBS=ON \
+      -DCPPTRACE_UNWIND_WITH_LIBUNWIND=ON \
+      -DCPPTRACE_GET_SYMBOLS_WITH_LIBDWARF=ON \
+      -B $SRC_DIR/../build \
+      -S .
+
+    cmake --build $SRC_DIR/../build --target install -j2
+
+requirements:
+  build:
+    - ${{ compiler('cxx') }}
+    - ${{ compiler('c') }}
+    - cmake =3.24.3
+    - make
+    - pkg-config
+  host:
+    - libdwarf-dev
+    - libunwind
+    - libzlib
+    - zstd
+  run:
+    - libdwarf-dev
+    - libunwind
+    - libzlib
+    - zstd
+    
