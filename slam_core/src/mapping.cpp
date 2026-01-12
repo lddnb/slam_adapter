@@ -37,11 +37,6 @@ std::unique_ptr<OdomBase> CreateOdomEstimator(OdomType type)
     }
 }
 
-std::unique_ptr<local_mapping::LocalMapper> CreateLocalMapper()
-{
-    return std::make_unique<local_mapping::BalmLocalMapper>(local_mapping::LocalMapperConfig());
-}
-
 Mapping::Mapping(OdomType type)
 : visual_enable_(false),
   estimator_(nullptr),
@@ -56,10 +51,6 @@ Mapping::Mapping(OdomType type)
     estimator_ = CreateOdomEstimator(type);
     if (!estimator_) {
         spdlog::error("Failed to create odom estimator for type {}", static_cast<int>(type));
-    }
-    local_mapper_ = CreateLocalMapper();
-    if (!local_mapper_) {
-        spdlog::error("Failed to create local mapper");
     }
     mapping_thread_ = std::make_unique<std::thread>(&Mapping::RunMapping, this);
     spdlog::info("Mapping thread initialized with odometry {}", static_cast<int>(type));
@@ -254,7 +245,6 @@ void Mapping::RunMapping()
             if (!odom_res.cloud) {
                 continue;
             }
-            lidar_data_buffer_.emplace(odom_res.index, odom_res.orig_cloud);
             spdlog::info(
                 "[state] update pos: {:.6f} {:.6f} {:.6f}, quat: {:.6f} {:.6f} {:.6f} {:.6f}",
                 odom_res.state.p().x(),
@@ -264,21 +254,6 @@ void Mapping::RunMapping()
                 odom_res.state.quat().y(),
                 odom_res.state.quat().z(),
                 odom_res.state.quat().w());
-
-            local_mapper_->PushOdometryOutput(odom_res);
-            auto local_res = local_mapper_->TryProcess();
-            if (local_res) {
-                spdlog::info(
-                    "Local mapping optimized state pos: {:.6f} {:.6f} {:.6f}, quat: {:.6f} {:.6f} {:.6f} {:.6f}, index: {}",
-                    local_res->optimized_state.p().x(),
-                    local_res->optimized_state.p().y(),
-                    local_res->optimized_state.p().z(),
-                    local_res->optimized_state.quat().x(),
-                    local_res->optimized_state.quat().y(),
-                    local_res->optimized_state.quat().z(),
-                    local_res->optimized_state.quat().w(),
-                    local_res->index);
-            }
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -298,35 +273,6 @@ void Mapping::GetOdomCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
 {
     if (estimator_) {
         estimator_->ExportMapCloud(cloud_buffer);
-    }
-}
-
-void Mapping::GetLocalState(std::vector<CommonState>& buffer)
-{
-    buffer.clear();
-    if (local_mapper_) {
-        std::unordered_map<int, CommonState> temp_buffer;
-        local_mapper_->ExportStates(temp_buffer);
-        for (const auto& kv : temp_buffer) {
-            buffer.emplace_back(kv.second);
-            if (lidar_data_buffer_.count(kv.first)) {
-                PointCloudType::Ptr local_map_pc = lidar_data_buffer_[kv.first]->transformed(Eigen::Isometry3d::Identity()); //kv.second.isometry3d() * estimator_->T_i_l()
-                local_map_buffer_.emplace_back(local_map_pc);
-                lidar_data_buffer_.erase(kv.first);
-            }
-        }
-    }
-}
-
-void Mapping::GetLocalCloud(std::vector<PointCloudType::Ptr>& cloud_buffer)
-{
-    if (local_mapper_) {
-        cloud_buffer.clear();
-        // spdlog::warn("Export {} local map clouds", local_map_buffer_.size());
-        // if (!local_map_buffer_.empty()) {
-        //     cloud_buffer.swap(local_map_buffer_);
-        // }
-        local_mapper_->ExportMapCloud(cloud_buffer);
     }
 }
 

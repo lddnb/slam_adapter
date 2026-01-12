@@ -575,13 +575,11 @@ int main(int argc, char** argv)
     playback_runner.Start();
 
     std::vector<CommonState> odom_states_buffer;
-    std::vector<CommonState> local_states_buffer;
     std::vector<CommonState> states_buffer;
     OdomData odom_msg{};
     FrameTransformArray tf_msg{};
     PathData path_msg{};
     std::vector<PointCloudType::Ptr> odom_clouds;
-    std::vector<PointCloudType::Ptr> local_clouds;
 
     while (!shouldExit.load()) {
         EASY_BLOCK("Adapter Publish", profiler::colors::Orange);
@@ -621,28 +619,6 @@ int main(int argc, char** argv)
             }
         }
 
-        mapper->GetLocalState(local_states_buffer);
-        for (const auto& state : local_states_buffer) {
-            auto state_copy = state;
-            state_copy.p(state_copy.p() + Eigen::Vector3d(2.0, 2.0, 2.0));
-            if (!BuildOdomData(state, "odom", "base_link2", odom_msg)) {
-                spdlog::warn("BuildOdomData failed");
-                continue;
-            }
-            local_pub.SetBuildCallback([odom_msg](OdomData& payload) { payload = odom_msg; });
-            local_pub.Publish();
-
-            const auto& position = state.p();
-            const auto& quat_state = state.quat();
-
-            transform_data.emplace_back(FrameTransformData{
-                .timestamp = state.timestamp(),
-                .parent_frame = "odom",
-                .child_frame = "base_link2",
-                .translation = position,
-                .rotation = quat_state});
-        }
-
         if (!transform_data.empty()) {
             if (BuildFrameTransformArray(transform_data, tf_msg)) {
                 tf_pub.SetBuildCallback([tf_msg](FrameTransformArray& payload) { payload = tf_msg; });
@@ -664,18 +640,6 @@ int main(int argc, char** argv)
             const double ts_sec = cloud->empty() ? 0.0 : cloud->timestamp(0);
             const uint64_t ts_ns = ts_sec > 0.0 ? static_cast<uint64_t>(std::llround(ts_sec * 1e9)) : 0ULL;
             odom_cloud_pub.PublishWithBuilder(
-                [&](LivoxPointCloudDate& payload) { return BuildMid360FrameFromPointCloud(*cloud, ts_ns, payload, "odom"); });
-        }
-
-        // 发布局部建图优化后的地图点云
-        mapper->GetLocalCloud(local_clouds);
-        for (const auto& cloud : local_clouds) {
-            if (!cloud) {
-                continue;
-            }
-            const double ts_sec = cloud->empty() ? 0.0 : cloud->timestamp(0);
-            const uint64_t ts_ns = ts_sec > 0.0 ? static_cast<uint64_t>(std::llround(ts_sec * 1e9)) : 0ULL;
-            local_cloud_pub.PublishWithBuilder(
                 [&](LivoxPointCloudDate& payload) { return BuildMid360FrameFromPointCloud(*cloud, ts_ns, payload, "odom"); });
         }
 

@@ -15,7 +15,6 @@
 #include "slam_core/odometry/filter_state.hpp"
 #include "slam_core/odometry/odom_base.hpp"
 #include "slam_core/odometry/odom_common.hpp"
-#include "slam_core/local_mapping/balm_local_mapper.hpp"
 
 namespace ms_slam::slam_core
 {
@@ -35,8 +34,6 @@ enum class OdomType
  * @return 里程计智能指针
  */
 std::unique_ptr<OdomBase> CreateOdomEstimator(OdomType type);
-
-std::unique_ptr<local_mapping::LocalMapper> CreateLocalMapper();
 
 /**
  * @brief Mapping 运行时多态类，内部持有 OdomBase 指针以动态切换里程计
@@ -108,20 +105,6 @@ class Mapping
     void GetOdomCloud(std::vector<PointCloudType::Ptr>& cloud_buffer);
 
     /**
-     * @brief 导出局部建图优化后的状态量
-     * 
-     * @param buffer 
-     */
-    void GetLocalState(std::vector<CommonState>& buffer);
-
-    /**
-     * @brief 导出局部建图优化后的地图点云
-     * @param local_map 局部建图地图点云缓存
-     * @return void
-     */
-    void GetLocalCloud(std::vector<PointCloudType::Ptr>& cloud_buffer);
-
-    /**
      * @brief 停止映射线程
      * @return void
      */
@@ -137,15 +120,11 @@ class Mapping
     bool visual_enable_;  ///< 可视化开关
 
     std::unique_ptr<OdomBase> estimator_;  ///< 估计器封装
-    std::unique_ptr<local_mapping::LocalMapper> local_mapper_;  ///< 局部建图器
 
     std::unique_ptr<std::thread> mapping_thread_;  ///< 建图/里程计线程
 
     double last_timestamp_imu_;
     std::uint64_t last_index_imu_;
-
-    std::unordered_map<int, PointCloudType::ConstPtr> lidar_data_buffer_;  ///< 激光帧缓存
-    std::vector<PointCloudType::Ptr> local_map_buffer_;                    ///< 局部建图地图缓存
 
     std::atomic<bool> running_;  ///< 运行状态
 };

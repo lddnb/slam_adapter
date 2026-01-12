@@ -1,6 +1,7 @@
 build
 install
-.cache# pixi environments
+.cache
+# pixi environments
 .pixi/*
 !.pixi/config.toml
 bld
