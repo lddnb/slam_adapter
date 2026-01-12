@@ -19,6 +19,40 @@
 
 namespace ms_slam::slam_common
 {
+namespace
+{
+/**
+ * @brief 输出 cpptrace 与 libc 的诊断信息（用于排查 capability 为 false 的原因）
+ * @note 该函数仅在初始化阶段调用，非 signal-safe；日志输出使用 spdlog（英文）。
+ * @return 无
+ */
+void LogCpptraceEnvironmentDiagnostics()
+{
+    spdlog::error("cpptrace can_signal_safe_unwind: {}", cpptrace::can_signal_safe_unwind());
+    spdlog::error("cpptrace can_get_safe_object_frame: {}", cpptrace::can_get_safe_object_frame());
+
+#if defined(__GLIBC__)
+    spdlog::error("Compile-time glibc macros: {}.{}", __GLIBC__, __GLIBC_MINOR__);
+#else
+    spdlog::error("Compile-time libc: non-glibc (or glibc macros unavailable)");
+#endif
+
+#ifdef _CS_GNU_LIBC_VERSION
+    char libc_version_buf[256] = {0};
+    const std::size_t libc_version_len = confstr(_CS_GNU_LIBC_VERSION, libc_version_buf, sizeof(libc_version_buf));
+    if (libc_version_len > 0 && libc_version_len <= sizeof(libc_version_buf)) {
+        spdlog::error("Runtime libc: {}", libc_version_buf);
+    } else {
+        spdlog::error("Runtime libc: unknown (confstr(_CS_GNU_LIBC_VERSION) failed)");
+    }
+#else
+    spdlog::error("Runtime libc: _CS_GNU_LIBC_VERSION unavailable");
+#endif
+
+    spdlog::error("Hint: cpptrace::get_safe_object_frame requires _dl_find_object (glibc >= 2.35)");
+}
+
+}  // namespace
 
 // 全局状态变量（signal-safe）
 std::atomic<bool> g_crash_logger_initialized{false};
@@ -98,10 +132,12 @@ class CrashLogger::Impl
 
     bool initialize()
     {
-        // 检查系统支持
-        if (!cpptrace::can_signal_safe_unwind() || !cpptrace::can_get_safe_object_frame()) {
-            spdlog::error("System doesn't support signal-safe unwinding or safe object frame");
-            return false;
+        // 检查系统支持（不满足则降级运行：继续安装信号处理器，但崩溃堆栈信息可能不完整）
+        const bool can_signal_safe_unwind = cpptrace::can_signal_safe_unwind();
+        const bool can_get_safe_object_frame = cpptrace::can_get_safe_object_frame();
+        if (!can_signal_safe_unwind || !can_get_safe_object_frame) {
+            spdlog::error("Limited cpptrace capability detected, crash trace may be incomplete");
+            LogCpptraceEnvironmentDiagnostics();
         }
 
         // 预热 cpptrace
@@ -121,7 +157,6 @@ class CrashLogger::Impl
         spdlog_logger_->info("Crash Logger initialized successfully");
 
         return true;
-
     }
 
     void shutdown()
