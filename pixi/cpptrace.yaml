@@ -23,7 +23,7 @@ build:
       -B $SRC_DIR/../build \
       -S .
 
-    cmake --build $SRC_DIR/../build --target install -j2
+    cmake --build $SRC_DIR/../build --target install -j4
 
 requirements:
   build:
