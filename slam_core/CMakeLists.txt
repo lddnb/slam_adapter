@@ -7,6 +7,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_BUILD_TYPE RelWithDebInfo)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+message("Current CPU archtecture: ${CMAKE_SYSTEM_PROCESSOR}")
+if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
+  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=cortex-a55 -fopenmp")
+else()
+  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
+endif()
+
 option(USE_PCL "Use PCL library" OFF)
 
 # Find Eigen3
