@@ -15,6 +15,8 @@ else()
 endif()
 
 option(USE_PCL "Use PCL library" OFF)
+option(USE_RERUN "Use rerun visualization" OFF)
+message("USE_RERUN: ${USE_RERUN}")
 
 # Find Eigen3
 find_package(Eigen3 3.4 REQUIRED)
@@ -61,6 +63,11 @@ if(USE_PCL)
     target_include_directories(${PROJECT_NAME} PUBLIC ${PCL_INCLUDE_DIRS})
     target_link_libraries(${PROJECT_NAME} PUBLIC ${PCL_LIBRARIES})
     target_compile_definitions(${PROJECT_NAME} PUBLIC PCL_NO_PRECOMPILE USE_PCL)
+endif()
+if(USE_RERUN)
+    find_package(rerun_sdk REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PUBLIC rerun_sdk)
+    target_compile_definitions(${PROJECT_NAME} PUBLIC USE_RERUN)
 endif()
 
 target_compile_options(${PROJECT_NAME} PRIVATE

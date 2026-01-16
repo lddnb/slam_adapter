@@ -53,6 +53,12 @@ Mapping::Mapping(OdomType type)
         spdlog::error("Failed to create odom estimator for type {}", static_cast<int>(type));
     }
     mapping_thread_ = std::make_unique<std::thread>(&Mapping::RunMapping, this);
+#ifdef USE_RERUN
+    rec_ = std::make_shared<rerun::RecordingStream>("rerun_slam");
+    rec_->spawn().exit_on_failure();
+    rec_->log_static("world/imu", rerun::TransformAxes3D(0.5f));
+    estimator_->SetRerunRec(rec_);
+#endif
     spdlog::info("Mapping thread initialized with odometry {}", static_cast<int>(type));
 }
 
@@ -254,11 +260,64 @@ void Mapping::RunMapping()
                 odom_res.state.quat().y(),
                 odom_res.state.quat().z(),
                 odom_res.state.quat().w());
+#ifdef USE_RERUN
+            VisRerun();
+#endif
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
+
+#ifdef USE_RERUN
+void Mapping::VisRerun()
+{
+    EASY_FUNCTION(profiler::colors::DeepPurple400);
+    if (!rec_) {
+        spdlog::warn("Rerun recording stream not initialized");
+        return;
+    }
+
+    if (!estimator_) {
+        spdlog::warn("Odom estimator not initialized, skip rerun visualization");
+        return;
+    }
+    if (!estimator_->IsInitialized()) {
+        return;
+    }
+
+    const auto odom_res = estimator_->GetOdomRes();
+    if (!odom_res.cloud || odom_res.cloud->empty()) {
+        return;
+    }
+
+    // 使用帧序号作为时间轴，保证单帧点云刷新逻辑稳定
+    rec_->set_time_sequence("frame", static_cast<int64_t>(odom_res.index));
+
+    // 可视化当前机器（IMU）在世界系下的位姿：world_T_imu
+    const Eigen::Vector3f t_world_imu = odom_res.state.p().cast<float>();
+    const Eigen::Quaternionf q_world_imu = odom_res.state.quat().cast<float>();
+    const auto rr_translation = rerun::components::Translation3D(t_world_imu.x(), t_world_imu.y(), t_world_imu.z());
+    const auto rr_rotation =
+        rerun::Rotation3D(rerun::datatypes::Quaternion::from_xyzw(q_world_imu.x(), q_world_imu.y(), q_world_imu.z(), q_world_imu.w()));
+    rec_->log("world/imu", rerun::Transform3D(rr_translation, rr_rotation));
+
+    // 将点云从 LiDAR 系变换到世界系：world_T_lidar = world_T_imu * imu_T_lidar
+    const Eigen::Isometry3d world_T_lidar = odom_res.state.isometry3d() * estimator_->T_i_l();
+
+    const auto lidar_points = odom_res.cloud->positions_vec3();
+    std::vector<rerun::Position3D> world_points;
+    world_points.reserve(lidar_points.size());
+
+    // 将每个点从 LiDAR 坐标系变换到世界坐标系后记录到 Rerun
+    for (const auto& p_lidar : lidar_points) {
+        const Eigen::Vector3d p_world = world_T_lidar * p_lidar.cast<double>();
+        world_points.emplace_back(static_cast<float>(p_world.x()), static_cast<float>(p_world.y()), static_cast<float>(p_world.z()));
+    }
+
+    rec_->log("world/lidar_points", rerun::Points3D(world_points).with_colors(rerun::Color(255, 95, 0, 230)).with_radii({0.03f}));
+}
+#endif
 
 void Mapping::GetOdomState(std::vector<CommonState>& buffer)
 {

@@ -139,11 +139,21 @@ RUN cd /tmp && git clone https://github.com/artivis/manif.git && \
     cmake .. -DCMAKE_BUILD_TYPE=Release && \
     make install
 
+# robin-map
 RUN cd /tmp && git clone https://github.com/Tessil/robin-map.git && \
     cd robin-map && \
     mkdir build && \
     cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make install
+
+# rerun-cpp
+RUN cd /tmp && wget https://github.com/rerun-io/rerun/releases/latest/download/rerun_cpp_sdk.zip && \
+    unzip rerun_cpp_sdk.zip && \
+    cd rerun_cpp_sdk && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON && \
     make install
 
 # RUN cd /tmp && git clone https://github.com/olympus-robotics/mcap_builder.git && \

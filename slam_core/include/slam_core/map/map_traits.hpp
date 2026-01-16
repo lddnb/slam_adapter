@@ -61,6 +61,11 @@ struct MapTraits<VDBMap>
     {
         map.Update(points, pose);
     }
+
+    static std::vector<Eigen::Vector3f> GetPointCloud(const VDBMap& map)
+    {
+        return map.GetPointCloud();
+    }
 };
 
 template<>

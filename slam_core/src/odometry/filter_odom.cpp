@@ -5,8 +5,10 @@
 #include <cmath>
 #include <execution>
 #include <numeric>
+#include <string>
 #include <type_traits>
 
+#include <Eigen/Eigenvalues>
 #include <easy/arbitrary_value.h>
 #include <easy/profiler.h>
 
@@ -97,6 +99,32 @@ void FilterOdom<LocalMap>::ProcessSyncData(const SyncData& sync_data)
     this->odom_res.orig_cloud = this->deskewed_cloud_;
     this->odom_res.cloud = this->downsampled_cloud_;
     // spdlog::info("odom_res.deskewed_cloud size: {}", this->odom_res.cloud->size());
+
+#ifdef USE_RERUN
+    if (this->rec_ && this->FrameIndex() % 10 == 0) {
+        if constexpr (std::is_same_v<LocalMap, VDBMap>) {
+            // 可视化局部地图点云（世界系），用于观察地图增长与裁剪效果
+            this->rec_->set_time_sequence("frame", static_cast<int64_t>(this->FrameIndex()));
+
+            const auto local_map_points = MapTraits<VDBMap>::GetPointCloud(*this->local_map_);
+            if (local_map_points.empty()) {
+                this->rec_->log("world/local_map", rerun::Points3D::clear_fields());
+            } else {
+                const std::size_t stride = 1;
+                std::vector<rerun::Position3D> points;
+                points.reserve((local_map_points.size() + stride - 1) / stride);
+                for (std::size_t i = 0; i < local_map_points.size(); i += stride) {
+                    const auto& p = local_map_points[i];
+                    points.emplace_back(p.x(), p.y(), p.z());
+                }
+
+                this->rec_->log(
+                    "world/local_map",
+                    rerun::Points3D(points).with_colors(rerun::Color(90, 170, 255, 90)).with_radii({0.02f}));
+            }
+        }
+    }
+#endif
 }
 
 template <typename LocalMap>
@@ -314,6 +342,43 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
     std::vector<int> indices(N);
     std::iota(indices.begin(), indices.end(), 0);
 
+#ifdef USE_RERUN
+    const bool has_rerun_rec = static_cast<bool>(this->rec_);
+    const double rerun_residual_threshold = 0.05;
+    bool enable_rerun_vis = false;
+    std::size_t rerun_frame = 0;
+    std::string rerun_prefix;
+
+    std::vector<std::uint8_t> rerun_valid;
+    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> rerun_plane_centers;
+    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> rerun_plane_half_sizes;
+    std::vector<Eigen::Quaternionf, Eigen::aligned_allocator<Eigen::Quaternionf>> rerun_plane_quats;
+    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> rerun_line_starts;
+    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> rerun_line_ends;
+
+    if (has_rerun_rec) {
+        rerun_frame = this->FrameIndex();
+        // 仅在每个 FrameIndex 第一次进入 ObsModel 时进行可视化：如果该 index 已经渲染过则跳过
+        enable_rerun_vis = (rerun_frame != rerun_last_frame_index_);
+        if (enable_rerun_vis) {
+            rerun_last_frame_index_ = rerun_frame;
+        }
+        rerun_prefix = "world/matching/iter_0";
+
+        if (enable_rerun_vis) {
+            // 通过帧序号区分不同帧的匹配可视化
+            this->rec_->set_time_sequence("frame", static_cast<int64_t>(rerun_frame));
+
+            rerun_valid.assign(static_cast<std::size_t>(N), 0);
+            rerun_plane_centers.resize(static_cast<std::size_t>(N));
+            rerun_plane_half_sizes.resize(static_cast<std::size_t>(N));
+            rerun_plane_quats.resize(static_cast<std::size_t>(N));
+            rerun_line_starts.resize(static_cast<std::size_t>(N));
+            rerun_line_ends.resize(static_cast<std::size_t>(N));
+        }
+    }
+#endif
+
     EASY_BLOCK("matching", profiler::colors::BlueGrey500);
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
         const Eigen::Vector3d p = this->downsampled_cloud_->position(i).template cast<double>();
@@ -335,6 +400,65 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
             chosen[i] = 1;
             matches[i] = Match(p, p_abcd, dist);
             matches[i].confidence = static_cast<double>(s);
+
+#ifdef USE_RERUN
+            if (enable_rerun_vis) {
+                // 仅可视化“残差足够大”的匹配，以减少显示数量与渲染压力
+                if (std::abs(dist) < rerun_residual_threshold) {
+                    return;
+                }
+
+                // 通过邻域点协方差的特征值/特征向量构造“薄椭球”，用于表达平面拟合的局部几何
+                Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+                for (const auto& pt : pts) {
+                    centroid += pt.cast<double>();
+                }
+                centroid /= static_cast<double>(pts.size());
+
+                Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
+                for (const auto& pt : pts) {
+                    const Eigen::Vector3d d = pt.cast<double>() - centroid;
+                    cov.noalias() += d * d.transpose();
+                }
+                cov /= static_cast<double>(pts.size());
+
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cov);
+                if (solver.info() != Eigen::Success) {
+                    return;
+                }
+
+                Eigen::Matrix3d evecs = solver.eigenvectors();  // 列向量为特征向量（按特征值从小到大排序）
+                if (evecs.determinant() < 0.0) {
+                    evecs.col(2) *= -1.0;  // 纠正右手系
+                }
+                const Eigen::Quaterniond q_world_from_ellipsoid(evecs);
+
+                const Eigen::Vector3d evals = solver.eigenvalues().cwiseMax(1e-10);
+                constexpr float kSigmaScale = 2.0f;     // 2-sigma 椭球
+                constexpr float kMinThickness = 0.02f;  // 平面“厚度”下限，避免不可见
+                const float hs0 = std::max(kMinThickness, kSigmaScale * static_cast<float>(std::sqrt(evals.x())));  // 法向方向
+                const float hs1 = kSigmaScale * static_cast<float>(std::sqrt(evals.y()));
+                const float hs2 = kSigmaScale * static_cast<float>(std::sqrt(evals.z()));
+
+                // 点到平面投影：用于可视化点面残差（有向箭头）
+                const Eigen::Vector3d n = p_abcd.head<3>();
+                const double n_norm = n.norm();
+                if (n_norm <= 1e-9) {
+                    return;
+                }
+                const Eigen::Vector3d n_unit = n / n_norm;
+                const double signed_dist = dist / n_norm;
+                const Eigen::Vector3d g_proj = g - signed_dist * n_unit;
+
+                const auto idx = static_cast<std::size_t>(i);
+                rerun_plane_centers[idx] = centroid.cast<float>();
+                rerun_plane_half_sizes[idx] = Eigen::Vector3f(hs0, hs1, hs2);
+                rerun_plane_quats[idx] = q_world_from_ellipsoid.cast<float>();
+                rerun_line_starts[idx] = g.cast<float>();
+                rerun_line_ends[idx] = g_proj.cast<float>();
+                rerun_valid[idx] = 1;
+            }
+#endif
         }
     });
     EASY_END_BLOCK;
@@ -343,6 +467,70 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
     for (int i = 0; i < N; i++) {
         if (chosen[i]) obs_matches.emplace_back(matches[i]);
     }
+
+#ifdef USE_RERUN
+    if (enable_rerun_vis) {
+        // 控制可视化规模，避免单帧输出过多导致 UI 卡顿
+        constexpr std::size_t kMaxVisualizedMatches = 200;
+        const std::size_t target_count = std::min<std::size_t>(kMaxVisualizedMatches, obs_matches.size());
+
+        std::vector<rerun::components::Translation3D> plane_centers;
+        std::vector<rerun::components::HalfSize3D> plane_half_sizes;
+        std::vector<rerun::components::RotationQuat> plane_quats;
+        std::vector<rerun::components::Position3D> residual_arrow_origins;
+        std::vector<rerun::components::Vector3D> residual_arrow_vectors;
+
+        plane_centers.reserve(target_count);
+        plane_half_sizes.reserve(target_count);
+        plane_quats.reserve(target_count);
+        residual_arrow_origins.reserve(target_count);
+        residual_arrow_vectors.reserve(target_count);
+
+        for (int i = 0; i < N && plane_centers.size() < target_count; ++i) {
+            const auto idx = static_cast<std::size_t>(i);
+            if (!chosen[i] || idx >= rerun_valid.size() || !rerun_valid[idx]) {
+                continue;
+            }
+
+            const Eigen::Vector3f c = rerun_plane_centers[idx];
+            const Eigen::Vector3f hs = rerun_plane_half_sizes[idx];
+            const Eigen::Quaternionf q = rerun_plane_quats[idx];
+            const Eigen::Vector3f a = rerun_line_starts[idx];
+            const Eigen::Vector3f b = rerun_line_ends[idx];
+
+            plane_centers.emplace_back(c.x(), c.y(), c.z());
+            plane_half_sizes.emplace_back(hs.x(), hs.y(), hs.z());
+            plane_quats.emplace_back(rerun::datatypes::Quaternion::from_xyzw(q.x(), q.y(), q.z(), q.w()));
+
+            // 有向残差：从点指向其在拟合平面上的投影点
+            residual_arrow_origins.emplace_back(a.x(), a.y(), a.z());
+            residual_arrow_vectors.emplace_back(b.x() - a.x(), b.y() - a.y(), b.z() - a.z());
+        }
+
+        const rerun::Color iter_color = rerun::Color(210, 90, 255, 220);
+
+        if (!plane_centers.empty()) {
+            this->rec_->log(
+                rerun_prefix + "/planes",
+                rerun::Ellipsoids3D::from_centers_and_half_sizes(plane_centers, plane_half_sizes)
+                    .with_quaternions(plane_quats)
+                    .with_colors({iter_color})
+                    .with_fill_mode(rerun::components::FillMode::MajorWireframe)
+                    .with_line_radii({rerun::Radius(0.005f)}));
+
+            this->rec_->log(
+                rerun_prefix + "/residual_arrows",
+                rerun::Arrows3D::from_vectors(residual_arrow_vectors)
+                    .with_origins(residual_arrow_origins)
+                    .with_colors({iter_color})
+                    .with_radii({rerun::Radius(0.005f)}));
+        } else {
+            // 当前迭代没有有效匹配时，清空对应实体，避免残留显示
+            this->rec_->log(rerun_prefix + "/planes", rerun::Ellipsoids3D::clear_fields());
+            this->rec_->log(rerun_prefix + "/residual_arrows", rerun::Arrows3D::clear_fields());
+        }
+    }
+#endif
 
     spdlog::debug("osb matches size: {}", obs_matches.size());
 

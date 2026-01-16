@@ -10,6 +10,9 @@
 
 #include <Eigen/Geometry>
 #include <spdlog/spdlog.h>
+#ifdef USE_RERUN
+#include <rerun.hpp>
+#endif
 
 #include "slam_core/config.hpp"
 #include "slam_core/map/map_traits.hpp"
@@ -79,6 +82,15 @@ class OdomBase
     [[nodiscard]] virtual CommonState GetState() const = 0;
 
     [[nodiscard]] virtual local_mapping::OdometryOutput GetOdomRes() const = 0;
+
+#ifdef USE_RERUN
+    /**
+     * @brief 注入共享的 Rerun RecordingStream，用于复用同一条可视化数据通道
+     * @param rec Rerun 记录流（共享所有权，确保生命周期安全）
+     * @return void
+     */
+    virtual void SetRerunRec(const std::shared_ptr<rerun::RecordingStream>& rec) { (void)rec; }
+#endif
 };
 
 /**
@@ -151,6 +163,15 @@ class OdomBaseImpl : public OdomBase
 
     [[nodiscard]] Eigen::Isometry3d T_i_l() const override { return T_i_l_; };
 
+#ifdef USE_RERUN
+    /**
+     * @brief 注入共享的 Rerun RecordingStream，用于发布里程计内部可视化数据
+     * @param rec Rerun 记录流（共享所有权）
+     * @return void
+     */
+    void SetRerunRec(const std::shared_ptr<rerun::RecordingStream>& rec) override { rec_ = rec; }
+#endif
+
   protected:
     /**
      * @brief 推入新地图点云（线程安全）
@@ -198,6 +219,10 @@ class OdomBaseImpl : public OdomBase
     local_mapping::OdometryOutput odom_res;  ///< 里程计输出缓存
 
     mutable std::mutex state_mutex_; ///< 状态与地图互斥锁
+
+#ifdef USE_RERUN
+    std::shared_ptr<rerun::RecordingStream> rec_;  ///< Rerun 记录流（由上层注入并共享）
+#endif
 };
 
 template<typename LocalMap>

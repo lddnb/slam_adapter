@@ -144,5 +144,9 @@ class FilterOdom : public OdomBaseImpl<LocalMap>
     double init_last_imu_stamp_;     ///< 初始化阶段最后时间戳
 
     const Config& cfg_;  ///< 配置引用，避免重复获取单例
+
+#ifdef USE_RERUN
+    std::size_t rerun_last_frame_index_{static_cast<std::size_t>(-1)};  ///< Rerun 可视化：最近一次已渲染的帧编号
+#endif
 };
 }  // namespace ms_slam::slam_core

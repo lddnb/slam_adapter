@@ -8,6 +8,9 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#ifdef USE_RERUN
+#include <rerun.hpp>
+#endif
 
 #include "slam_core/config.hpp"
 #include "slam_core/map/map_traits.hpp"
@@ -90,6 +93,14 @@ class Mapping
      */
     void RunMapping();
 
+#ifdef USE_RERUN
+    /**
+     * @brief 可视化 Rerun 数据
+     * @return void
+     */
+    void VisRerun();
+#endif
+
     /**
      * @brief 导出 LiDAR 时刻位姿序列
      * @param buffer 外部缓存
@@ -127,5 +138,9 @@ class Mapping
     std::uint64_t last_index_imu_;
 
     std::atomic<bool> running_;  ///< 运行状态
+
+#ifdef USE_RERUN
+    std::shared_ptr<rerun::RecordingStream> rec_;  ///< Rerun 记录流
+#endif
 };
 }  // namespace ms_slam::slam_core
