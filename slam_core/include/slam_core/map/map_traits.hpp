@@ -14,25 +14,20 @@
 
 namespace ms_slam::slam_core
 {
-template<typename MapT>
+template <typename MapT>
 struct MapTraits;
 
-template<>
-struct MapTraits<VDBMap>
-{
+template <>
+struct MapTraits<VDBMap> {
     /**
      * @brief 创建 VDBMap 地图实例
-     * 
+     *
      * @param params 地图参数
-     * @return std::unique_ptr<VDBMap> 
+     * @return std::unique_ptr<VDBMap>
      */
     static std::unique_ptr<VDBMap> Create(const LocalMapParams& params)
     {
-        return std::make_unique<VDBMap>(
-            params.voxel_size,
-            params.map_clipping_distance,
-            params.max_points_per_voxel,
-            params.voxel_neighborhood);
+        return std::make_unique<VDBMap>(params.voxel_size, params.map_clipping_distance, params.max_points_per_voxel, params.voxel_neighborhood);
     }
 
     /**
@@ -44,7 +39,12 @@ struct MapTraits<VDBMap>
      * @param sq_dist 输出平方距离（单位：m^2）
      * @return 无
      */
-    static void Knn(VDBMap& map, const Eigen::Vector3f& point, int k, std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>& neighbors, std::vector<float>& sq_dist)
+    static void Knn(
+        VDBMap& map,
+        const Eigen::Vector3f& point,
+        int k,
+        std::vector<Eigen::Matrix<float, 6, 1>, Eigen::aligned_allocator<Eigen::Matrix<float, 6, 1>>>& neighbors,
+        std::vector<float>& sq_dist)
     {
         map.GetKNearestNeighbors(point, k, neighbors, sq_dist);
     }
@@ -62,20 +62,24 @@ struct MapTraits<VDBMap>
         map.Update(points, pose);
     }
 
+    static void Update(VDBMap& map, const std::vector<Eigen::Vector3f>& points, const Eigen::Isometry3d& pose, const std::vector<Eigen::Vector3f>& normals)
+    {
+        map.Update(points, normals, pose);
+    }
+
     static std::vector<Eigen::Vector3f> GetPointCloud(const VDBMap& map)
     {
         return map.GetPointCloud();
     }
 };
 
-template<>
-struct MapTraits<VoxelHashMap>
-{
+template <>
+struct MapTraits<VoxelHashMap> {
     /**
      * @brief 创建 VoxelHashMap 地图实例
-     * 
+     *
      * @param params 地图参数
-     * @return std::unique_ptr<VoxelHashMap> 
+     * @return std::unique_ptr<VoxelHashMap>
      */
     static std::unique_ptr<VoxelHashMap> Create(const LocalMapParams& params)
     {
@@ -96,7 +100,12 @@ struct MapTraits<VoxelHashMap>
      * @param sq_dist 输出平方距离（单位：m^2）
      * @return 无
      */
-    static void Knn(VoxelHashMap& map, const Eigen::Vector3f& point, int k, std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>& neighbors, std::vector<float>& sq_dist)
+    static void Knn(
+        VoxelHashMap& map,
+        const Eigen::Vector3f& point,
+        int k,
+        std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>& neighbors,
+        std::vector<float>& sq_dist)
     {
         neighbors = map.SearchNeighbors(point, k, sq_dist);
     }
@@ -119,14 +128,13 @@ struct MapTraits<VoxelHashMap>
     }
 };
 
-template<>
-struct MapTraits<thuni::Octree>
-{
+template <>
+struct MapTraits<thuni::Octree> {
     /**
      * @brief 创建 Octree 地图实例
-     * 
+     *
      * @param params 地图参数
-     * @return std::unique_ptr<thuni::Octree> 
+     * @return std::unique_ptr<thuni::Octree>
      */
     static std::unique_ptr<thuni::Octree> Create(const LocalMapParams& params)
     {
@@ -146,7 +154,12 @@ struct MapTraits<thuni::Octree>
      * @param sq_dist 输出平方距离（单位：m^2）
      * @return 无
      */
-    static void Knn(thuni::Octree& map, const Eigen::Vector3f& point, int k, std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>& neighbors, std::vector<float>& sq_dist)
+    static void Knn(
+        thuni::Octree& map,
+        const Eigen::Vector3f& point,
+        int k,
+        std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>& neighbors,
+        std::vector<float>& sq_dist)
     {
         map.knnNeighbors(point, k, neighbors, sq_dist);
     }
@@ -159,7 +172,11 @@ struct MapTraits<thuni::Octree>
      * @param unused 未使用的平移参数
      * @return 无
      */
-    static void Update(thuni::Octree& map, const std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>& points, const Eigen::Isometry3d& pose, const Eigen::Vector3d&)
+    static void Update(
+        thuni::Octree& map,
+        const std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>& points,
+        const Eigen::Isometry3d& pose,
+        const Eigen::Vector3d&)
     {
         const Eigen::Isometry3f world_T_lidar = pose.cast<float>();
         std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> points_world;

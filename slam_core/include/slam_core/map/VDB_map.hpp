@@ -10,13 +10,14 @@
 
 namespace ms_slam::slam_core
 {
-
-using VoxelBlock = std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>;
+using map_point_t = Eigen::Matrix<float, 6, 1>;
+using VoxelBlock = std::vector<map_point_t, Eigen::aligned_allocator<map_point_t>>;
 
 /**
  * @brief 基于 Bonxai 的稀疏 VDB 地图封装
  */
-class VDBMap {
+class VDBMap
+{
   public:
     using AccessorType = typename Bonxai::VoxelGrid<VoxelBlock>::Accessor;
     /**
@@ -44,6 +45,15 @@ class VDBMap {
     /**
      * @brief 将输入点云按位姿变换后加入地图并剔除远点
      * @param points 待加入的点云（传感器系）
+     * @param normals 待加入的法向量（传感器系，与 points 一一对应）
+     * @param pose 点云对应的位姿（世界系）
+     * @return 无
+     */
+    void Update(const std::vector<Eigen::Vector3f>& points, const std::vector<Eigen::Vector3f>& normals, const Eigen::Isometry3d& pose);
+
+    /**
+     * @brief 将输入点云按位姿变换后加入地图并剔除远点（不提供法向量时默认填充零向量）
+     * @param points 待加入的点云（传感器系）
      * @param pose 点云对应的位姿（世界系）
      * @return 无
      */
@@ -51,6 +61,14 @@ class VDBMap {
 
     /**
      * @brief 直接将点云插入地图
+     * @param points 已在世界系中的点云
+     * @param normals 已在世界系中的法向量（与 points 一一对应）
+     * @return 无
+     */
+    void AddPoints(const std::vector<Eigen::Vector3f>& points, const std::vector<Eigen::Vector3f>& normals);
+
+    /**
+     * @brief 直接将点云插入地图（不提供法向量时默认填充零向量）
      * @param points 已在世界系中的点云
      * @return 无
      */
@@ -82,10 +100,10 @@ class VDBMap {
     bool GetKNearestNeighbors(
         const Eigen::Vector3f& query,
         std::size_t k,
-        std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>& neighbors,
+        std::vector<map_point_t, Eigen::aligned_allocator<map_point_t>>& neighbors,
         std::vector<float>& distances) const;
 
-private:
+  private:
     double voxel_size_;
     double clipping_distance_;
     unsigned int max_points_per_voxel_;

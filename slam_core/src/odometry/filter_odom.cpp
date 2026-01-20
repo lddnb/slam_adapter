@@ -82,9 +82,12 @@ void FilterOdom<LocalMap>::ProcessSyncData(const SyncData& sync_data)
     EASY_BLOCK("Filter", profiler::colors::Pink400);
     LidarFilterOptions options{.rate_active = true, .sampling_stride = static_cast<std::size_t>(cfg_.common_params.point_filter_num)};
     this->deskewed_cloud_ = ApplyLidarFilters<PointType>(this->deskewed_cloud_, options);
+    frame_kdtree_.SetPoints(this->deskewed_cloud_->positions_vec3());
+    frame_kdtree_.Build();
     this->downsampled_cloud_ = VoxelGridSamplingPstl<PointType>(this->deskewed_cloud_, cfg_.mapping_params.down_size);
     EASY_END_BLOCK;
     spdlog::info("[Lidar] downsize {}", this->downsampled_cloud_->size());
+    EstimateNormals(this->downsampled_cloud_);
 
     UpdateWithModel();
     UpdateLocalMap();
@@ -118,9 +121,7 @@ void FilterOdom<LocalMap>::ProcessSyncData(const SyncData& sync_data)
                     points.emplace_back(p.x(), p.y(), p.z());
                 }
 
-                this->rec_->log(
-                    "world/local_map",
-                    rerun::Points3D(points).with_colors(rerun::Color(90, 170, 255, 90)).with_radii({0.02f}));
+                this->rec_->log("world/local_map", rerun::Points3D(points).with_colors(rerun::Color(90, 170, 255, 90)).with_radii({0.02f}));
             }
         }
     }
@@ -325,6 +326,87 @@ PointCloudType::Ptr FilterOdom<LocalMap>::Deskew(const PointCloudType::ConstPtr&
 }
 
 template <typename LocalMap>
+void FilterOdom<LocalMap>::EstimateNormals(PointCloudType::Ptr& cloud)
+{
+    EASY_FUNCTION(profiler::colors::Orange400);
+    std::vector<std::uint8_t> chosen(cloud->size(), 0);
+
+    std::vector<int> indices(cloud->size());
+    std::iota(indices.begin(), indices.end(), 0);
+    std::vector<Eigen::Vector3f> normals(cloud->size(), Eigen::Vector3f::Zero());
+    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
+        // 注意：par_unseq 下必须避免共享可变容器，否则会触发数据竞争导致崩溃
+        std::vector<std::size_t> nn_idx;
+        std::vector<float> nn_dist2;
+
+        const std::size_t knn_size = frame_kdtree_.KnnSearch(cloud->position(i), 5, nn_idx, nn_dist2);
+        if (knn_size < 5 || nn_dist2.empty() || nn_dist2.back() > 1.0) return;
+
+        Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
+        Eigen::Matrix3f covariance = Eigen::Matrix3f::Zero();
+
+        for (const auto& idx : nn_idx) {
+            const Eigen::Vector3f point = frame_kdtree_.GetPoint(idx);
+            centroid += point;
+            covariance += point * point.transpose();
+        }
+        centroid /= (float)nn_idx.size();
+        covariance /= (float)nn_idx.size();
+        covariance -= centroid * centroid.transpose();
+
+        //  计算协方差矩阵的特征值和特征向量
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> solver(covariance);
+        Eigen::Vector3f normal(solver.eigenvectors().col(0).normalized());  //  最小特征值对应的特征向量
+
+        // 保证法向量是指向雷达这一侧
+        if (normal.dot(-centroid) < 0) {
+            normal *= -1.0;
+        }
+
+        normals[i] = normal;
+        chosen[i] = 1;
+    });
+
+    frame_normals_.resize(normals.size(), Eigen::Vector3f::Zero());
+    std::vector<std::size_t> remove_indices;
+    for (const auto& i : indices) {
+        if (!chosen[i]) {
+            remove_indices.emplace_back(i);
+        } else {
+            frame_normals_.at(i) = normals[i];
+        }
+    }
+
+#ifdef USE_RERUN
+    if (this->rec_) {
+        // 可视化法向估计阶段被剔除的点（红色加粗），用于诊断 KNN/阈值导致的稀疏区域
+        this->rec_->set_time_sequence("frame", static_cast<int64_t>(this->FrameIndex()));
+
+        std::vector<rerun::Position3D> removed_points;
+        removed_points.reserve(remove_indices.size());
+
+        const Eigen::Isometry3d world_T_lidar = state_.isometry3d() * this->T_i_l_;
+        for (const auto& idx : remove_indices) {
+            const Eigen::Vector3d p_world = world_T_lidar * cloud->position(idx).template cast<double>();
+            removed_points.emplace_back(static_cast<float>(p_world.x()), static_cast<float>(p_world.y()), static_cast<float>(p_world.z()));
+        }
+
+        if (!removed_points.empty()) {
+            this->rec_->log(
+                "world/normal_estimation/removed_points",
+                rerun::Points3D(removed_points).with_colors(rerun::Color(255, 0, 0, 220)).with_radii({0.03f}));
+        } else {
+            this->rec_->log("world/normal_estimation/removed_points", rerun::Points3D::clear_fields());
+        }
+    }
+#endif
+
+    // cloud->erase(remove_indices);
+
+    CHECK(frame_normals_.size() == cloud->size());
+}
+
+template <typename LocalMap>
 void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, StateType::NoiseDiag& noise_inv)
 {
     EASY_FUNCTION(profiler::colors::Green500);
@@ -355,6 +437,14 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
     std::vector<Eigen::Quaternionf, Eigen::aligned_allocator<Eigen::Quaternionf>> rerun_plane_quats;
     std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> rerun_line_starts;
     std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> rerun_line_ends;
+    std::vector<std::uint8_t> rerun_rejected_valid;
+    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> rerun_rejected_plane_centers;
+    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> rerun_rejected_plane_half_sizes;
+    std::vector<Eigen::Quaternionf, Eigen::aligned_allocator<Eigen::Quaternionf>> rerun_rejected_plane_quats;
+    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> rerun_rejected_plane_normal_origins;
+    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> rerun_rejected_plane_normal_vectors;
+    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> rerun_rejected_point_normal_origins;
+    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> rerun_rejected_point_normal_vectors;
 
     if (has_rerun_rec) {
         rerun_frame = this->FrameIndex();
@@ -375,6 +465,14 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
             rerun_plane_quats.resize(static_cast<std::size_t>(N));
             rerun_line_starts.resize(static_cast<std::size_t>(N));
             rerun_line_ends.resize(static_cast<std::size_t>(N));
+            rerun_rejected_valid.assign(static_cast<std::size_t>(N), 0);
+            rerun_rejected_plane_centers.resize(static_cast<std::size_t>(N));
+            rerun_rejected_plane_half_sizes.resize(static_cast<std::size_t>(N));
+            rerun_rejected_plane_quats.resize(static_cast<std::size_t>(N));
+            rerun_rejected_plane_normal_origins.resize(static_cast<std::size_t>(N));
+            rerun_rejected_plane_normal_vectors.resize(static_cast<std::size_t>(N));
+            rerun_rejected_point_normal_origins.resize(static_cast<std::size_t>(N));
+            rerun_rejected_point_normal_vectors.resize(static_cast<std::size_t>(N));
         }
     }
 #endif
@@ -384,22 +482,52 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
         const Eigen::Vector3d p = this->downsampled_cloud_->position(i).template cast<double>();
         const Eigen::Vector3d g = state_.isometry3d() * this->T_i_l_ * p;
 
-        std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> neighbors;
+        std::vector<Eigen::Matrix<float, 6, 1>, Eigen::aligned_allocator<Eigen::Matrix<float, 6, 1>>> neighbors;
         std::vector<float> pointSearchSqDis;
-        MapTraits<LocalMap>::Knn(*this->local_map_, g.cast<float>(), this->localmap_params_.knn_num, neighbors, pointSearchSqDis);
+        if constexpr (std::is_same_v<LocalMap, VDBMap>) {
+            MapTraits<LocalMap>::Knn(*this->local_map_, g.cast<float>(), this->localmap_params_.knn_num, neighbors, pointSearchSqDis);
+        }
 
         if (neighbors.size() < this->localmap_params_.min_knn_num || pointSearchSqDis.empty() || pointSearchSqDis.back() > 1.0) return;
 
+        std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> pts;
+        Eigen::Vector3f avg_normal = Eigen::Vector3f::Zero();
+
+        for (const auto& neighbor : neighbors) {
+            pts.emplace_back(neighbor.template head<3>());
+            avg_normal += neighbor.template tail<3>();
+        }
+
         Eigen::Vector4d p_abcd = Eigen::Vector4d::Zero();
-        if (not EstimatePlane(p_abcd, neighbors, this->localmap_params_.plane_threshold)) return;
+        if (not EstimatePlane(p_abcd, pts, this->localmap_params_.plane_threshold)) return;
 
-        double dist = p_abcd.head<3>().dot(g) + p_abcd(3);
+        Eigen::Vector3f normal = p_abcd.head<3>().normalized().cast<float>();
+        if (normal.dot(avg_normal) < 0) {
+            normal = -normal;
+            // 同时翻转平面系数，保持点面距离符号一致（不改变平面几何意义）
+            p_abcd.head<3>() *= -1.0;
+            p_abcd(3) *= -1.0;
+        }
 
-        float s = 1 - 0.9 * fabs(dist) / sqrt(p.norm());
-        if (s > 0.9) {
+        Eigen::Vector3d frame_normal_world = Eigen::Vector3d::Zero();
+        double normal_score = 1.0;
+        if (!frame_normals_[i].isZero()) {
+            frame_normal_world = state_.isometry3d().rotation() * this->T_i_l_.rotation() * frame_normals_[i].cast<double>();
+            normal_score = frame_normal_world.cast<float>().dot(normal);
+        }
+
+        const double dist = p_abcd.head<3>().dot(g) + p_abcd(3);
+
+        const float s = 1 - 0.9 * fabs(dist) / sqrt(p.norm());
+        //  && normal_score > 0.5
+        if (s > 0.9 && normal_score > 0.5) {
             chosen[i] = 1;
             matches[i] = Match(p, p_abcd, dist);
             matches[i].confidence = static_cast<double>(s);
+            if (frame_normals_[i].isZero()) {
+                const Eigen::Vector3d n_frame = this->T_i_l_.rotation().transpose() * state_.isometry3d().rotation().transpose() * normal.cast<double>();
+                frame_normals_[i] = n_frame.cast<float>();
+            }
 
 #ifdef USE_RERUN
             if (enable_rerun_vis) {
@@ -459,6 +587,70 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
                 rerun_valid[idx] = 1;
             }
 #endif
+        } else if (s > 0.9 && normal_score <= 0.5) {
+#ifdef USE_RERUN
+            if (enable_rerun_vis) {
+                // 可视化法向不一致的被舍弃匹配：平面椭球与法向对比箭头
+                Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+                for (const auto& pt : pts) {
+                    centroid += pt.cast<double>();
+                }
+                centroid /= static_cast<double>(pts.size());
+
+                Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
+                for (const auto& pt : pts) {
+                    const Eigen::Vector3d d = pt.cast<double>() - centroid;
+                    cov.noalias() += d * d.transpose();
+                }
+                cov /= static_cast<double>(pts.size());
+
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cov);
+                if (solver.info() != Eigen::Success) {
+                    return;
+                }
+
+                Eigen::Matrix3d evecs = solver.eigenvectors();
+                if (evecs.determinant() < 0.0) {
+                    evecs.col(2) *= -1.0;  // 纠正右手系
+                }
+                const Eigen::Quaterniond q_world_from_ellipsoid(evecs);
+
+                const Eigen::Vector3d evals = solver.eigenvalues().cwiseMax(1e-10);
+                constexpr float kSigmaScale = 2.0f;
+                constexpr float kMinThickness = 0.02f;
+                const float hs0 = std::max(kMinThickness, kSigmaScale * static_cast<float>(std::sqrt(evals.x())));
+                const float hs1 = kSigmaScale * static_cast<float>(std::sqrt(evals.y()));
+                const float hs2 = kSigmaScale * static_cast<float>(std::sqrt(evals.z()));
+
+                const Eigen::Vector3d n = p_abcd.head<3>();
+                const double n_norm = n.norm();
+                if (n_norm <= 1e-9) {
+                    return;
+                }
+                const Eigen::Vector3d n_unit = n / n_norm;
+                const double signed_dist = dist / n_norm;
+                const Eigen::Vector3d g_proj = g - signed_dist * n_unit;
+
+                const double frame_norm = frame_normal_world.norm();
+                if (frame_norm <= 1e-9) {
+                    return;
+                }
+                const Eigen::Vector3d frame_unit = frame_normal_world / frame_norm;
+                const float normal_arrow_len = std::max(0.1f, 0.6f * std::max(hs1, hs2));
+
+                const auto idx = static_cast<std::size_t>(i);
+                rerun_rejected_plane_centers[idx] = centroid.cast<float>();
+                rerun_rejected_plane_half_sizes[idx] = Eigen::Vector3f(hs0, hs1, hs2);
+                rerun_rejected_plane_quats[idx] = q_world_from_ellipsoid.cast<float>();
+
+                const Eigen::Vector3f origin = g_proj.cast<float>();
+                rerun_rejected_plane_normal_origins[idx] = origin;
+                rerun_rejected_plane_normal_vectors[idx] = (n_unit * normal_arrow_len).cast<float>();
+                rerun_rejected_point_normal_origins[idx] = origin;
+                rerun_rejected_point_normal_vectors[idx] = (frame_unit * normal_arrow_len).cast<float>();
+                rerun_rejected_valid[idx] = 1;
+            }
+#endif
         }
     });
     EASY_END_BLOCK;
@@ -471,20 +663,35 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
 #ifdef USE_RERUN
     if (enable_rerun_vis) {
         // 控制可视化规模，避免单帧输出过多导致 UI 卡顿
-        constexpr std::size_t kMaxVisualizedMatches = 200;
-        const std::size_t target_count = std::min<std::size_t>(kMaxVisualizedMatches, obs_matches.size());
+        const std::size_t target_count = obs_matches.size();
+        const std::size_t rejected_count = std::count(rerun_rejected_valid.begin(), rerun_rejected_valid.end(), static_cast<std::uint8_t>(1));
+        const std::size_t rejected_target_count = rejected_count;
 
         std::vector<rerun::components::Translation3D> plane_centers;
         std::vector<rerun::components::HalfSize3D> plane_half_sizes;
         std::vector<rerun::components::RotationQuat> plane_quats;
         std::vector<rerun::components::Position3D> residual_arrow_origins;
         std::vector<rerun::components::Vector3D> residual_arrow_vectors;
+        std::vector<rerun::components::Translation3D> rejected_plane_centers;
+        std::vector<rerun::components::HalfSize3D> rejected_plane_half_sizes;
+        std::vector<rerun::components::RotationQuat> rejected_plane_quats;
+        std::vector<rerun::components::Position3D> rejected_plane_normal_origins;
+        std::vector<rerun::components::Vector3D> rejected_plane_normal_vectors;
+        std::vector<rerun::components::Position3D> rejected_point_normal_origins;
+        std::vector<rerun::components::Vector3D> rejected_point_normal_vectors;
 
         plane_centers.reserve(target_count);
         plane_half_sizes.reserve(target_count);
         plane_quats.reserve(target_count);
         residual_arrow_origins.reserve(target_count);
         residual_arrow_vectors.reserve(target_count);
+        rejected_plane_centers.reserve(rejected_target_count);
+        rejected_plane_half_sizes.reserve(rejected_target_count);
+        rejected_plane_quats.reserve(rejected_target_count);
+        rejected_plane_normal_origins.reserve(rejected_target_count);
+        rejected_plane_normal_vectors.reserve(rejected_target_count);
+        rejected_point_normal_origins.reserve(rejected_target_count);
+        rejected_point_normal_vectors.reserve(rejected_target_count);
 
         for (int i = 0; i < N && plane_centers.size() < target_count; ++i) {
             const auto idx = static_cast<std::size_t>(i);
@@ -507,7 +714,33 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
             residual_arrow_vectors.emplace_back(b.x() - a.x(), b.y() - a.y(), b.z() - a.z());
         }
 
+        for (int i = 0; i < N && rejected_plane_centers.size() < rejected_target_count; ++i) {
+            const auto idx = static_cast<std::size_t>(i);
+            if (chosen[i] || idx >= rerun_rejected_valid.size() || !rerun_rejected_valid[idx]) {
+                continue;
+            }
+
+            const Eigen::Vector3f c = rerun_rejected_plane_centers[idx];
+            const Eigen::Vector3f hs = rerun_rejected_plane_half_sizes[idx];
+            const Eigen::Quaternionf q = rerun_rejected_plane_quats[idx];
+            const Eigen::Vector3f plane_o = rerun_rejected_plane_normal_origins[idx];
+            const Eigen::Vector3f plane_v = rerun_rejected_plane_normal_vectors[idx];
+            const Eigen::Vector3f point_o = rerun_rejected_point_normal_origins[idx];
+            const Eigen::Vector3f point_v = rerun_rejected_point_normal_vectors[idx];
+
+            rejected_plane_centers.emplace_back(c.x(), c.y(), c.z());
+            rejected_plane_half_sizes.emplace_back(hs.x(), hs.y(), hs.z());
+            rejected_plane_quats.emplace_back(rerun::datatypes::Quaternion::from_xyzw(q.x(), q.y(), q.z(), q.w()));
+            rejected_plane_normal_origins.emplace_back(plane_o.x(), plane_o.y(), plane_o.z());
+            rejected_plane_normal_vectors.emplace_back(plane_v.x(), plane_v.y(), plane_v.z());
+            rejected_point_normal_origins.emplace_back(point_o.x(), point_o.y(), point_o.z());
+            rejected_point_normal_vectors.emplace_back(point_v.x(), point_v.y(), point_v.z());
+        }
+
         const rerun::Color iter_color = rerun::Color(210, 90, 255, 220);
+        const rerun::Color rejected_plane_color = rerun::Color(255, 90, 90, 220);
+        const rerun::Color rejected_plane_normal_color = rerun::Color(255, 190, 80, 220);
+        const rerun::Color rejected_point_normal_color = rerun::Color(80, 200, 255, 220);
 
         if (!plane_centers.empty()) {
             this->rec_->log(
@@ -528,6 +761,35 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
             // 当前迭代没有有效匹配时，清空对应实体，避免残留显示
             this->rec_->log(rerun_prefix + "/planes", rerun::Ellipsoids3D::clear_fields());
             this->rec_->log(rerun_prefix + "/residual_arrows", rerun::Arrows3D::clear_fields());
+        }
+
+        if (!rejected_plane_centers.empty()) {
+            this->rec_->log(
+                rerun_prefix + "/rejected/planes",
+                rerun::Ellipsoids3D::from_centers_and_half_sizes(rejected_plane_centers, rejected_plane_half_sizes)
+                    .with_quaternions(rejected_plane_quats)
+                    .with_colors({rejected_plane_color})
+                    .with_fill_mode(rerun::components::FillMode::MajorWireframe)
+                    .with_line_radii({rerun::Radius(0.005f)}));
+
+            this->rec_->log(
+                rerun_prefix + "/rejected/plane_normals",
+                rerun::Arrows3D::from_vectors(rejected_plane_normal_vectors)
+                    .with_origins(rejected_plane_normal_origins)
+                    .with_colors({rejected_plane_normal_color})
+                    .with_radii({rerun::Radius(0.005f)}));
+
+            this->rec_->log(
+                rerun_prefix + "/rejected/point_normals",
+                rerun::Arrows3D::from_vectors(rejected_point_normal_vectors)
+                    .with_origins(rejected_point_normal_origins)
+                    .with_colors({rejected_point_normal_color})
+                    .with_radii({rerun::Radius(0.005f)}));
+        } else {
+            // 当前帧没有法向不一致的匹配时，清空对应实体
+            this->rec_->log(rerun_prefix + "/rejected/planes", rerun::Ellipsoids3D::clear_fields());
+            this->rec_->log(rerun_prefix + "/rejected/plane_normals", rerun::Arrows3D::clear_fields());
+            this->rec_->log(rerun_prefix + "/rejected/point_normals", rerun::Arrows3D::clear_fields());
         }
     }
 #endif
@@ -580,7 +842,7 @@ void FilterOdom<LocalMap>::UpdateLocalMap()
 {
     EASY_FUNCTION(profiler::colors::DarkBrown);
     const Eigen::Isometry3d world_T_lidar = state_.isometry3d() * this->T_i_l_;
-    OdomBaseImpl<LocalMap>::UpdateLocalMap(world_T_lidar, state_.p(), this->deskewed_cloud_, this->downsampled_cloud_);
+    OdomBaseImpl<LocalMap>::UpdateLocalMap(world_T_lidar, state_.p(), this->deskewed_cloud_, this->downsampled_cloud_, frame_normals_);
 }
 
 template class FilterOdom<VDBMap>;

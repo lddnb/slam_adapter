@@ -192,7 +192,8 @@ class OdomBaseImpl : public OdomBase
         const Eigen::Isometry3d& world_T_lidar,
         const Eigen::Vector3d& state_p,
         const PointCloudType::Ptr& deskewed,
-        const PointCloudType::Ptr& downsampled);
+        const PointCloudType::Ptr& downsampled,
+        const std::vector<Eigen::Vector3f>& normals);
 
     /**
      * @brief 帧计数递增
@@ -306,7 +307,8 @@ void OdomBaseImpl<LocalMap>::UpdateLocalMap(
     const Eigen::Isometry3d& world_T_lidar,
     const Eigen::Vector3d& state_p,
     const PointCloudType::Ptr& deskewed,
-    const PointCloudType::Ptr& downsampled)
+    const PointCloudType::Ptr& downsampled,
+    const std::vector<Eigen::Vector3f>& normals)
 {
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (deskewed) {
@@ -322,7 +324,13 @@ void OdomBaseImpl<LocalMap>::UpdateLocalMap(
             local_points.assign(ori_points.begin(), ori_points.end());
             MapTraits<LocalMap>::Update(*local_map_, local_points, world_T_lidar, state_p);
             spdlog::info("local map add {} points", local_points.size());
-        } else {
+        } else if constexpr (std::is_same_v<LocalMap, VDBMap>) {
+            std::vector<Eigen::Vector3f> local_points;
+            local_points.assign(ori_points.begin(), ori_points.end());
+            MapTraits<VDBMap>::Update(*local_map_, local_points, world_T_lidar, normals);
+            spdlog::info("local map add {} points", local_points.size());
+        }
+        else {
             std::vector<Eigen::Vector3f> local_points;
             local_points.assign(ori_points.begin(), ori_points.end());
             MapTraits<LocalMap>::Update(*local_map_, local_points, world_T_lidar, state_p);

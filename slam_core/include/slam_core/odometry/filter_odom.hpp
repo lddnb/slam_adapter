@@ -3,6 +3,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <cstdint>
 #include <string_view>
 #include <vector>
 
@@ -13,6 +14,7 @@
 #include "slam_core/config.hpp"
 #include "slam_core/odometry/filter_state.hpp"
 #include "slam_core/odometry/odom_base.hpp"
+#include "slam_core/utils/eigen_nanoflann_kdtree.hpp"
 
 namespace ms_slam::slam_core
 {
@@ -114,6 +116,13 @@ class FilterOdom : public OdomBaseImpl<LocalMap>
     [[nodiscard]] PointCloudType::Ptr Deskew(const PointCloudType::ConstPtr& cloud) const;
 
     /**
+     * @brief 估计点云法向量
+     * @param cloud 输入点云
+     * @return void
+     */
+    void EstimateNormals(PointCloudType::Ptr& cloud);
+
+    /**
      * @brief 点面观测模型（滤波专用）
      * @param H 观测雅可比矩阵
      * @param z 观测残差向量
@@ -144,6 +153,8 @@ class FilterOdom : public OdomBaseImpl<LocalMap>
     double init_last_imu_stamp_;     ///< 初始化阶段最后时间戳
 
     const Config& cfg_;  ///< 配置引用，避免重复获取单例
+    EigenNanoFlannKdTree3f frame_kdtree_;  ///< 单帧点云 KDTree，用于估计法向量
+    std::vector<Eigen::Vector3f> frame_normals_;   ///< 单帧点云法向量缓存
 
 #ifdef USE_RERUN
     std::size_t rerun_last_frame_index_{static_cast<std::size_t>(-1)};  ///< Rerun 可视化：最近一次已渲染的帧编号

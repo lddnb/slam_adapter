@@ -60,7 +60,7 @@ VDBMap::VDBMap(const double voxel_size, const double clipping_distance, const un
 bool VDBMap::GetKNearestNeighbors(
     const Eigen::Vector3f& query,
     std::size_t k,
-    std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>& neighbors,
+    std::vector<map_point_t, Eigen::aligned_allocator<map_point_t>>& neighbors,
     std::vector<float>& distances) const
 {
     if (k == 0) {
@@ -71,7 +71,7 @@ bool VDBMap::GetKNearestNeighbors(
     const auto const_accessor = map_.createConstAccessor();
     const Bonxai::CoordT voxel = map_.posToCoord(query);
 
-    std::vector<std::pair<double, Eigen::Vector3f>> candidates;
+    std::vector<std::pair<double, map_point_t>> candidates;
     candidates.reserve(neighbor_shifts_.size() * static_cast<std::size_t>(max_points_per_voxel_));
 
     // 遍历查询体素及其相邻体素，收集所有候选点
@@ -82,13 +82,13 @@ bool VDBMap::GetKNearestNeighbors(
             continue;
         }
         for (const auto& neighbor : *voxel_points) {
-            const double distance = (neighbor - query).norm();
-            candidates.emplace_back(distance, neighbor);
+            const double dist2 = (neighbor.template head<3>() - query).squaredNorm();
+            candidates.emplace_back(dist2, neighbor);
         }
     }
 
     if (candidates.empty()) {
-        spdlog::debug("GetKNearestNeighbors locate no points near [{}, {}, {}]", query.x(), query.y(), query.z());
+        // spdlog::debug("GetKNearestNeighbors locate no points near [{}, {}, {}]", query.x(), query.y(), query.z());
         return false;
     }
 
@@ -114,24 +114,56 @@ bool VDBMap::GetKNearestNeighbors(
     return true;
 }
 
-void VDBMap::AddPoints(const std::vector<Eigen::Vector3f>& points)
+void VDBMap::AddPoints(const std::vector<Eigen::Vector3f>& points, const std::vector<Eigen::Vector3f>& normals)
 {
-    std::for_each(points.cbegin(), points.cend(), [&](const Eigen::Vector3f& p) {
+    if (points.size() != normals.size()) {
+        spdlog::error("VDBMap::AddPoints expects points.size() == normals.size(), got points={}, normals={}", points.size(), normals.size());
+        return;
+    }
+
+    const std::size_t num_points = points.size();
+    for (std::size_t i = 0; i < num_points; ++i) {
+        const auto& p = points[i];
+        const auto& n = normals[i];
         const auto voxel_coordinates = map_.posToCoord(p);
         VoxelBlock* voxel_points = accessor_.value(voxel_coordinates, /*create_if_missing=*/true);
         if (voxel_points->size() == max_points_per_voxel_ || std::any_of(voxel_points->cbegin(), voxel_points->cend(), [&](const auto& voxel_point) {
-                return (voxel_point - p).norm() < map_resolution_;
+                return (voxel_point.template head<3>() - p).squaredNorm() < static_cast<float>(map_resolution_ * map_resolution_);
             })) {
-            return;
+            continue;
         }
         voxel_points->reserve(max_points_per_voxel_);
-        voxel_points->emplace_back(p);
-    });
+        map_point_t map_point = map_point_t::Zero();
+        map_point.template head<3>() = p;
+        map_point.template tail<3>() = n;
+        voxel_points->emplace_back(map_point);
+    }
+}
+
+void VDBMap::AddPoints(const std::vector<Eigen::Vector3f>& points)
+{
+    const Eigen::Vector3f zero_normal = Eigen::Vector3f::Zero();
+    for (const auto& p : points) {
+        const auto voxel_coordinates = map_.posToCoord(p);
+        VoxelBlock* voxel_points = accessor_.value(voxel_coordinates, /*create_if_missing=*/true);
+        if (voxel_points->size() == max_points_per_voxel_ || std::any_of(voxel_points->cbegin(), voxel_points->cend(), [&](const auto& voxel_point) {
+                return (voxel_point.template head<3>() - p).squaredNorm() < static_cast<float>(map_resolution_ * map_resolution_);
+            })) {
+            continue;
+        }
+        voxel_points->reserve(max_points_per_voxel_);
+        map_point_t map_point = map_point_t::Zero();
+        map_point.template head<3>() = p;
+        map_point.template tail<3>() = zero_normal;
+        voxel_points->emplace_back(map_point);
+    }
 }
 
 void VDBMap::RemovePointsFarFromLocation(const Eigen::Vector3d& origin)
 {
-    auto is_too_far_away = [&](const VoxelBlock& block) { return (block.front() - origin.cast<float>()).norm() > clipping_distance_; };
+    const float clipping_dist2 = static_cast<float>(clipping_distance_ * clipping_distance_);
+    const Eigen::Vector3f origin_f = origin.cast<float>();
+    auto is_too_far_away = [&](const VoxelBlock& block) { return (block.front().template head<3>() - origin_f).squaredNorm() > clipping_dist2; };
 
     std::vector<Bonxai::CoordT> keys_to_delete;
     auto& root_map = map_.rootMap();
@@ -154,6 +186,19 @@ void VDBMap::RemovePointsFarFromLocation(const Eigen::Vector3d& origin)
     }
 }
 
+void VDBMap::Update(const std::vector<Eigen::Vector3f>& points, const std::vector<Eigen::Vector3f>& normals, const Eigen::Isometry3d& pose)
+{
+    std::vector<Eigen::Vector3f> points_transformed(points.size());
+    std::vector<Eigen::Vector3f> normals_transformed(normals.size());
+    std::transform(points.cbegin(), points.cend(), points_transformed.begin(), [&](const auto& point) { return pose.cast<float>() * point; });
+    std::transform(normals.cbegin(), normals.cend(), normals_transformed.begin(), [&](const auto& normal) {
+        return pose.linear().cast<float>() * normal;
+    });
+    const Eigen::Vector3d& origin = pose.translation();
+    AddPoints(points_transformed, normals_transformed);
+    RemovePointsFarFromLocation(origin);
+}
+
 void VDBMap::Update(const std::vector<Eigen::Vector3f>& points, const Eigen::Isometry3d& pose)
 {
     std::vector<Eigen::Vector3f> points_transformed(points.size());
@@ -167,8 +212,11 @@ std::vector<Eigen::Vector3f> VDBMap::GetPointCloud() const
 {
     std::vector<Eigen::Vector3f> point_cloud;
     point_cloud.reserve(map_.activeCellsCount() * max_points_per_voxel_);
-    map_.forEachCell(
-        [&point_cloud, this](const VoxelBlock& block, const auto&) { point_cloud.insert(point_cloud.end(), block.cbegin(), block.cend()); });
+    map_.forEachCell([&point_cloud](const VoxelBlock& block, const auto&) {
+        for (const auto& map_point : block) {
+            point_cloud.emplace_back(map_point.template head<3>());
+        }
+    });
     return point_cloud;
 }
 
