@@ -380,8 +380,9 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
 #endif
 
     EASY_BLOCK("matching", profiler::colors::BlueGrey500);
+    const auto positions = this->downsampled_cloud_->positions_matrix();
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
-        const Eigen::Vector3d p = this->downsampled_cloud_->position(i).template cast<double>();
+        const Eigen::Vector3d p = positions.col(i).template cast<double>();
         const Eigen::Vector3d g = state_.isometry3d() * this->T_i_l_ * p;
 
         std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> neighbors;
@@ -410,17 +411,17 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
 
                 // 通过邻域点协方差的特征值/特征向量构造“薄椭球”，用于表达平面拟合的局部几何
                 Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
-                for (const auto& pt : pts) {
+                for (const auto& pt : neighbors) {
                     centroid += pt.cast<double>();
                 }
-                centroid /= static_cast<double>(pts.size());
+                centroid /= static_cast<double>(neighbors.size());
 
                 Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
-                for (const auto& pt : pts) {
+                for (const auto& pt : neighbors) {
                     const Eigen::Vector3d d = pt.cast<double>() - centroid;
                     cov.noalias() += d * d.transpose();
                 }
-                cov /= static_cast<double>(pts.size());
+                cov /= static_cast<double>(neighbors.size());
 
                 Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cov);
                 if (solver.info() != Eigen::Success) {

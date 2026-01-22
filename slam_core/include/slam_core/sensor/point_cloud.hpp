@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <concepts>
 #include <execution>
 #include <iterator>
 #include <numeric>
@@ -275,16 +276,24 @@ class PointCloud
     }
 
     template <std::ranges::input_range Range>
-        requires std::same_as<std::ranges::range_value_t<std::decay_t<Range>>, std::size_t>
+        requires(std::integral<std::ranges::range_value_t<std::decay_t<Range>>> &&
+                 std::convertible_to<std::ranges::range_value_t<std::decay_t<Range>>, std::size_t>)
     [[nodiscard]] PointCloud extract(Range&& indices_range) const
     {
+        using IndexT = std::ranges::range_value_t<std::decay_t<Range>>;
         // 遍历索引 range，将每个合法索引复制到新的点云实例中
         std::vector<std::size_t> index_list;
         if constexpr (std::ranges::sized_range<Range>) {
             index_list.reserve(static_cast<std::size_t>(std::ranges::size(indices_range)));
         }
 
-        for (std::size_t idx : indices_range) {
+        for (auto&& raw_idx : indices_range) {
+            if constexpr (std::signed_integral<IndexT>) {
+                if (raw_idx < 0) {
+                    throw std::out_of_range("PointCloud::extract - index out of range");
+                }
+            }
+            const std::size_t idx = static_cast<std::size_t>(raw_idx);
             if (idx >= size_) {
                 throw std::out_of_range("PointCloud::extract - index out of range");
             }
@@ -299,12 +308,22 @@ class PointCloud
         return result;
     }
 
+    template <std::ranges::input_range Range>
+        requires(std::integral<std::ranges::range_value_t<std::decay_t<Range>>> &&
+                 std::convertible_to<std::ranges::range_value_t<std::decay_t<Range>>, std::size_t>)
+    [[nodiscard]] PointCloud::Ptr extract_ptr(Range&& indices_range) const
+    {
+        return std::make_shared<PointCloud>(extract(std::forward<Range>(indices_range)));
+    }
+
     void erase(std::size_t index) { erase(std::array<std::size_t, 1>{index}); }
 
     template <std::ranges::input_range Range>
-        requires std::same_as<std::ranges::range_value_t<std::decay_t<Range>>, std::size_t>
+        requires(std::integral<std::ranges::range_value_t<std::decay_t<Range>>> &&
+                 std::convertible_to<std::ranges::range_value_t<std::decay_t<Range>>, std::size_t>)
     void erase(Range&& indices_range)
     {
+        using IndexT = std::ranges::range_value_t<std::decay_t<Range>>;
         if (size_ == 0) {
             throw std::out_of_range("PointCloud::erase - index out of range");
         }
@@ -318,7 +337,13 @@ class PointCloud
         bool has_previous = false;
         std::size_t previous_value = 0;
 
-        for (std::size_t idx : indices_range) {
+        for (auto&& raw_idx : indices_range) {
+            if constexpr (std::signed_integral<IndexT>) {
+                if (raw_idx < 0) {
+                    throw std::out_of_range("PointCloud::erase - index out of range");
+                }
+            }
+            const std::size_t idx = static_cast<std::size_t>(raw_idx);
             if (idx >= size_) {
                 throw std::out_of_range("PointCloud::erase - index out of range");
             }
@@ -388,10 +413,6 @@ class PointCloud
         }
     }
 
-    [[nodiscard]] auto positions_view() noexcept { return field_view<PositionTag>(); }
-
-    [[nodiscard]] auto positions_view() const noexcept { return field_view<PositionTag>(); }
-
     [[nodiscard]] std::span<scalar_type> positions() noexcept
     {
         auto& pos = storage_by_tag<PositionTag>();
@@ -402,34 +423,6 @@ class PointCloud
     {
         const auto& pos = storage_by_tag<PositionTag>();
         return std::span<const scalar_type>(pos.data(), size_ * position_dimensions);
-    }
-
-    [[nodiscard]] std::span<Eigen::Vector3f> positions_vec3() noexcept
-    {
-        static_assert(std::is_same_v<scalar_type, float>, "positions_vec3 only supports float type point cloud");
-        static_assert(position_dimensions == 3, "positions_vec3 only supports 3D position");
-
-        auto& pos = storage_by_tag<PositionTag>();
-        if (pos.empty()) {
-            return {};
-        }
-        const std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(pos.data());
-        assert(addr % alignof(Eigen::Vector3f) == 0 && "positions data is not aligned with Eigen::Vector3f");
-        return std::span<Eigen::Vector3f>(reinterpret_cast<Eigen::Vector3f*>(pos.data()), size_);
-    }
-
-    [[nodiscard]] std::span<const Eigen::Vector3f> positions_vec3() const noexcept
-    {
-        static_assert(std::is_same_v<scalar_type, float>, "positions_vec3 only supports float type point cloud");
-        static_assert(position_dimensions == 3, "positions_vec3 only supports 3D position");
-
-        const auto& pos = storage_by_tag<PositionTag>();
-        if (pos.empty()) {
-            return {};
-        }
-        const std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(pos.data());
-        assert(addr % alignof(Eigen::Vector3f) == 0 && "positions data is not aligned with Eigen::Vector3f");
-        return std::span<const Eigen::Vector3f>(reinterpret_cast<const Eigen::Vector3f*>(pos.data()), size_);
     }
 
     [[nodiscard]] auto positions_matrix() noexcept { return field_matrix<PositionTag>(); }

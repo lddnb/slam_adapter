@@ -47,14 +47,14 @@ class VDBMap {
      * @param pose 点云对应的位姿（世界系）
      * @return 无
      */
-    void Update(const std::vector<Eigen::Vector3f>& points, const Eigen::Isometry3d& pose);
+    void Update(const Eigen::Ref<const Eigen::Matrix3Xf>& points, const Eigen::Isometry3d& pose);
 
     /**
      * @brief 直接将点云插入地图
      * @param points 已在世界系中的点云
      * @return 无
      */
-    void AddPoints(const std::vector<Eigen::Vector3f>& points);
+    void AddPoints(const Eigen::Ref<const Eigen::Matrix3Xf>& points, const Eigen::Isometry3d& pose);
 
     /**
      * @brief 按裁剪距离移除远离指定位置的体素

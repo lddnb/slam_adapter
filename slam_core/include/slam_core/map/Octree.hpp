@@ -557,19 +557,21 @@ namespace thuni
 	 * @param pts 输入点云，使用对齐分配以确保 SIMD 对齐
 	 * @return 无返回值
 	 */
-	void initialize(const OctreePointCloud &pts)
+	void initialize(const Eigen::Ref<const Eigen::Matrix3Xf>& pts, const Eigen::Isometry3d& pose)
 		{
 			clear();
-			const size_t pts_num = pts.size();
+			const size_t pts_num = pts.cols();
 			std::vector<float *> points;
 			points.resize(pts_num, 0);
 			size_t cloud_index = 0;
 			float min[3], max[3];
+			const Eigen::Isometry3f pose_f = pose.cast<float>();
 			for (size_t i = 0; i < pts_num; ++i)
 			{
-				const float x = pts[i].x();
-				const float y = pts[i].y();
-				const float z = pts[i].z();
+				const Eigen::Vector3f p = pose_f * pts.col(i);
+				const float x = p.x();
+				const float y = p.y();
+				const float z = p.z();
 				if (std::isnan(x) || std::isnan(y) || std::isnan(z))
 					continue;
 				float* cloud_ptr = new float[dim];
@@ -621,25 +623,27 @@ namespace thuni
 	 * @param down_size 是否执行简单的下采样策略
 	 * @return 无返回值
 	 */
-	void update(const OctreePointCloud &pts, bool down_size = false)
+	void update(const Eigen::Ref<const Eigen::Matrix3Xf>&pts, const Eigen::Isometry3d& pose, bool down_size = false)
 		{
 			if (m_root_ == 0)
 			{
-				initialize(pts);
+				initialize(pts, pose);
 				return;
 			}
 			m_downSize = down_size;
-			const size_t pts_num = pts.size();
+			const size_t pts_num = pts.cols();
 			std::vector<float *> points_tmp;
 			points_tmp.resize(pts_num, 0);
 			size_t cloud_index = 0;
 			float min[3], max[3];
 			const size_t N_old = last_pts_num;
+			const Eigen::Isometry3f pose_f = pose.cast<float>();
 			for (size_t i = 0; i < pts_num; ++i)
 			{
-				const float x = pts[i].x();
-				const float y = pts[i].y();
-				const float z = pts[i].z();
+				const Eigen::Vector3f p = pose_f * pts.col(i);
+				const float x = p.x();
+				const float y = p.y();
+				const float z = p.z();
 				if (std::isnan(x) || std::isnan(y) || std::isnan(z))
 					continue;
 				float* cloud_ptr = new float[dim];

@@ -316,18 +316,10 @@ void OdomBaseImpl<LocalMap>::UpdateLocalMap(
     }
 
     if (downsampled && local_map_) {
-        auto ori_points = downsampled->positions_vec3();
-        if constexpr (std::is_same_v<LocalMap, thuni::Octree>) {
-            std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> local_points;
-            local_points.assign(ori_points.begin(), ori_points.end());
-            MapTraits<LocalMap>::Update(*local_map_, local_points, world_T_lidar, state_p);
-            spdlog::info("local map add {} points", local_points.size());
-        } else {
-            std::vector<Eigen::Vector3f> local_points;
-            local_points.assign(ori_points.begin(), ori_points.end());
-            MapTraits<LocalMap>::Update(*local_map_, local_points, world_T_lidar, state_p);
-            spdlog::info("local map add {} points", local_points.size());
-        }
+        auto ori_points = downsampled->positions_matrix();
+        MapTraits<LocalMap>::Update(*local_map_, ori_points, world_T_lidar, state_p);
+        spdlog::info("local map add {} points", ori_points.cols());
+
         frame_index_.fetch_add(1, std::memory_order_relaxed);
     }
 }

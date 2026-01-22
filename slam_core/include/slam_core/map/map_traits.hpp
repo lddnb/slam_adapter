@@ -57,7 +57,7 @@ struct MapTraits<VDBMap>
      * @param unused 未使用的平移参数
      * @return 无
      */
-    static void Update(VDBMap& map, const std::vector<Eigen::Vector3f>& points, const Eigen::Isometry3d& pose, const Eigen::Vector3d&)
+    static void Update(VDBMap& map, const Eigen::Ref<const Eigen::Matrix3Xf>& points, const Eigen::Isometry3d& pose, const Eigen::Vector3d&)
     {
         map.Update(points, pose);
     }
@@ -109,11 +109,12 @@ struct MapTraits<VoxelHashMap>
      * @param state_p 当前位姿平移（世界系），用于裁剪
      * @return 无
      */
-    static void Update(VoxelHashMap& map, const std::vector<Eigen::Vector3f>& points, const Eigen::Isometry3d& pose, const Eigen::Vector3d& state_p)
+    static void Update(VoxelHashMap& map, const Eigen::Ref<const Eigen::Matrix3Xf>& points, const Eigen::Isometry3d& pose, const Eigen::Vector3d& state_p)
     {
-        const Eigen::Isometry3f world_T_lidar = pose.cast<float>();
-        for (const auto& p : points) {
-            map.AddPoint(world_T_lidar * p);
+        const Eigen::Isometry3f pose_f = pose.cast<float>();
+        for (size_t i = 0; i < points.cols(); ++i) {
+            const Eigen::Vector3f p = pose_f * points.col(i);
+            map.AddPoint(p);
         }
         map.RemoveDistantVoxels(state_p);
     }
@@ -159,15 +160,9 @@ struct MapTraits<thuni::Octree>
      * @param unused 未使用的平移参数
      * @return 无
      */
-    static void Update(thuni::Octree& map, const std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>& points, const Eigen::Isometry3d& pose, const Eigen::Vector3d&)
+    static void Update(thuni::Octree& map, const Eigen::Ref<const Eigen::Matrix3Xf>& points, const Eigen::Isometry3d& pose, const Eigen::Vector3d&)
     {
-        const Eigen::Isometry3f world_T_lidar = pose.cast<float>();
-        std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> points_world;
-        points_world.reserve(points.size());
-        for (const auto& p : points) {
-            points_world.emplace_back(world_T_lidar * p);
-        }
-        map.update(points_world);
+        map.update(points, pose);
     }
 };
 

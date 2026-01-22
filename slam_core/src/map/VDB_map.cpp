@@ -114,19 +114,22 @@ bool VDBMap::GetKNearestNeighbors(
     return true;
 }
 
-void VDBMap::AddPoints(const std::vector<Eigen::Vector3f>& points)
+void VDBMap::AddPoints(const Eigen::Ref<const Eigen::Matrix3Xf>& points, const Eigen::Isometry3d& pose)
 {
-    std::for_each(points.cbegin(), points.cend(), [&](const Eigen::Vector3f& p) {
+    const Eigen::Isometry3f pose_f = pose.cast<float>();
+    for(size_t i = 0; i < points.cols(); ++i)
+    {
+        const Eigen::Vector3f p = pose_f * points.col(i);
         const auto voxel_coordinates = map_.posToCoord(p);
         VoxelBlock* voxel_points = accessor_.value(voxel_coordinates, /*create_if_missing=*/true);
         if (voxel_points->size() == max_points_per_voxel_ || std::any_of(voxel_points->cbegin(), voxel_points->cend(), [&](const auto& voxel_point) {
                 return (voxel_point - p).norm() < map_resolution_;
             })) {
-            return;
+            continue;
         }
         voxel_points->reserve(max_points_per_voxel_);
         voxel_points->emplace_back(p);
-    });
+    }
 }
 
 void VDBMap::RemovePointsFarFromLocation(const Eigen::Vector3d& origin)
@@ -154,12 +157,10 @@ void VDBMap::RemovePointsFarFromLocation(const Eigen::Vector3d& origin)
     }
 }
 
-void VDBMap::Update(const std::vector<Eigen::Vector3f>& points, const Eigen::Isometry3d& pose)
+void VDBMap::Update(const Eigen::Ref<const Eigen::Matrix3Xf>& points, const Eigen::Isometry3d& pose)
 {
-    std::vector<Eigen::Vector3f> points_transformed(points.size());
-    std::transform(points.cbegin(), points.cend(), points_transformed.begin(), [&](const auto& point) { return pose.cast<float>() * point; });
     const Eigen::Vector3d& origin = pose.translation();
-    AddPoints(points_transformed);
+    AddPoints(points, pose);
     RemovePointsFarFromLocation(origin);
 }
 

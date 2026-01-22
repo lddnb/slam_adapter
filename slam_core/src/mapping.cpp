@@ -305,12 +305,13 @@ void Mapping::VisRerun()
     // 将点云从 LiDAR 系变换到世界系：world_T_lidar = world_T_imu * imu_T_lidar
     const Eigen::Isometry3d world_T_lidar = odom_res.state.isometry3d() * estimator_->T_i_l();
 
-    const auto lidar_points = odom_res.cloud->positions_vec3();
+    const auto lidar_points = odom_res.cloud->positions_matrix();
     std::vector<rerun::Position3D> world_points;
     world_points.reserve(lidar_points.size());
 
     // 将每个点从 LiDAR 坐标系变换到世界坐标系后记录到 Rerun
-    for (const auto& p_lidar : lidar_points) {
+    for (size_t i = 0; i < lidar_points.cols(); ++i) {
+        const Eigen::Vector3f p_lidar = lidar_points.col(i);
         const Eigen::Vector3d p_world = world_T_lidar * p_lidar.cast<double>();
         world_points.emplace_back(static_cast<float>(p_world.x()), static_cast<float>(p_world.y()), static_cast<float>(p_world.z()));
     }

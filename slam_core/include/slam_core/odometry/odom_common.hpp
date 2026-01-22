@@ -299,10 +299,10 @@ typename PointCloud<Descriptor>::Ptr ApplyLidarFilters(const typename PointCloud
     std::vector<std::size_t> kept_indices(point_count);
     std::atomic_size_t kept_count{0};
 
+    const auto positions = cloud->positions_matrix();
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](std::size_t idx) {
         bool pass = true;
-        const auto position = cloud->position(idx);
-        Eigen::Vector3f lidar_point = position.template cast<float>();
+        Eigen::Vector3f lidar_point = positions.col(idx);
 
         if (distance_enabled) {
             const float norm_sq = lidar_point.squaredNorm();
@@ -446,6 +446,7 @@ inline PointCloudType::Ptr DeskewPointCloud(const PointCloudType::ConstPtr& clou
     std::iota(indices.begin(), indices.end(), 0);
     const Eigen::Isometry3f T_ref = (ref_pose * T_i_l).cast<float>();
 
+    const auto positions = cloud->positions_matrix();
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](std::size_t idx) {
         const double point_time = cloud->timestamp(idx);
         const auto pose_opt = pose_query(point_time);
@@ -454,7 +455,7 @@ inline PointCloudType::Ptr DeskewPointCloud(const PointCloudType::ConstPtr& clou
             return;
         }
         const Eigen::Isometry3f T_point = (pose_opt.value() * T_i_l).cast<float>();
-        Eigen::Vector3f p = cloud->position(idx);
+        Eigen::Vector3f p = positions.col(idx);
         p = T_ref.inverse() * T_point * p;
         deskewed_cloud->position(idx) = p;
     });
