@@ -25,6 +25,7 @@ find_package(OpenCV REQUIRED)
 find_package(manif REQUIRED)
 find_package(easy_profiler REQUIRED)
 find_package(tsl-robin-map REQUIRED)
+find_package(unordered_dense CONFIG REQUIRED)
 
 # ============================================================================
 # SLAM Core Library (Header-only for now)
@@ -56,6 +57,7 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
     tbb
     easy_profiler
     tsl::robin_map
+    unordered_dense::unordered_dense
 )
 target_compile_definitions(${PROJECT_NAME} PUBLIC BUILD_WITH_EASY_PROFILER)
 if(USE_PCL)

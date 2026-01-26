@@ -79,9 +79,10 @@ int main()
 
     LogConfig();
     const double blind_dist = config_inst.common_params.blind;
+    const int filter_num = config_inst.common_params.point_filter_num;
     const bool use_img = config_inst.common_params.render_en;
 
-    auto mapper = std::make_shared<Mapping>();
+    auto mapper = std::make_shared<Mapping>();  // OdomType::kFilterOctVox
 
     IoxPublisher<OdomData> odom_pub(node, "/odom_state");
     IoxPublisher<OdomData> local_pub(node, "/local_state");
@@ -94,10 +95,10 @@ int main()
     auto pc_subscriber = std::make_shared<ms_slam::slam_common::IoxSubscriber<ms_slam::slam_common::LivoxPointCloudDate>>(
         node,
         config_inst.common_params.lid_topic,
-        [&mapper, blind_dist](const ms_slam::slam_common::LivoxPointCloudDate& frame) {
+        [&mapper, blind_dist, filter_num](const ms_slam::slam_common::LivoxPointCloudDate& frame) {
             EASY_BLOCK("pc_cb", profiler::colors::Green);
             auto cloud = std::make_shared<PointCloud<PointXYZITDescriptor>>();
-            if (!ConvertLivoxPointCloudDate(frame, cloud, blind_dist)) {
+            if (!ConvertLivoxPointCloudDate(frame, cloud, blind_dist, filter_num)) {
                 spdlog::warn("Failed to convert Mid360 frame to point cloud");
                 return;
             }

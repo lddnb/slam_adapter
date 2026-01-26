@@ -27,8 +27,9 @@ namespace ms_slam::slam_core
 enum class OdomType
 {
     kFilterVdb = 0,
-    kFilterVoxelHash = 1,
-    kFilterOctree = 2
+    kFilterOctVox = 1,
+    kFilterVoxelHash = 2,
+    kFilterOctree = 3
 };
 
 /**

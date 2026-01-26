@@ -17,6 +17,8 @@
 
 #include <Eigen/Dense>
 #include <spdlog/spdlog.h>
+#include <tsl/robin_map.h>
+#include <ankerl/unordered_dense.h>
 
 #include "slam_core/sensor/image.hpp"
 #include "slam_core/sensor/imu.hpp"
@@ -99,19 +101,6 @@ inline std::span<Eigen::Vector3f> MakeVec3Span(std::span<float> data)
     }
     return {reinterpret_cast<Eigen::Vector3f*>(data.data()), data.size() / 3};
 }
-
-/**
- * @brief 点云滤波器参数集合
- */
-struct LidarFilterOptions
-{
-    bool distance_active{false};
-    double min_distance{0.0};
-    bool rate_active{false};
-    std::size_t sampling_stride{1};
-    bool fov_active{false};
-    double half_angle_rad{3.141592653589793};
-};
 
 inline Eigen::Array3i FastFloor(const Eigen::Array3f& pt)
 {
@@ -272,72 +261,6 @@ void write_voxel_average(PointCloud<Descriptor>& cloud, std::size_t index, const
 }  // namespace detail
 
 template<typename Descriptor>
-typename PointCloud<Descriptor>::Ptr ApplyLidarFilters(const typename PointCloud<Descriptor>::ConstPtr& cloud, const LidarFilterOptions& options)
-{
-    using Cloud = PointCloud<Descriptor>;
-    if (!cloud) {
-        spdlog::error("ApplyLidarFilters received null cloud pointer.");
-        return std::make_shared<Cloud>();
-    }
-    if (cloud->empty()) {
-        return std::make_shared<Cloud>();
-    }
-
-    const bool distance_enabled = options.distance_active && options.min_distance > 0.0;
-    const float min_distance_sq = distance_enabled ? static_cast<float>(options.min_distance * options.min_distance) : 0.0F;
-
-    const std::size_t stride = options.sampling_stride == 0 ? 1 : options.sampling_stride;
-    const bool rate_enabled = options.rate_active && stride > 1;
-
-    const bool fov_enabled = options.fov_active && options.half_angle_rad > 0.0;
-    const float half_angle = static_cast<float>(options.half_angle_rad);
-
-    const std::size_t point_count = cloud->size();
-    std::vector<std::size_t> indices(point_count);
-    std::iota(indices.begin(), indices.end(), 0);
-
-    std::vector<std::size_t> kept_indices(point_count);
-    std::atomic_size_t kept_count{0};
-
-    const auto positions = cloud->positions_matrix();
-    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](std::size_t idx) {
-        bool pass = true;
-        Eigen::Vector3f lidar_point = positions.col(idx);
-
-        if (distance_enabled) {
-            const float norm_sq = lidar_point.squaredNorm();
-            if (norm_sq <= min_distance_sq) {
-                pass = false;
-            }
-        }
-        if (pass && rate_enabled) {
-            if (idx % stride != 0) {
-                pass = false;
-            }
-        }
-        if (pass && fov_enabled) {
-            const float azimuth = std::atan2(lidar_point.y(), lidar_point.x());
-            if (std::fabs(azimuth) >= half_angle) {
-                pass = false;
-            }
-        }
-        if (pass) {
-            const std::size_t slot = kept_count.fetch_add(1, std::memory_order_relaxed);
-            kept_indices[slot] = idx;
-        }
-    });
-
-    const std::size_t valid_count = kept_count.load(std::memory_order_relaxed);
-    if (valid_count == 0) {
-        return std::make_shared<Cloud>();
-    }
-    kept_indices.resize(valid_count);
-
-    auto filtered = std::make_shared<Cloud>(cloud->extract(kept_indices));
-    return filtered;
-}
-
-template<typename Descriptor>
 typename PointCloud<Descriptor>::Ptr VoxelGridSamplingPstl(const typename PointCloud<Descriptor>::ConstPtr& points, double leaf_size)
 {
     using Cloud = PointCloud<Descriptor>;
@@ -425,6 +348,159 @@ typename PointCloud<Descriptor>::Ptr VoxelGridSamplingPstl(const typename PointC
     }
 
     return downsampled;
+}
+
+/**
+ * @brief 体素近似降采样：每个体素保留“距离体素中心最近”的原始点
+ * @tparam Descriptor 点云字段描述符类型
+ * @param points 输入点云（只读）
+ * @param leaf_size 体素边长（单位：米），需大于 0
+ * @return 降采样后的点云（保留原始点属性）
+ * @note 该函数仅面向单帧点云降采样：采用哈希表记录每个体素当前最优点，并在遍历时在线更新。
+ *       相比“每体素取第一个点”，该策略对输入顺序不敏感，通常更稳定；同时避免 `round()`、固定 offset 与位宽不足导致的 key 冲突问题。
+ */
+template<typename Descriptor>
+typename PointCloud<Descriptor>::Ptr ClosestPointSampling(const typename PointCloud<Descriptor>::ConstPtr& points, double leaf_size)
+{
+    using Cloud = PointCloud<Descriptor>;
+    if (!points || points->empty()) {
+        return std::make_shared<Cloud>();
+    }
+    if (leaf_size <= 0.0) {
+        spdlog::warn("ClosestPointSampling received non-positive leaf_size: {}", leaf_size);
+        return points->clone();
+    }
+
+    const float leaf = static_cast<float>(leaf_size);
+    const float inv_leaf_size = 1.0f / leaf;
+
+    // 使用与 VoxelGridSamplingPstl 一致的 21-bit 体素编码，避免位宽不足导致 key 冲突。
+    constexpr int coord_bit_size = 21;
+    constexpr std::size_t coord_bit_mask = (1 << 21) - 1;
+    constexpr int coord_offset = 1 << (coord_bit_size - 1);
+
+    ankerl::unordered_dense::map<std::uint64_t, std::size_t> voxel_to_slot;
+    voxel_to_slot.reserve(points->size());
+
+    std::vector<std::size_t> kept_indices;
+    std::vector<float> best_dist2;
+    kept_indices.reserve(points->size());
+    best_dist2.reserve(points->size());
+
+    std::size_t invalid_key_count = 0;
+
+    const auto positions = points->positions_matrix();
+    const std::size_t point_count = points->size();
+    for (std::size_t idx = 0; idx < point_count; ++idx) {
+        const Eigen::Vector3f p = positions.col(static_cast<Eigen::Index>(idx));
+
+        // 体素坐标（使用 FastFloor 与 VoxelGridSamplingPstl 保持一致）
+        const Eigen::Array3i coord = FastFloor(p.array() * inv_leaf_size) + coord_offset;
+        if ((coord < 0).any() || (coord > static_cast<int>(coord_bit_mask)).any()) {
+            ++invalid_key_count;
+            continue;
+        }
+
+        const std::uint64_t key = (static_cast<std::uint64_t>(coord[0] & static_cast<int>(coord_bit_mask)) << (coord_bit_size * 0)) |
+                                  (static_cast<std::uint64_t>(coord[1] & static_cast<int>(coord_bit_mask)) << (coord_bit_size * 1)) |
+                                  (static_cast<std::uint64_t>(coord[2] & static_cast<int>(coord_bit_mask)) << (coord_bit_size * 2));
+
+        // 计算体素中心并评估点到中心的距离（中心 = (i + 0.5) * leaf）
+        const Eigen::Array3f p_norm = p.array() * inv_leaf_size;
+        const Eigen::Array3f diff = p_norm - (coord - coord_offset).cast<float>() - 0.5f;
+        const float d2 = diff.matrix().squaredNorm();
+
+        const auto [it, inserted] = voxel_to_slot.emplace(key, kept_indices.size());
+        if (inserted) {
+            kept_indices.emplace_back(idx);
+            best_dist2.emplace_back(d2);
+        } else {
+            const std::size_t slot = it->second;
+            if (d2 < best_dist2[slot]) {
+                kept_indices[slot] = idx;
+                best_dist2[slot] = d2;
+            }
+        }
+    }
+
+    if (invalid_key_count != 0U) {
+        spdlog::warn("ClosestPointSampling dropped {} points due to voxel coord out of range", invalid_key_count);
+    }
+
+    if (kept_indices.empty()) {
+        return std::make_shared<Cloud>();
+    }
+
+    // 将输出按原始索引排序，避免下游建图模块对插入顺序敏感导致的结果波动
+    std::sort(kept_indices.begin(), kept_indices.end());
+
+    return points->extract_ptr(kept_indices);
+}
+
+/**
+ * @brief 体素近似降采样：每个体素仅保留输入序列中的第一个点
+ * @tparam Descriptor 点云字段描述符类型
+ * @param points 输入点云（只读）
+ * @param leaf_size 体素边长（单位：米），需大于 0
+ * @return 降采样后的点云
+ */
+template<typename Descriptor>
+typename PointCloud<Descriptor>::Ptr FirstPointSampling(const typename PointCloud<Descriptor>::ConstPtr& points, double leaf_size)
+{
+    using Cloud = PointCloud<Descriptor>;
+    if (!points || points->empty()) {
+        return std::make_shared<Cloud>();
+    }
+    if (leaf_size <= 0.0) {
+        return points->clone();
+    }
+
+    const float inv_leaf_size = 1.0f / static_cast<float>(leaf_size);
+
+    constexpr int coord_bit_size = 21;
+    constexpr std::size_t coord_bit_mask = (1 << 21) - 1;
+    constexpr int coord_offset = 1 << (coord_bit_size - 1);
+
+    // 复用哈希表容量以减少每帧分配开销（每线程独立，避免并发数据竞争）
+    ankerl::unordered_dense::map<std::uint64_t, std::size_t> grid;
+    grid.reserve(points->size());
+
+    std::vector<std::size_t> kept_indices;
+    kept_indices.reserve(points->size());
+
+    std::size_t invalid_key_count = 0;
+
+    const auto positions_mat = points->positions_matrix();
+    const std::size_t point_count = points->size();
+    for (std::size_t idx = 0; idx < point_count; ++idx) {
+        const Eigen::Vector3f pt_eig = positions_mat.col(idx);
+
+        // 使用 FastFloor 与 VoxelGridSamplingPstl 的体素划分方式保持一致
+        const Eigen::Array3i coord = FastFloor(pt_eig.array() * inv_leaf_size) + coord_offset;
+        if ((coord < 0).any() || (coord > static_cast<int>(coord_bit_mask)).any()) {
+            ++invalid_key_count;
+            continue;
+        }
+
+        const std::uint64_t key = (static_cast<std::uint64_t>(coord[0] & static_cast<int>(coord_bit_mask)) << (coord_bit_size * 0)) |
+                                  (static_cast<std::uint64_t>(coord[1] & static_cast<int>(coord_bit_mask)) << (coord_bit_size * 1)) |
+                                  (static_cast<std::uint64_t>(coord[2] & static_cast<int>(coord_bit_mask)) << (coord_bit_size * 2));
+
+        // 每个体素仅保留首次出现的点（按输入顺序）
+        const auto [it, inserted] = grid.emplace(key, idx);
+        if (inserted) {
+            kept_indices.emplace_back(idx);
+        }
+    }
+
+    if (invalid_key_count != 0U) {
+        spdlog::warn("FirstPointSampling dropped {} points due to voxel coord out of range", invalid_key_count);
+    }
+
+    if (kept_indices.empty()) {
+        return std::make_shared<Cloud>();
+    }
+    return points->extract_ptr(kept_indices);
 }
 
 /**

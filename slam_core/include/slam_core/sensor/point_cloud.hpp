@@ -425,6 +425,76 @@ class PointCloud
         return std::span<const scalar_type>(pos.data(), size_ * position_dimensions);
     }
 
+    /**
+     * @brief 按给定索引序列返回位置字段的 Lazy View（零拷贝）
+     * @tparam IndexRange 索引序列类型（viewable_range）
+     * @param indices 索引序列（每个元素对应一个点的序号）
+     * @return Lazy view：每次解引用返回长度为 3 的 std::span<scalar_type>
+     *
+     * @note
+     * - 该接口采用 ranges 的 lazy transform：不拷贝点坐标，仅按索引在底层 packed position 上做指针偏移。
+     * - 索引合法性在遍历时检查：若出现负值或越界将抛出 std::out_of_range。
+     * - 视图生命周期内不得触发点云 position 存储重分配（如 push_back/reserve/resize），否则视图失效。
+     * - !!! 这种方式返回视图的内存是不连续的，效率不如连续遍历，适用于临时生成一个点云，避免深拷贝构建中间点云副本的场景 !!!
+     */
+    template <std::ranges::viewable_range IndexRange>
+        requires(std::integral<std::ranges::range_value_t<std::decay_t<IndexRange>>> &&
+                 std::convertible_to<std::ranges::range_value_t<std::decay_t<IndexRange>>, std::size_t>)
+    [[nodiscard]] auto positions_view_by_indices(IndexRange&& indices)
+    {
+        auto idx_view = std::views::all(std::forward<IndexRange>(indices));
+
+        auto& pos = storage_by_tag<PositionTag>();
+        scalar_type* base = pos.data();
+        const std::size_t count = size_;
+
+        return idx_view | std::views::transform([base, count](auto raw) -> std::span<scalar_type> {
+                   using RawT = std::remove_cvref_t<decltype(raw)>;
+                   if constexpr (std::signed_integral<RawT>) {
+                       if (raw < 0) {
+                           throw std::out_of_range("PointCloud::positions_view_by_indices - index out of range");
+                       }
+                   }
+                   const std::size_t idx = static_cast<std::size_t>(raw);
+                   if (idx >= count) {
+                       throw std::out_of_range("PointCloud::positions_view_by_indices - index out of range");
+                   }
+                   return std::span<scalar_type>(base + idx * position_dimensions, position_dimensions);
+               });
+    }
+
+    /**
+     * @brief 按给定索引序列返回位置字段的 Lazy View（只读，零拷贝）
+     * @tparam IndexRange 索引序列类型（viewable_range）
+     * @param indices 索引序列（每个元素对应一个点的序号）
+     * @return Lazy view：每次解引用返回长度为 3 的 std::span<const scalar_type>
+     */
+    template <std::ranges::viewable_range IndexRange>
+        requires(std::integral<std::ranges::range_value_t<std::decay_t<IndexRange>>> &&
+                 std::convertible_to<std::ranges::range_value_t<std::decay_t<IndexRange>>, std::size_t>)
+    [[nodiscard]] auto positions_view_by_indices(IndexRange&& indices) const
+    {
+        auto idx_view = std::views::all(std::forward<IndexRange>(indices));
+
+        const auto& pos = storage_by_tag<PositionTag>();
+        const scalar_type* base = pos.data();
+        const std::size_t count = size_;
+
+        return idx_view | std::views::transform([base, count](auto raw) -> std::span<const scalar_type> {
+                   using RawT = std::remove_cvref_t<decltype(raw)>;
+                   if constexpr (std::signed_integral<RawT>) {
+                       if (raw < 0) {
+                           throw std::out_of_range("PointCloud::positions_view_by_indices - index out of range");
+                       }
+                   }
+                   const std::size_t idx = static_cast<std::size_t>(raw);
+                   if (idx >= count) {
+                       throw std::out_of_range("PointCloud::positions_view_by_indices - index out of range");
+                   }
+                   return std::span<const scalar_type>(base + idx * position_dimensions, position_dimensions);
+               });
+    }
+
     [[nodiscard]] auto positions_matrix() noexcept { return field_matrix<PositionTag>(); }
 
     [[nodiscard]] auto positions_matrix() const noexcept { return field_matrix<PositionTag>(); }

@@ -147,6 +147,14 @@ RUN cd /tmp && git clone https://github.com/Tessil/robin-map.git && \
     cmake .. -DCMAKE_BUILD_TYPE=Release && \
     make install
 
+# unordered_dense
+RUN cd /tmp && git clone https://github.com/martinus/unordered_dense.git && \
+    cd unordered_dense && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make install
+
 # rerun-cpp
 RUN cd /tmp && wget https://github.com/rerun-io/rerun/releases/latest/download/rerun_cpp_sdk.zip && \
     unzip rerun_cpp_sdk.zip && \

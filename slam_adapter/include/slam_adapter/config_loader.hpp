@@ -221,6 +221,7 @@ inline void FillMappingParams(const YAML::Node& node, slam_core::MappingParams& 
         return;
     }
 
+    AssignIfPresent(node, "rms_lambda", mapping.rms_lambda);
     AssignIfPresent(node, "down_size", mapping.down_size);
     AssignIfPresent(node, "gravity_align", mapping.gravity_align);
     AssignIfPresent(node, "check_satu", mapping.check_satu);
@@ -341,6 +342,7 @@ inline void LogConfig()
     spdlog::info("[Config] Common.log_level: {}", common.log_level);
 
     const auto& mapping = config.mapping_params;
+    spdlog::info("[Config] Mapping.rms_lambda: {}", mapping.rms_lambda);
     spdlog::info("[Config] Mapping.down_size: {}", mapping.down_size);
     spdlog::info("[Config] Mapping.gravity_align: {}", mapping.gravity_align);
     spdlog::info("[Config] Mapping.check_satu: {}", mapping.check_satu);

@@ -213,6 +213,7 @@ class OdomBaseImpl : public OdomBase
 
     PointCloudType::Ptr deskewed_cloud_;    ///< 去畸变点云
     PointCloudType::Ptr downsampled_cloud_; ///< 下采样点云
+    PointCloudType::Ptr rms_cloud_;         ///< RMS 采样点云
 
     std::vector<PointCloudType::Ptr> map_cloud_buffer_; ///< 可视化缓存
 
@@ -235,6 +236,7 @@ OdomBaseImpl<LocalMap>::OdomBaseImpl()
 {
     deskewed_cloud_ = std::make_shared<PointCloudType>();
     downsampled_cloud_ = std::make_shared<PointCloudType>();
+    rms_cloud_ = std::make_shared<PointCloudType>();
 }
 
 template<typename LocalMap>

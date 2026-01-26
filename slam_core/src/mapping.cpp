@@ -24,6 +24,9 @@ namespace ms_slam::slam_core
 std::unique_ptr<OdomBase> CreateOdomEstimator(OdomType type)
 {
     switch (type) {
+        case OdomType::kFilterOctVox:
+            spdlog::info("Creating FilterOdom with OctVoxMap");
+            return std::make_unique<FilterOdom<OctVoxMapType>>();
         case OdomType::kFilterVoxelHash:
             spdlog::info("Creating FilterOdom with VoxelHashMap");
             return std::make_unique<FilterOdom<VoxelHashMap>>();

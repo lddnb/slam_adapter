@@ -53,12 +53,14 @@ inline double g_last_tail_timestamp = -std::numeric_limits<double>::infinity();
  * @param frame 输入的 Livox 点云帧
  * @param cloud 目标点云容器
  * @param blind_dist 盲区半径（米）
+ * @param filter_num 采样滤波因子（保留每第 N 个点）
  * @return 转换成功返回 true
  */
 inline bool ConvertLivoxPointCloudDate(
     const slam_common::LivoxPointCloudDate& frame,
     const std::shared_ptr<slam_core::PointCloud<slam_core::PointXYZITDescriptor>>& cloud,
-    double blind_dist = 0.5)
+    double blind_dist = 0.5,
+    int filter_num = 1)
 {
     if (!cloud) {
         spdlog::warn("ConvertLivoxPointCloudMessage: cloud pointer is null");
@@ -84,7 +86,7 @@ inline bool ConvertLivoxPointCloudDate(
         const double timestamp = ToSeconds(p.timestamp_ns);
 
         // 过滤掉盲区点及时间戳回退的点，确保下一帧的点时间始终大于上一帧尾部
-        if (!std::isfinite(norm_sq) || norm_sq < blind_sq || timestamp <= prev_tail) {
+        if (i % filter_num != 0 || !std::isfinite(norm_sq) || norm_sq < blind_sq || timestamp <= prev_tail) {
             continue;
         }
 

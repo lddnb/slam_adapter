@@ -11,6 +11,7 @@
 #include "slam_core/map/VDB_map.hpp"
 #include "slam_core/map/Octree.hpp"
 #include "slam_core/map/hash_map.hpp"
+#include "slam_core/map/OctVoxMap.hpp"
 
 namespace ms_slam::slam_core
 {
@@ -68,6 +69,37 @@ struct MapTraits<VDBMap>
     }
 };
 
+template<>
+struct MapTraits<OctVoxMapType>
+{
+    static std::unique_ptr<OctVoxMapType> Create(const LocalMapParams& params)
+    {
+        return std::make_unique<OctVoxMapType>(
+            OctVoxMapType::Options(params.voxel_size, 1000000));
+    }
+
+    static void Knn(OctVoxMapType& map, const Eigen::Vector3f& point, int k, std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>& neighbors, std::vector<float>& sq_dist)
+    {
+        OctVoxMapType::KNNHeapType top_K;
+        map.getTopK(point, top_K);
+        neighbors.clear();
+        sq_dist.clear();
+        for (int i = 0; i < top_K.count; ++i) {
+            neighbors.emplace_back(top_K.points_[i]);
+            sq_dist.emplace_back(top_K.dist2_[i]);
+        }
+    }
+
+    static void Update(OctVoxMapType& map, const Eigen::Ref<const Eigen::Matrix3Xf>& points, const Eigen::Isometry3d& pose, const Eigen::Vector3d&)
+    {
+        std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>> pts_world;
+        pts_world.reserve(points.cols());
+        for (size_t i = 0; i < points.cols(); ++i) {
+            pts_world.emplace_back((pose.cast<float>() * points.col(i)));
+        }
+        map.insert(pts_world);
+    }
+};
 template<>
 struct MapTraits<VoxelHashMap>
 {

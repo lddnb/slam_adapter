@@ -32,6 +32,12 @@ FilterOdom<LocalMap>::FilterOdom()
     OdomBaseImpl<LocalMap>::InitializeFromConfig(cfg_);
     state_ = StateType();
     state_.AddHModel("lidar", std::bind(&FilterOdom<LocalMap>::ObsModel, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+    if (cfg_.mapping_params.rms_lambda > 0.0) {
+        rms_sampler_ = std::make_unique<RMS>(10, cfg_.mapping_params.rms_lambda, cfg_.mapping_params.down_size);
+    } else {
+        rms_sampler_ = nullptr;
+    }
+    
     spdlog::info("FilterOdom constructed");
 }
 
@@ -79,12 +85,31 @@ void FilterOdom<LocalMap>::ProcessSyncData(const SyncData& sync_data)
 
     this->deskewed_cloud_ = Deskew(sync_data.lidar_data);
 
-    EASY_BLOCK("Filter", profiler::colors::Pink400);
-    LidarFilterOptions options{.rate_active = true, .sampling_stride = static_cast<std::size_t>(cfg_.common_params.point_filter_num)};
-    this->deskewed_cloud_ = ApplyLidarFilters<PointType>(this->deskewed_cloud_, options);
-    this->downsampled_cloud_ = VoxelGridSamplingPstl<PointType>(this->deskewed_cloud_, cfg_.mapping_params.down_size);
+    // EASY_BLOCK("Filter", profiler::colors::Pink400);
+    // this->downsampled_cloud_ = VoxelGridSamplingPstl<PointType>(this->deskewed_cloud_, cfg_.mapping_params.down_size);
+    // EASY_END_BLOCK;
+
+    // EASY_BLOCK("FPS Filter", profiler::colors::Lime700);
+    // this->downsampled_cloud_ = FirstPointSampling<PointType>(this->deskewed_cloud_, cfg_.mapping_params.down_size);
+    // EASY_END_BLOCK;
+
+    EASY_BLOCK("CPS Filter", profiler::colors::Red50);
+    this->downsampled_cloud_ = ClosestPointSampling<PointType>(this->deskewed_cloud_, cfg_.mapping_params.down_size);
     EASY_END_BLOCK;
-    spdlog::info("[Lidar] downsize {}", this->downsampled_cloud_->size());
+
+    EASY_BLOCK("RMS", profiler::colors::Green400);
+    if (rms_sampler_) {
+        this->rms_cloud_ = rms_sampler_->sample(this->downsampled_cloud_);
+    } else {
+        this->rms_cloud_ = this->downsampled_cloud_;
+    }
+    EASY_END_BLOCK;
+
+    spdlog::info(
+        "[Lidar] point cloud size: origin {} --> downsize {} --> rms {}",
+        this->deskewed_cloud_->size(),
+        this->downsampled_cloud_->size(),
+        this->rms_cloud_->size());
 
     UpdateWithModel();
     UpdateLocalMap();
@@ -331,11 +356,11 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
     H.resize(0, FilterState::DoFObs);
     z.resize(0, 1);
     noise_inv.resize(0);
-    if (this->frame_index_ == 0 || !this->downsampled_cloud_) return;
+    if (this->frame_index_ == 0 || !this->rms_cloud_) return;
 
     Matches obs_matches;
 
-    int N = this->downsampled_cloud_->size();
+    int N = this->rms_cloud_->size();
     //! 警惕vector<bool>并行写入竞争
     std::vector<std::uint8_t> chosen(N, 0);
     Matches matches(N);
@@ -380,7 +405,7 @@ void FilterOdom<LocalMap>::ObsModel(StateType::ObsH& H, StateType::ObsZ& z, Stat
 #endif
 
     EASY_BLOCK("matching", profiler::colors::BlueGrey500);
-    const auto positions = this->downsampled_cloud_->positions_matrix();
+    const auto positions = this->rms_cloud_->positions_matrix();
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
         const Eigen::Vector3d p = positions.col(i).template cast<double>();
         const Eigen::Vector3d g = state_.isometry3d() * this->T_i_l_ * p;
@@ -585,6 +610,7 @@ void FilterOdom<LocalMap>::UpdateLocalMap()
 }
 
 template class FilterOdom<VDBMap>;
+template class FilterOdom<OctVoxMapType>;
 template class FilterOdom<VoxelHashMap>;
 template class FilterOdom<thuni::Octree>;
 }  // namespace ms_slam::slam_core

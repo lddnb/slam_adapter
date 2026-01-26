@@ -28,6 +28,7 @@ struct MappingParams {
     bool gravity_align, check_satu;
     float satu_acc, satu_gyro, acc_norm;
     float down_size;
+    float rms_lambda;
     float laser_point_cov, gyr_cov, acc_cov, b_acc_cov, b_gyr_cov;
     float plane_thr, fov_deg, DET_RANGE;
     Eigen::Vector3d gravity_init, gravity;

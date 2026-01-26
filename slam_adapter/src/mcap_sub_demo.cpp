@@ -330,12 +330,14 @@ class McapPlaybackRunner
         std::string mcap_path,
         PlaybackOptions options,
         double blind_dist,
+        int filter_num,
         bool use_image,
         std::atomic<bool>& exit_flag)
     : odom_(std::move(odom)),
       mcap_path_(std::move(mcap_path)),
       options_(options),
       blind_dist_(blind_dist),
+      filter_num_(filter_num),
       use_image_(use_image),
       exit_flag_(&exit_flag)
     {
@@ -431,7 +433,7 @@ class McapPlaybackRunner
                         continue;
                     }
                     auto cloud = std::make_shared<PointCloud<PointXYZITDescriptor>>();
-                    if (!ConvertLivoxPointCloudDate(*pc_frame, cloud, blind_dist_)) {
+                    if (!ConvertLivoxPointCloudDate(*pc_frame, cloud, blind_dist_, filter_num_)) {
                         spdlog::warn("Failed to convert LivoxPointCloudDate to slam_core cloud");
                         continue;
                     }
@@ -498,6 +500,7 @@ class McapPlaybackRunner
     std::string mcap_path_;
     PlaybackOptions options_;
     double blind_dist_{0.5};
+    int filter_num_{1};
     bool use_image_{false};
     std::atomic<bool>* exit_flag_{nullptr};
     std::thread worker_;
@@ -551,6 +554,7 @@ int main(int argc, char** argv)
 
     LogConfig();
     const double blind_dist = config_inst.common_params.blind;
+    const int filter_num = config_inst.common_params.point_filter_num;
     const bool use_img = config_inst.common_params.render_en;
 
     YAML::Node root = YAML::LoadFile("../../slam_recorder/config/config.yaml");
@@ -561,7 +565,7 @@ int main(int argc, char** argv)
     playback_options.duration_s = bag_node["time_window"]["duration_seconds"].as<double>();
     const std::string input_path = (argc > 1) ? std::string(argv[1]) : bag_node["input"]["path"].as<std::string>();
 
-    auto mapper = std::make_shared<Mapping>();
+    auto mapper = std::make_shared<Mapping>(); // OdomType::kFilterOctVox
 
     IoxPublisher<OdomData> odom_pub(node, "/odom_state");
     IoxPublisher<OdomData> local_pub(node, "/local_state");
@@ -571,7 +575,7 @@ int main(int argc, char** argv)
     IoxPublisher<LivoxPointCloudDate> local_cloud_pub(node, "/local_pc");
     IoxPublisher<LivoxPointCloudDate> local_map_pub(node, "/local_map");
 
-    McapPlaybackRunner playback_runner(mapper, input_path, playback_options, blind_dist, use_img, shouldExit);
+    McapPlaybackRunner playback_runner(mapper, input_path, playback_options, blind_dist, filter_num, use_img, shouldExit);
     playback_runner.Start();
 
     std::vector<CommonState> odom_states_buffer;
