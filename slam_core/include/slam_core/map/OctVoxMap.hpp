@@ -23,25 +23,28 @@
 namespace ms_slam::slam_core
 {
 
-template<int K, typename Point>
+template<typename Point>
 class KNNHeap {
 public:
-  KNNHeap() : count(0), worst_(0), max_dist2_(0.0f) {
-    memset(dist2_, 0, sizeof(dist2_));
+  KNNHeap(int k) : count(0), worst_(0), max_dist2_(0.0f), K(k) {
+    dist2_.resize(K, 0.0f);
+    points_.resize(K);
   }
 
   void reset() {
     count = 0;
     worst_ = 0;
     max_dist2_ = 0.0f;
-    memset(dist2_, 0, sizeof(dist2_));
+    dist2_.resize(K, 0.0f);
+    points_.resize(K);
   }
 
+  const int K;
   uint8_t count;
   uint8_t worst_;
   float max_dist2_;
-  float dist2_[K];
-  std::array<Point, K> points_;
+  std::vector<float> dist2_;
+  std::vector<Point> points_;
 
   inline void try_insert(float dist2, const Point& pt) {
     const bool not_full = (count < K);
@@ -99,7 +102,7 @@ public:
 
   ~OctVox() {}
 
-  void AddPoint(const Point& pt, uint8_t local_idx) {
+  void AddPoint(const Point& pt, uint8_t local_idx, float distance_threshold_sq) {
     uint8_t& count = counts_[local_idx];
     Point& stored_point = points_[local_idx];
     if(count == UNINIT_MASK) {
@@ -109,7 +112,7 @@ public:
     }
 
     if(count >= MAX_POINTS_PER_SUBVOXEL) return;
-    if ((pt - stored_point).squaredNorm() > DISTANCE_THRESHOLD_SQ) return;
+    if ((pt - stored_point).squaredNorm() > distance_threshold_sq) return;
 
     stored_point = (stored_point * count + pt) / (count + 1);
     ++count;
@@ -123,7 +126,10 @@ public:
 
   static constexpr uint8_t UNINIT_MASK = 0x00;
   static constexpr uint8_t MAX_POINTS_PER_SUBVOXEL = 20;
-  static constexpr double DISTANCE_THRESHOLD_SQ = 0.1 * 0.1;
+  // Distance gate for updating a sub-voxel representative point:
+  // threshold = DISTANCE_THRESHOLD_RATIO * sub_resolution (sub_resolution = resolution / 2).
+  // (0.6 * 0.25m = 0.15m at resolution=0.5m)
+  static constexpr float DISTANCE_THRESHOLD_RATIO = 0.6f;
 
   std::array<uint8_t, 8> counts_;
   std::array<Point, 8> points_;
@@ -137,7 +143,7 @@ public:
   using Ptr = std::shared_ptr<OctVoxMap>;
   using KEY = Eigen::Vector3i;
   using Points = std::vector<Point, Eigen::aligned_allocator<Point>>;
-  using KNNHeapType = KNNHeap<12, Point>;
+  using KNNHeapType = KNNHeap<Point>;
   using OctVoxType = OctVox<Point>;
 
   struct Options {
@@ -185,6 +191,17 @@ public:
     inv_resolution_ = 1.0 / resolution_;
     sub_resolution_ = resolution_ / 2.0;
     sub_inv_resolution_ = 1.0 / sub_resolution_;
+
+    const float scale = resolution_ * 2.0f; 
+    const float scale_sq = scale * scale;
+
+    scaled_orders_min_dis2_.resize(orders_min_dis2.size());
+    for(size_t i = 0; i < orders_min_dis2.size(); ++i) {
+        scaled_orders_min_dis2_[i] = orders_min_dis2[i] * scale_sq;
+    }
+
+    const float distance_threshold = OctVoxType::DISTANCE_THRESHOLD_RATIO * sub_resolution_;
+    distance_threshold_sq_ = distance_threshold * distance_threshold;
   }
 
   void insert(const Points& cloud_world);
@@ -224,6 +241,7 @@ private:
   float inv_resolution_ = 1.0;
   float sub_resolution_ = 0.25;
   float sub_inv_resolution_ = 4.0;
+  float distance_threshold_sq_ = 0.1f * 0.1f;
   std::size_t capacity_ = 1000000;
 
   bool reset_map_ = false;
@@ -259,6 +277,7 @@ private:
   std::vector<uint8_t*> flat_search_ptrs_;
   int group_idx_max_;
 
+  std::vector<float> scaled_orders_min_dis2_;
 };
 
 
@@ -297,7 +316,7 @@ void OctVoxMap<Point, Scalar>::insert(const Points& cloud_world){
         data_.pop_back();
       }
     } else {
-      iter->second->second.AddPoint(pt, local_idx);
+      iter->second->second.AddPoint(pt, local_idx, distance_threshold_sq_);
       data_.splice(data_.begin(), data_, iter->second);
     }
   }
@@ -373,8 +392,8 @@ void OctVoxMap<Point, Scalar>::getTopK(const Point& point, KNNHeapType& top_K) c
       else group_it+=data_size;
     }
 
-    if (top_K.count == 5)
-      if (top_K.max_dist2_ < orders_min_dis2[group_idx]){
+    if (top_K.count == top_K.K)
+      if (top_K.max_dist2_ < scaled_orders_min_dis2_[group_idx]){
         break;
       }
 

@@ -80,7 +80,7 @@ struct MapTraits<OctVoxMapType>
 
     static void Knn(OctVoxMapType& map, const Eigen::Vector3f& point, int k, std::vector<Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f>>& neighbors, std::vector<float>& sq_dist)
     {
-        OctVoxMapType::KNNHeapType top_K;
+        OctVoxMapType::KNNHeapType top_K(k);
         map.getTopK(point, top_K);
         neighbors.clear();
         sq_dist.clear();
